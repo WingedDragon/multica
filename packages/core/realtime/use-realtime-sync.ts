@@ -62,6 +62,7 @@ import type {
   TaskFailedPayload,
   TaskCancelledPayload,
   ChatDonePayload,
+  ChatMessage,
   ChatPendingTask,
   InvitationCreatedPayload,
 } from "../types";
@@ -568,13 +569,48 @@ export function useRealtimeSync(
       chatWsLogger.info("chat:done (global)", {
         task_id: payload.task_id,
         chat_session_id: payload.chat_session_id,
+        has_message: !!payload.message_id,
       });
-      // Assistant message was just written and task flipped out of 'running'.
-      // Clear pending-task cache immediately so the live-timeline-vs-assistant
-      // race window collapses to zero — the subsequent refetch will confirm.
-      qc.setQueryData(chatKeys.pendingTask(payload.chat_session_id), {});
-      qc.invalidateQueries({ queryKey: chatKeys.messages(payload.chat_session_id) });
-      qc.invalidateQueries({ queryKey: chatKeys.pendingTask(payload.chat_session_id) });
+      // Inline-insert the assistant message into the messages cache BEFORE
+      // clearing pending-task. Both writes land in the same React render
+      // tick, so ChatMessageList sees `pendingAlreadyPersisted === true`
+      // and the live TimelineView unmounts only after AssistantMessage has
+      // mounted — no flicker window. This applies TkDodo's "combine
+      // setQueryData (active query) + invalidateQueries (others)" pattern
+      // (https://tkdodo.eu/blog/using-web-sockets-with-react-query).
+      //
+      // Falls back to invalidate-only when the server omits the message
+      // payload (older builds). Older clients hitting a newer server also
+      // work: they ignore the extra fields and rely on the invalidate
+      // below, which keeps the old behavior alive.
+      const sessionId = payload.chat_session_id;
+      const taskId = payload.task_id;
+      if (payload.message_id && payload.content !== undefined) {
+        qc.setQueryData<ChatMessage[] | undefined>(
+          chatKeys.messages(sessionId),
+          (old) => {
+            if (!old) return old; // first fetch will pick it up
+            // Idempotent against reconnect replay.
+            if (old.some((m) => m.id === payload.message_id)) return old;
+            const assistant: ChatMessage = {
+              id: payload.message_id!,
+              chat_session_id: sessionId,
+              role: "assistant",
+              content: payload.content ?? "",
+              task_id: taskId,
+              created_at: payload.created_at ?? new Date().toISOString(),
+              elapsed_ms: payload.elapsed_ms ?? null,
+            };
+            return [...old, assistant];
+          },
+        );
+      }
+      // Replacement is in the messages list now; safe to drop pending.
+      qc.setQueryData(chatKeys.pendingTask(sessionId), {});
+      // Authoritative refetch reconciles redaction / migrations / clients
+      // that took the fallback branch above.
+      qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
+      qc.invalidateQueries({ queryKey: chatKeys.pendingTask(sessionId) });
       invalidatePendingAggregate();
       // Assistant message just landed → has_unread may have flipped to true.
       invalidateSessionLists();
@@ -645,9 +681,12 @@ export function useRealtimeSync(
         task_id: payload.task_id,
         chat_session_id: payload.chat_session_id,
       });
-      qc.setQueryData(chatKeys.pendingTask(payload.chat_session_id), {});
-      qc.invalidateQueries({ queryKey: chatKeys.messages(payload.chat_session_id) });
-      qc.invalidateQueries({ queryKey: chatKeys.pendingTask(payload.chat_session_id) });
+      // `chat:done` (broadcast immediately before this event in CompleteTask)
+      // already wrote the assistant message into the messages cache and
+      // cleared `chatKeys.pendingTask`. This event is now only responsible
+      // for refreshing the per-user cross-session aggregate that drives the
+      // FAB indicator — `chat:done` is per-session and doesn't carry that
+      // information.
       invalidatePendingAggregate();
     });
 

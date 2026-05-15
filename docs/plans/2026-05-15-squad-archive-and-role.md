@@ -4,14 +4,14 @@
 
 **Goal:** Replace native `confirm()` archive flow with shadcn `AlertDialog` showing leader name + issue count, and replace inline `<Input>` `RoleEditor` with a shadcn Combobox (Command + Popover) backed by existing roles in the squad.
 
-**Architecture:** Two parallel tracks. (1) Backend adds an `issue_count` field to `SquadResponse`, sourced from a new `CountIssuesForSquad` sqlc query that counts all issues currently assigned to the squad. The existing `TransferSquadAssignees` (count-all, transfer-all) is unchanged. (2) Frontend extends the `Squad` type + zod schema (defensive parse), replaces `confirm()` with `ArchiveSquadConfirmDialog`, and rewrites `RoleEditor` as a Command-inside-Popover combobox that aggregates `members.map(m => m.role).filter(Boolean)` for suggestions.
+**Architecture:** Two parallel tracks. (1) Backend adds an `issue_count` field to `SquadResponse`, sourced from a new `CountIssuesForSquad` sqlc query that counts all issues currently assigned to the squad. The existing `TransferSquadAssignees` (count-all, transfer-all) is unchanged. `DeleteSquad` is rewritten to run transfer + archive inside a single pgx transaction so the v3 invariant ("after archive no issue points to the squad") is durably enforced rather than best-effort. (2) Frontend extends the `Squad` type + zod schema (defensive parse), replaces `confirm()` with `ArchiveSquadConfirmDialog`, and rewrites `RoleEditor` as a Command-inside-Popover combobox that aggregates `members.map(m => m.role).filter(Boolean)` for suggestions.
 
 **Tech Stack:** Go (chi, sqlc, pgx), TypeScript, React, TanStack Query, shadcn (Base UI primitives), zod, Vitest, Playwright.
 
 **Files in scope:**
 - `server/pkg/db/queries/issue.sql` — new query
-- `server/internal/handler/squad.go` — extend `SquadResponse`, populate `issue_count` in `GetSquad`
-- `server/internal/handler/squad_test.go` (new or extend) — handler test
+- `server/internal/handler/squad.go` — extend `SquadResponse`, populate `issue_count` in `GetSquad`, rewrite `DeleteSquad` to run transfer + archive in one tx
+- `server/internal/handler/squad_test.go` (new or extend) — handler tests (count, transfer-all, transactional rollback)
 - `packages/core/types/squad.ts` — extend `Squad`
 - `packages/core/api/schemas.ts` (and/or `schema.ts` usage in client) — squad zod schema + `parseWithFallback` in `getSquad`
 - `packages/core/api/client.ts:1458` — `getSquad` parses the response
@@ -48,6 +48,8 @@ v1 → v2 → v3 history:
   2. **Reopen invariant break.** `server/internal/handler/issue.go:1453-1496,1563-1570` only re-runs `validateAssigneePair` when the caller touches `assignee_type` or `assignee_id`. A status-only update (the normal "reopen" path — `packages/views/issues/components/issue-detail.tsx:953,959` exposes status and assignee as independent controls) bypasses validation, so a `done`/`cancelled` issue pointing at an archived squad can be reopened to `in_progress` and become an active issue with an archived-squad assignee — directly violating the invariant enforced at `issue.go:1718-1720` ("cannot assign to an archived squad"). Closing this gap under v2 required *one* of: (i) auto-rewrite assignee to leader on reopen, (ii) block reopen until assignee is changed, or (iii) extend `validateAssigneePair` to run on every update. Each option introduces a new special case and a new regression test.
 
 v3 makes both problems disappear by construction: after `ArchiveSquad` runs, **no issue points to this squad anymore**, so name resolution and reopen behave identically to the no-archived-squad world. No new flags, no new endpoints, no new validation paths.
+
+> **Important:** "After `ArchiveSquad` runs, no issue points to the squad" is an invariant on the *whole* `DeleteSquad` handler, not just on the SQL `TransferSquadAssignees` query. Today's handler at `server/internal/handler/squad.go:292-309` runs transfer and archive as two best-effort steps: transfer errors only `slog.Warn` and execution continues into archive, and a transfer that succeeds is not rolled back if the subsequent archive fails. Both failure modes reproduce the v2-era problems (Unknown Squad name, reopen-into-archived-assignee, half-archived squad with active issue pointers). Task 2b makes the handler transactional so the invariant is durable, not best-effort.
 
 **Product trade-off acknowledged.** A closed issue's historical "Assigned to" badge is rewritten from `<squad>` to `<leader-agent>`. The squad row stays in the DB (`archived_at` set, name preserved) — only the *per-issue assignee pointer* moves. This is consistent with existing agent-level reassignment patterns (when an agent leaves a project, their open + closed issues get reassigned with no special history-preservation). The leader is a reasonable proxy for "who inherited responsibility for this squad's work". Dialog copy is honest about this: "{leader} will take over all {N} issues currently assigned to this squad." — count and action operate on identical sets.
 
@@ -288,6 +290,200 @@ Expected: all pass — no regressions.
 ```bash
 git add server/internal/handler/squad.go server/internal/handler/squad_test.go
 git commit -m "feat(squad): include issue_count in GetSquad response"
+```
+
+---
+
+## Task 2b: Backend — make `DeleteSquad` transactional (transfer + archive atomic)
+
+**Files:**
+- Modify: `server/internal/handler/squad.go:276-316` (`DeleteSquad`)
+- Modify: `server/internal/handler/squad_test.go` (add transactional regression test)
+
+**Why this task exists.** Plan-review round 3 flagged that the v3 invariant ("after `ArchiveSquad`, no issue points to this squad") is asserted by the new Task 1 test on the *happy path*, but the current `DeleteSquad` handler does not enforce it under failure. Two concrete failure modes:
+
+1. **Forward partial write:** `TransferSquadAssignees` fails (DB hiccup, ctx cancellation, deadlock with another writer). Current code at `server/internal/handler/squad.go:296-298` only `slog.Warn`s and continues into `ArchiveSquad`. Result: squad is archived (`archived_at` set), but issues still have `assignee_id = <archived squad>`. This reintroduces the exact v2-era bugs (Unknown Squad name in `useActorName`, reopen-into-archived-squad via status-only update) that v3 was designed to prevent.
+2. **Reverse partial write:** `TransferSquadAssignees` succeeds. `ArchiveSquad` then fails (uniqueness on `archived_at`, ctx cancellation, etc.). Current code returns 500 to the caller, but `TransferSquadAssignees` has already committed. Result: active squad with all of its issues reassigned away. UX-wise the user thinks "archive failed, nothing happened" but their squad is silently emptied.
+
+Both reduce to the same fix: run both write queries inside a single pgx transaction. On any error, roll back and return 5xx; only on commit do we publish the `EventSquadDeleted` event and return 204.
+
+**Step 1: Write the failing test (Go integration test)**
+
+Append to `server/internal/handler/squad_test.go`:
+
+```go
+// Lock the v3 invariant under failure: if the transfer step fails for any reason,
+// the squad must NOT be archived. This guards against regressing back to the
+// best-effort behavior where slog.Warn allowed half-completed archives.
+func TestDeleteSquadFailedTransferLeavesSquadActive(t *testing.T) {
+    ts := newTestServer(t)
+    ws, owner := ts.createWorkspace(t)
+    leader := ts.createAgent(t, ws.ID)
+    squad := ts.createSquad(t, ws.ID, owner.UserID, leader.ID)
+    issue := ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "in_progress")
+
+    // Force the transfer step to fail. Simplest realistic trigger:
+    //   - Wrap h.TxStarter / h.Queries so TransferSquadAssignees returns an
+    //     error in this one test, OR
+    //   - Run the request with a cancelled context so the first query errors.
+    // Use whichever the existing test harness already supports (look for
+    // existing tests that exercise tx-rollback paths in handler_test.go /
+    // project_test.go and mirror the pattern).
+    status, _ := ts.deleteSquadExpectingError(t, ws.ID, squad.ID, owner.UserID)
+    require.GreaterOrEqual(t, status, 500, "transfer failure must surface as 5xx")
+
+    // Invariant: squad is NOT archived.
+    fresh := ts.getSquadRaw(t, ws.ID, squad.ID)
+    require.False(t, fresh.ArchivedAt.Valid, "squad must remain active when transfer fails")
+
+    // Invariant: issue assignee is unchanged.
+    got := ts.getIssue(t, issue.ID)
+    require.Equal(t, "squad", got.AssigneeType, "transfer must roll back: assignee_type still 'squad'")
+    require.Equal(t, squad.ID.String(), got.AssigneeID, "transfer must roll back: assignee_id still the squad")
+}
+
+// Symmetric: if archive fails after a successful transfer, the transfer must
+// also roll back. Locks the reverse partial-write scenario.
+func TestDeleteSquadFailedArchiveRollsBackTransfer(t *testing.T) {
+    ts := newTestServer(t)
+    ws, owner := ts.createWorkspace(t)
+    leader := ts.createAgent(t, ws.ID)
+    squad := ts.createSquad(t, ws.ID, owner.UserID, leader.ID)
+    issue := ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "in_progress")
+
+    // Force the archive step (and ONLY the archive step) to fail. Use the same
+    // harness-level fault injection as the test above, but target ArchiveSquad.
+    status, _ := ts.deleteSquadExpectingError(t, ws.ID, squad.ID, owner.UserID)
+    require.GreaterOrEqual(t, status, 500)
+
+    fresh := ts.getSquadRaw(t, ws.ID, squad.ID)
+    require.False(t, fresh.ArchivedAt.Valid, "squad must remain active when archive fails")
+
+    got := ts.getIssue(t, issue.ID)
+    require.Equal(t, "squad", got.AssigneeType, "transfer rollback: assignee_type still 'squad'")
+    require.Equal(t, squad.ID.String(), got.AssigneeID, "transfer rollback: assignee_id still the squad")
+}
+```
+
+> **Note on fault injection.** `server/internal/handler/squad_test.go` does not currently exercise tx-rollback paths. Before writing the failing test, grep for an existing pattern: `grep -rn "Begin.*error\|tx.*rollback\|fault.*inject" server/internal/handler/` and reuse whatever the project already does (likely a `Queries` interface wrapper or a context-cancellation trick). If no pattern exists yet, the lightest path is a wrapping `txStarter` in the test harness that returns an error on the Nth call. Do not invent a new fault-injection framework just for this — escalate to leader if `make sqlc` produced an interface that's awkward to mock and there's no existing precedent in the test suite.
+
+**Step 2: Run and confirm both tests fail**
+
+```bash
+cd server && go test ./internal/handler/ -run "TestDeleteSquadFailedTransferLeavesSquadActive|TestDeleteSquadFailedArchiveRollsBackTransfer" -v
+```
+
+Expected: FAIL. The current handler does not roll back on transfer error and does not undo a successful transfer when archive fails.
+
+**Step 3: Rewrite `DeleteSquad` to be transactional**
+
+Replace `server/internal/handler/squad.go:276-316` with:
+
+```go
+func (h *Handler) DeleteSquad(w http.ResponseWriter, r *http.Request) {
+    workspaceID := workspaceIDFromURL(r, "workspaceId")
+    if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !ok {
+        return
+    }
+
+    squad, _, ok := h.loadSquadInWorkspace(w, r)
+    if !ok {
+        return
+    }
+
+    if squad.ArchivedAt.Valid {
+        writeError(w, http.StatusBadRequest, "squad is already archived")
+        return
+    }
+
+    userID := requestUserID(r)
+    userUUID, ok := parseUUIDOrBadRequest(w, userID, "user_id")
+    if !ok {
+        return
+    }
+
+    // Transactional: transfer assigned issues to the leader, then archive the
+    // squad. Either both happen or neither happens. This enforces the v3
+    // invariant ("after archive, no issue points to this squad") even under
+    // partial-failure scenarios. See plan §"Archive semantics decision (v3)".
+    tx, err := h.TxStarter.Begin(r.Context())
+    if err != nil {
+        writeError(w, http.StatusInternalServerError, "failed to start transaction")
+        return
+    }
+    defer tx.Rollback(r.Context())
+    qtx := h.Queries.WithTx(tx)
+
+    if err := qtx.TransferSquadAssignees(r.Context(), db.TransferSquadAssigneesParams{
+        AssigneeID:   squad.ID,
+        AssigneeID_2: squad.LeaderID,
+    }); err != nil {
+        slog.Error("transfer squad assignees failed", "squad_id", uuidToString(squad.ID), "error", err)
+        writeError(w, http.StatusInternalServerError, "failed to transfer squad issues")
+        return
+    }
+
+    if _, err := qtx.ArchiveSquad(r.Context(), db.ArchiveSquadParams{
+        ID:         squad.ID,
+        ArchivedBy: userUUID,
+    }); err != nil {
+        slog.Error("archive squad failed", "squad_id", uuidToString(squad.ID), "error", err)
+        writeError(w, http.StatusInternalServerError, "failed to archive squad")
+        return
+    }
+
+    if err := tx.Commit(r.Context()); err != nil {
+        writeError(w, http.StatusInternalServerError, "failed to commit squad archive")
+        return
+    }
+
+    // Publish only after commit succeeds — events must never describe state
+    // that was rolled back.
+    h.publish(protocol.EventSquadDeleted, workspaceID, "member", userID, map[string]any{
+        "squad_id":  uuidToString(squad.ID),
+        "leader_id": uuidToString(squad.LeaderID),
+    })
+    w.WriteHeader(http.StatusNoContent)
+}
+```
+
+Key changes vs. the existing handler:
+
+1. **`slog.Warn` → `slog.Error` + 500.** A transfer failure is no longer non-fatal; it aborts the request and rolls back.
+2. **`h.Queries.X(...)` → `qtx.X(...)`.** All writes go through `h.Queries.WithTx(tx)` so they share the same transaction. The pgx pattern mirrors `server/internal/handler/project.go:266-314` (`CreateProject` + `CreateProjectResource` in one tx) — reuse, don't invent.
+3. **`defer tx.Rollback(r.Context())`** — pgx makes `Rollback` a no-op after `Commit`, so the unconditional defer is the standard pattern and is safe.
+4. **`h.publish` moves below `Commit`.** Real-time consumers must never see "squad deleted" for a squad that's still in the DB. Pre-commit publish would broadcast a state the next-read can contradict.
+5. **`parseUUIDOrBadRequest` ok-check.** The current code silently discards the bool from `parseUUIDOrBadRequest(w, userID, "user_id")` (`squad.go:301`). With a transaction in flight, an invalid user_id needs to abort the request *before* the transfer, not pass a zero UUID into `ArchivedBy`. This is also a latent correctness fix carried over from the per-CLAUDE.md "Backend Handler UUID Parsing Convention" — see the project CLAUDE.md note about #1661.
+
+**Step 4: Run the two failure-mode tests**
+
+```bash
+cd server && go test ./internal/handler/ -run "TestDeleteSquadFailedTransferLeavesSquadActive|TestDeleteSquadFailedArchiveRollsBackTransfer" -v
+```
+
+Expected: PASS.
+
+**Step 5: Re-run the happy-path test from Task 1**
+
+```bash
+cd server && go test ./internal/handler/ -run TestDeleteSquadTransfersAllIssuesIncludingTerminalToLeader -v
+```
+
+Expected: PASS — wrapping the two queries in a tx must not change happy-path behavior (both writes still happen, count-all + transfer-all semantics preserved).
+
+**Step 6: Run full handler test suite**
+
+```bash
+cd server && go test ./internal/handler/...
+```
+
+Expected: all pass — no regressions. In particular, any existing test that asserted a 2xx response on `DeleteSquad` must still pass; the transaction is invisible to a happy-path caller.
+
+**Step 7: Commit**
+
+```bash
+git add server/internal/handler/squad.go server/internal/handler/squad_test.go
+git commit -m "fix(squad): run DeleteSquad transfer + archive in one transaction"
 ```
 
 ---
@@ -1074,9 +1270,10 @@ No expected cleanup. If anything, run `pnpm lint --fix` and commit.
 2. **`issue_count` is `*int64` + `omitempty` on the wire; `number | null | undefined` (optional) in TS** — see *API Compatibility Notes* and Task 3 for the rationale. Old-server (no field) and count-error (null) collapse to the same "fallback copy" path in the dialog.
 3. **`RoleEditor` export change** — internal helper, no consumers outside this file. Verify with `grep -rn "RoleEditor" packages/`.
 4. **Per-member saving state** — recommended approach adds local state to `MembersTab`. If the team prefers truly stateless, fall back to "always false" and rely on optimistic mutation behavior.
-5. **Archive is count-all + transfer-all (v3, see *Archive semantics decision*).** After `ArchiveSquad`, no issue (active or terminal) retains `assignee_id=<archived squad>` — `TransferSquadAssignees` reassigns them all to the leader agent. This eliminates two structural issues that v2 left open: (a) `useActorName` rendering "Unknown Squad" for closed issues whose squad was archived (`packages/core/workspace/hooks.ts:11,23` + `squad.sql:13`), and (b) reopening a done/cancelled issue resurrecting an archived-squad assignee through the status-only update path (`issue.go:1453-1496,1563-1570`). Product trade-off: a closed issue's historical "Assigned to" badge now shows the leader instead of the (archived) squad. Acceptable — see decision section for rationale.
-6. **No new DB index** (see *Index assumption*). `idx_issue_assignee (assignee_type, assignee_id)` is sufficient for `CountIssuesForSquad` at realistic squad cardinality (low-hundreds of issues per squad). If profiling later shows the query becomes hot, add the partial index suggested in that section.
-7. **API-compat checklist:**
+5. **Archive is count-all + transfer-all (v3, see *Archive semantics decision*), and the invariant is enforced transactionally (see Task 2b).** After a successful `DeleteSquad`, no issue (active or terminal) retains `assignee_id=<archived squad>` — `TransferSquadAssignees` and `ArchiveSquad` commit together or not at all. This eliminates two structural issues that v2 left open: (a) `useActorName` rendering "Unknown Squad" for closed issues whose squad was archived (`packages/core/workspace/hooks.ts:11,23` + `squad.sql:13`), and (b) reopening a done/cancelled issue resurrecting an archived-squad assignee through the status-only update path (`issue.go:1453-1496,1563-1570`). It also eliminates the half-archived / half-transferred partial-write states the previous best-effort handler allowed (`squad.go:292-309` pre-Task-2b — `slog.Warn` on transfer error, archive failure after a committed transfer). Product trade-off: a closed issue's historical "Assigned to" badge now shows the leader instead of the (archived) squad. Acceptable — see decision section for rationale.
+6. **DeleteSquad fault-injection harness** — Task 2b's two regression tests require a way to force `TransferSquadAssignees` or `ArchiveSquad` to fail mid-handler. The current `squad_test.go` doesn't exercise tx-rollback paths. Reuse an existing fault-injection or interface-wrapping pattern from elsewhere in `server/internal/handler/*_test.go` (search for `Begin.*error`, `tx.*rollback`, or interface-typed `Queries` test doubles). If no precedent exists, escalate before inventing a new mocking framework just for these two tests — a lighter alternative (e.g. context cancellation after the first query) may be sufficient to drive the failure paths.
+7. **No new DB index** (see *Index assumption*). `idx_issue_assignee (assignee_type, assignee_id)` is sufficient for `CountIssuesForSquad` at realistic squad cardinality (low-hundreds of issues per squad). If profiling later shows the query becomes hot, add the partial index suggested in that section.
+8. **API-compat checklist:**
    - [x] `issue_count` is additive (old clients ignore it)
    - [x] TS field declared optional — list/create/update responses do not lie about shape
    - [x] Schema is `.loose()` (matches `schemas.ts:25` convention) and tolerates missing / null / numeric values

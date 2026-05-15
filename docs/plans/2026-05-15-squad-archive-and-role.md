@@ -2,15 +2,15 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Replace native `confirm()` archive flow with shadcn `AlertDialog` showing leader name + active issue count, and replace inline `<Input>` `RoleEditor` with a shadcn Combobox (Command + Popover) backed by existing roles in the squad.
+**Goal:** Replace native `confirm()` archive flow with shadcn `AlertDialog` showing leader name + issue count, and replace inline `<Input>` `RoleEditor` with a shadcn Combobox (Command + Popover) backed by existing roles in the squad.
 
-**Architecture:** Two parallel tracks. (1) Backend adds an `active_issue_count` field to `SquadResponse`, sourced from a new `CountActiveIssuesForSquad` sqlc query that counts non-terminal issues assigned to the squad. (2) Frontend extends the `Squad` type + zod schema (defensive parse), replaces `confirm()` with `ArchiveSquadConfirmDialog`, and rewrites `RoleEditor` as a Command-inside-Popover combobox that aggregates `members.map(m => m.role).filter(Boolean)` for suggestions.
+**Architecture:** Two parallel tracks. (1) Backend adds an `issue_count` field to `SquadResponse`, sourced from a new `CountIssuesForSquad` sqlc query that counts all issues currently assigned to the squad. The existing `TransferSquadAssignees` (count-all, transfer-all) is unchanged. (2) Frontend extends the `Squad` type + zod schema (defensive parse), replaces `confirm()` with `ArchiveSquadConfirmDialog`, and rewrites `RoleEditor` as a Command-inside-Popover combobox that aggregates `members.map(m => m.role).filter(Boolean)` for suggestions.
 
 **Tech Stack:** Go (chi, sqlc, pgx), TypeScript, React, TanStack Query, shadcn (Base UI primitives), zod, Vitest, Playwright.
 
 **Files in scope:**
 - `server/pkg/db/queries/issue.sql` — new query
-- `server/internal/handler/squad.go` — extend `SquadResponse`, populate `active_issue_count` in `GetSquad`
+- `server/internal/handler/squad.go` — extend `SquadResponse`, populate `issue_count` in `GetSquad`
 - `server/internal/handler/squad_test.go` (new or extend) — handler test
 - `packages/core/types/squad.ts` — extend `Squad`
 - `packages/core/api/schemas.ts` (and/or `schema.ts` usage in client) — squad zod schema + `parseWithFallback` in `getSquad`
@@ -27,25 +27,37 @@
 
 ## API Compatibility Notes (for plan reviewer)
 
-- `SquadResponse.active_issue_count` is **additive**. Old desktop clients ignore unknown fields, so adding it is backwards compatible.
+- `SquadResponse.issue_count` is **additive**. Old desktop clients ignore unknown fields, so adding it is backwards compatible.
 - The field is **only present on `GET /api/squads/{id}`**. `ListSquads`, `CreateSquad`, and `UpdateSquad` deliberately omit it (would be N+1 for list; semantically irrelevant for create/update which return the just-written row). `omitempty` on a nil `*int64` keeps the field absent from those responses.
-- The TS field is declared **optional** (`active_issue_count?: number | null`) — see Task 3 rationale. This matches the wire truth: only the detail endpoint carries it. Making it required `number | null` would lie about list/create/update shapes.
-- The archive dialog falls back to "any active issues" copy when the value is `undefined` or `null`, so an older server (no field) and a transient count error (null) collapse to the same safe rendering.
+- The TS field is declared **optional** (`issue_count?: number | null`) — see Task 3 rationale. This matches the wire truth: only the detail endpoint carries it. Making it required `number | null` would lie about list/create/update shapes.
+- The archive dialog falls back to "any assigned issues" copy when the value is `undefined` or `null`, so an older server (no field) and a transient count error (null) collapse to the same safe rendering.
 - All response parsing for `getSquad` goes through `parseWithFallback` per `CLAUDE.md → API Response Compatibility`. List/create/update remain raw `this.fetch` to stay consistent with the rest of the client (no precedent for wrapping them, and they don't touch the archive dialog).
 - No DB migration required — the count is computed on read.
 
-## Archive semantics decision (resolved)
+## Archive semantics decision (resolved — v3)
 
-Original plan counted only **non-terminal** issues in the dialog, but `TransferSquadAssignees` in `server/pkg/db/queries/squad.sql:71` reassigns **every** issue currently assigned to the squad regardless of status. Two paths considered, **picking (b)**:
+**Decision: count and transfer ALL issues assigned to the squad, regardless of status.** This reverts plan-v2's "active-only" carve-out.
 
-- **(a) Match count to existing transfer**: count all rows including `done`/`cancelled`. Rejected: the dialog message would have to read "{N} issues, some closed" or stay vague; quietly rewriting the assignee on closed historical records is poor product behavior — a closed issue's "Assigned to" should reflect who owned it when it closed, not who happens to inherit the squad's leftovers years later.
-- **(b) Restrict transfer to active issues** (chosen). Archive becomes "release the active work to the leader; leave history alone." Dialog count and SQL operate on one set — `status NOT IN ('done', 'cancelled')` — so there is no count/action mismatch to maintain. Terminal issues keep `assignee_type='squad', assignee_id=<archived squad>`; the existing squad row stays in the DB (only `archived_at` is set), so badge rendering still resolves the name and a "(archived)" suffix can be added later if product asks.
+v1 → v2 → v3 history:
+- **v1**: count all + transfer all. Matched the pre-existing `TransferSquadAssignees` behavior in `server/pkg/db/queries/squad.sql:71`.
+- **v2**: count active-only + transfer active-only. Argument was "closed issues should reflect who owned them at close time, not inherit the squad's leftovers years later."
+- **v3 (this plan)**: revert to count all + transfer all. v2's product argument was sound *if free*, but plan-review round 2 surfaced two structural costs that were missed:
 
-**Impact of (b):**
-- `TransferSquadAssignees` SQL gains `AND status NOT IN ('done', 'cancelled')`.
-- New Go test covers "done/cancelled issues stay assigned to the squad after archive".
-- Dialog copy can confidently say "{leader} will take over {N} active issues" — no qualifier needed.
-- Reads of closed issues whose assignee is an archived squad: no UI change required. `ListSquads` filters by `archived_at IS NULL`, so the squad won't surface in pickers, but lookup-by-id (used for badge rendering) still returns it. If any consumer surface needs to distinguish archived squads, that is a separate follow-up.
+  1. **Stale name resolution for archived squad assignees.** `packages/core/workspace/hooks.ts:11,23` powers `useActorName`, which reads only from `squadListOptions` (calls `ListSquads`). `server/pkg/db/queries/squad.sql:13` filters `archived_at IS NULL`. A closed issue still pointing at an archived squad would render its assignee as "Unknown Squad". Fixing that under v2 semantics required *one* of: (i) an `--include-archived` parameter on `ListSquads` plus changes to every consumer that doesn't want archived squads in pickers, (ii) a new `GetSquadName` endpoint and a name-only client cache, or (iii) merging archived squads into the existing query but having every picker / dropdown filter them back out client-side. All three paths exist *only* to support v2's choice.
+
+  2. **Reopen invariant break.** `server/internal/handler/issue.go:1453-1496,1563-1570` only re-runs `validateAssigneePair` when the caller touches `assignee_type` or `assignee_id`. A status-only update (the normal "reopen" path — `packages/views/issues/components/issue-detail.tsx:953,959` exposes status and assignee as independent controls) bypasses validation, so a `done`/`cancelled` issue pointing at an archived squad can be reopened to `in_progress` and become an active issue with an archived-squad assignee — directly violating the invariant enforced at `issue.go:1718-1720` ("cannot assign to an archived squad"). Closing this gap under v2 required *one* of: (i) auto-rewrite assignee to leader on reopen, (ii) block reopen until assignee is changed, or (iii) extend `validateAssigneePair` to run on every update. Each option introduces a new special case and a new regression test.
+
+v3 makes both problems disappear by construction: after `ArchiveSquad` runs, **no issue points to this squad anymore**, so name resolution and reopen behave identically to the no-archived-squad world. No new flags, no new endpoints, no new validation paths.
+
+**Product trade-off acknowledged.** A closed issue's historical "Assigned to" badge is rewritten from `<squad>` to `<leader-agent>`. The squad row stays in the DB (`archived_at` set, name preserved) — only the *per-issue assignee pointer* moves. This is consistent with existing agent-level reassignment patterns (when an agent leaves a project, their open + closed issues get reassigned with no special history-preservation). The leader is a reasonable proxy for "who inherited responsibility for this squad's work". Dialog copy is honest about this: "{leader} will take over all {N} issues currently assigned to this squad." — count and action operate on identical sets.
+
+**Impact of v3:**
+- `TransferSquadAssignees` SQL is **unchanged** (already transfers all). The plan no longer modifies `squad.sql`.
+- A new Go test asserts the invariant: "after archive, no issue (active or terminal) has `assignee_type='squad', assignee_id=<archived squad>` — all transferred to leader."
+- `CountIssuesForSquad` counts every assigned issue (no status filter); dialog count and SQL transfer set are identical.
+- No frontend archived-squad name-resolution work.
+- No reopen-guard logic.
+- Closed historical issues whose assignee was the squad now show the leader agent's badge instead of the squad's name. Acceptable per the product trade-off above.
 
 ## Index assumption (resolved)
 
@@ -57,86 +69,88 @@ CREATE INDEX idx_issue_assignee  ON issue(assignee_type, assignee_id);
 CREATE INDEX idx_issue_status    ON issue(workspace_id, status);
 ```
 
-Real plan for `CountActiveIssuesForSquad`:
+Real plan for `CountIssuesForSquad`:
 
 ```
 WHERE workspace_id = $1
   AND assignee_type = 'squad'
-  AND assignee_id   = $2
-  AND status NOT IN ('done', 'cancelled');
+  AND assignee_id   = $2;
 ```
 
-Postgres will use `idx_issue_assignee` (the `(assignee_type, assignee_id)` composite), narrowing first by `assignee_type='squad'`, then by `assignee_id=<squad uuid>`. The output of that index probe is **all issues currently or historically assigned to this one squad**. `workspace_id` and the `status NOT IN (…)` predicate are applied as a heap recheck on that small set.
+Postgres will use `idx_issue_assignee` (the `(assignee_type, assignee_id)` composite), narrowing first by `assignee_type='squad'`, then by `assignee_id=<squad uuid>`. The output of that index probe is **all issues currently assigned to this one squad**. `workspace_id` is applied as a heap recheck on that small set.
 
 **Cardinality estimate:** squad rosters are 2-10 entities (per `CLAUDE.md` project context), and squads are workspace-internal. Realistic upper bound for issues ever assigned to a single squad in a workspace: **low-hundreds**. The heap recheck over ≤ a few hundred rows is sub-millisecond — no measurable difference from a covering or partial index. Even a worst-case workspace (thousands of issues, dozens of squads) keeps each per-squad probe in the same band because the index restricts by squad first.
 
 **Conclusion: no new index.** `idx_issue_assignee` is sufficient. If profiling later shows this query becomes hot on a large workspace, the right follow-up is:
 
 ```sql
-CREATE INDEX CONCURRENTLY idx_issue_active_squad
+CREATE INDEX CONCURRENTLY idx_issue_squad_assignee
   ON issue(assignee_id)
-  WHERE assignee_type = 'squad'
-    AND status NOT IN ('done', 'cancelled');
+  WHERE assignee_type = 'squad';
 ```
 
-That is a partial index keyed on `assignee_id` alone, filtering both `assignee_type` and the terminal-status set at index time. Don't add it speculatively — the current index handles the realistic load.
+That is a partial index keyed on `assignee_id` alone, filtering `assignee_type` at index time. Don't add it speculatively — the current index handles the realistic load.
 
 ---
 
-## Task 1: Backend — `CountActiveIssuesForSquad` sqlc query
+## Task 1: Backend — `CountIssuesForSquad` sqlc query + archive-transfer regression test
 
 **Files:**
 - Modify: `server/pkg/db/queries/issue.sql`
+- `server/pkg/db/queries/squad.sql` is **unchanged** (existing `TransferSquadAssignees` already counts all + transfers all, matching v3 semantics).
 
 **Step 1: Write the failing test (Go integration test)**
 
 In `server/internal/handler/squad_test.go` (extend existing or create), add:
 
 ```go
-func TestGetSquadIncludesActiveIssueCount(t *testing.T) {
+func TestGetSquadIncludesIssueCount(t *testing.T) {
     ts := newTestServer(t)
     ws, owner := ts.createWorkspace(t)
     leader := ts.createAgent(t, ws.ID)
     squad := ts.createSquad(t, ws.ID, owner.UserID, leader.ID)
 
-    // 2 active, 1 done, 1 cancelled — only active count should be returned.
+    // Mix of statuses — count is ALL issues regardless of status (v3 semantics).
     ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "todo")
     ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "in_progress")
     ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "done")
     ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "cancelled")
 
     resp := ts.getSquad(t, ws.ID, squad.ID)
-    require.NotNil(t, resp.ActiveIssueCount, "GetSquad must populate active_issue_count")
-    require.Equal(t, int64(2), *resp.ActiveIssueCount)
+    require.NotNil(t, resp.IssueCount, "GetSquad must populate issue_count")
+    require.Equal(t, int64(4), *resp.IssueCount)
 }
 ```
 
-`ActiveIssueCount` is `*int64` (see Task 2). Compare `int64(2)` against the dereferenced pointer, and assert non-nil first so a future regression that drops the field surfaces as a clear failure instead of a nil-pointer panic.
+`IssueCount` is `*int64` (see Task 2). Compare `int64(4)` against the dereferenced pointer, and assert non-nil first so a future regression that drops the field surfaces as a clear failure instead of a nil-pointer panic.
 
 **Step 2: Run and confirm it fails**
 
 ```bash
-cd server && go test ./internal/handler/ -run TestGetSquadIncludesActiveIssueCount
+cd server && go test ./internal/handler/ -run TestGetSquadIncludesIssueCount
 ```
 
-Expected: FAIL — field `ActiveIssueCount` does not exist yet.
+Expected: FAIL — field `IssueCount` does not exist yet.
 
 **Step 3: Add the sqlc query**
 
 Append to `server/pkg/db/queries/issue.sql`:
 
 ```sql
--- name: CountActiveIssuesForSquad :one
--- Count issues currently assigned to a squad that are NOT in a terminal state.
+-- name: CountIssuesForSquad :one
+-- Count all issues currently assigned to a squad. No status filter:
+-- archive transfers every assigned issue to the leader (see TransferSquadAssignees
+-- in squad.sql), so count and transfer operate on identical sets. This avoids
+-- leaving archived-squad pointers in the DB, which would otherwise break
+-- name resolution (useActorName reads ListSquads which filters archived_at IS NULL)
+-- and the "no active issue can be assigned to an archived squad" invariant
+-- enforced by validateAssigneePair.
 SELECT COUNT(*)::bigint AS count
 FROM issue
 WHERE workspace_id = $1
   AND assignee_type = 'squad'
-  AND assignee_id = $2
-  AND status NOT IN ('done', 'cancelled');
+  AND assignee_id = $2;
 ```
-
-Status set matches the same terminal pair used by `ChildIssueProgress` in this file — keep them in sync if either ever changes.
 
 **Step 4: Regenerate sqlc**
 
@@ -144,47 +158,41 @@ Status set matches the same terminal pair used by `ChildIssueProgress` in this f
 make sqlc
 ```
 
-Expected: no errors. `server/pkg/db/generated/issue.sql.go` now exposes `CountActiveIssuesForSquad`.
+Expected: no errors. `server/pkg/db/generated/issue.sql.go` now exposes `CountIssuesForSquad`.
 
-**Step 5: Tighten `TransferSquadAssignees` to active issues only**
+**Step 5: Archive-transfer regression test (no SQL change required)**
 
-Per the *Archive semantics decision* above, the archive transfer must operate on the same set the dialog counts. Edit `server/pkg/db/queries/squad.sql:71`:
-
-```sql
--- name: TransferSquadAssignees :exec
--- Transfer ACTIVE issues assigned to a squad to the squad's leader agent.
--- Terminal-state issues (done, cancelled) keep their existing squad assignee
--- as historical record; the squad row is only soft-deleted via archived_at,
--- so badge rendering by ID still resolves.
-UPDATE issue SET assignee_type = 'agent', assignee_id = $2, updated_at = now()
-WHERE assignee_type = 'squad'
-  AND assignee_id = $1
-  AND status NOT IN ('done', 'cancelled');
-```
-
-Add a regression test in `server/internal/handler/squad_test.go` (alongside the count test):
+Add a regression test in `server/internal/handler/squad_test.go` (alongside the count test). The intent is to lock the v3 invariant: **after archive, no issue points to the archived squad — terminal-state issues are reassigned to the leader along with active ones.** This guards against a future "optimization" that accidentally reintroduces v2's active-only filter.
 
 ```go
-func TestDeleteSquadLeavesTerminalIssuesAssignedToSquad(t *testing.T) {
+func TestDeleteSquadTransfersAllIssuesIncludingTerminalToLeader(t *testing.T) {
     ts := newTestServer(t)
     ws, owner := ts.createWorkspace(t)
     leader := ts.createAgent(t, ws.ID)
     squad := ts.createSquad(t, ws.ID, owner.UserID, leader.ID)
 
-    active := ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "in_progress")
-    done   := ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "done")
+    active    := ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "in_progress")
+    done      := ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "done")
+    cancelled := ts.createIssueAssignedToSquad(t, ws.ID, squad.ID, "cancelled")
 
     ts.deleteSquad(t, ws.ID, squad.ID, owner.UserID)
 
-    // active → reassigned to leader
-    got := ts.getIssue(t, active.ID)
-    require.Equal(t, "agent", got.AssigneeType)
-    require.Equal(t, leader.ID.String(), got.AssigneeID)
-
-    // done → still on the (now archived) squad
-    got = ts.getIssue(t, done.ID)
-    require.Equal(t, "squad", got.AssigneeType)
-    require.Equal(t, squad.ID.String(), got.AssigneeID)
+    for _, c := range []struct {
+        name string
+        id   uuid.UUID
+    }{
+        {"active", active.ID},
+        {"done (terminal)", done.ID},
+        {"cancelled (terminal)", cancelled.ID},
+    } {
+        t.Run(c.name, func(t *testing.T) {
+            got := ts.getIssue(t, c.id)
+            require.Equalf(t, "agent", got.AssigneeType,
+                "v3 invariant: no archived-squad pointers may remain after archive (%s)", c.name)
+            require.Equalf(t, leader.ID.String(), got.AssigneeID,
+                "%s issue must be reassigned to squad leader", c.name)
+        })
+    }
 }
 ```
 
@@ -192,7 +200,7 @@ func TestDeleteSquadLeavesTerminalIssuesAssignedToSquad(t *testing.T) {
 
 ```bash
 make sqlc
-cd server && go test ./internal/handler/ -run "TestGetSquadIncludesActiveIssueCount|TestDeleteSquadLeavesTerminalIssuesAssignedToSquad" -v
+cd server && go test ./internal/handler/ -run "TestGetSquadIncludesIssueCount|TestDeleteSquadTransfersAllIssuesIncludingTerminalToLeader" -v
 ```
 
 Expected: PASS (after Task 2 wires the handler).
@@ -201,12 +209,12 @@ Expected: PASS (after Task 2 wires the handler).
 
 ```bash
 git add server/pkg/db/queries/ server/pkg/db/generated/
-git commit -m "feat(squad): count + transfer only active issues on archive"
+git commit -m "feat(squad): count all assigned issues for archive dialog"
 ```
 
 ---
 
-## Task 2: Backend — extend `SquadResponse` with `active_issue_count`
+## Task 2: Backend — extend `SquadResponse` with `issue_count`
 
 **Files:**
 - Modify: `server/internal/handler/squad.go:18-31` (response type) and `:193-199` (`GetSquad` handler)
@@ -218,8 +226,8 @@ Add field at the bottom of the struct (after `ArchivedBy`) — keeps JSON orderi
 ```go
 type SquadResponse struct {
     // ... existing fields ...
-    ArchivedBy       *string `json:"archived_by"`
-    ActiveIssueCount *int64  `json:"active_issue_count,omitempty"`
+    ArchivedBy *string `json:"archived_by"`
+    IssueCount *int64  `json:"issue_count,omitempty"`
 }
 ```
 
@@ -229,7 +237,7 @@ type SquadResponse struct {
 
 **Step 2: Leave `squadToResponse` unchanged**
 
-`squadToResponse(s db.Squad)` stays returning `ActiveIssueCount: nil`. Counting per row in the list endpoint would be N+1; only `GetSquad` needs the count.
+`squadToResponse(s db.Squad)` stays returning `IssueCount: nil`. Counting per row in the list endpoint would be N+1; only `GetSquad` needs the count.
 
 **Step 3: Populate in `GetSquad`**
 
@@ -243,26 +251,26 @@ func (h *Handler) GetSquad(w http.ResponseWriter, r *http.Request) {
     }
     resp := squadToResponse(squad)
 
-    count, err := h.Queries.CountActiveIssuesForSquad(r.Context(), db.CountActiveIssuesForSquadParams{
+    count, err := h.Queries.CountIssuesForSquad(r.Context(), db.CountIssuesForSquadParams{
         WorkspaceID: squad.WorkspaceID,
-        AssigneeID:  uuidToPgPtr(squad.ID), // assignee_id is nullable; squad.ID is non-null
+        AssigneeID:  squad.ID, // see note below on param shape after sqlc gen
     })
     if err != nil {
         // Non-fatal: log and continue with nil. The UI degrades to "leader only" copy.
-        slog.Warn("count active squad issues failed", "squad_id", uuidToString(squad.ID), "error", err)
+        slog.Warn("count squad issues failed", "squad_id", uuidToString(squad.ID), "error", err)
     } else {
-        resp.ActiveIssueCount = &count
+        resp.IssueCount = &count
     }
     writeJSON(w, http.StatusOK, resp)
 }
 ```
 
-> Note: verify `CountActiveIssuesForSquadParams` param shape after `make sqlc`. `assignee_id` is a nullable UUID column in `issue`, so sqlc will likely generate `pgtype.UUID` directly; if the field is `pgtype.UUID` (not a pointer), pass `squad.ID` directly. **Adjust to match generated code** — do not invent helper names.
+> Note: verify `CountIssuesForSquadParams` param shape after `make sqlc`. `assignee_id` is a nullable UUID column in `issue`, so sqlc will likely generate `pgtype.UUID` directly; pass `squad.ID` directly if so, otherwise wrap. **Adjust to match generated code** — do not invent helper names.
 
 **Step 4: Run the test from Task 1**
 
 ```bash
-cd server && go test ./internal/handler/ -run TestGetSquadIncludesActiveIssueCount -v
+cd server && go test ./internal/handler/ -run TestGetSquadIncludesIssueCount -v
 ```
 
 Expected: PASS.
@@ -279,7 +287,7 @@ Expected: all pass — no regressions.
 
 ```bash
 git add server/internal/handler/squad.go server/internal/handler/squad_test.go
-git commit -m "feat(squad): include active_issue_count in GetSquad response"
+git commit -m "feat(squad): include issue_count in GetSquad response"
 ```
 
 ---
@@ -297,16 +305,16 @@ export interface Squad {
   // ... existing fields ...
   archived_by: string | null;
   /**
-   * Active (non-terminal) issues currently assigned to this squad.
+   * Total issues currently assigned to this squad (all statuses).
    * Only present on `GET /api/squads/{id}` responses; absent (`undefined`)
    * on list/create/update responses, and absent on older servers that
    * predate the field. Treat `undefined` and `null` identically as "unknown".
    */
-  active_issue_count?: number | null;
+  issue_count?: number | null;
 }
 ```
 
-**Why optional, not required `number | null`:** the field is genuinely only emitted by `GetSquad`. Server-side `squadToResponse` in `server/internal/handler/squad.go:44-59` is the converter for *all four* Squad-returning endpoints (`ListSquads`, `CreateSquad`, `UpdateSquad`, `GetSquad`), and only `GetSquad` overrides `resp.ActiveIssueCount` after calling it. Combined with `omitempty` on a nil `*int64`, list/create/update responses do not contain the JSON key at all. Declaring the TS field as required `number | null` would lie about those three shapes — TypeScript would happily let consumers read `squad.active_issue_count` from a `listSquads()` result and get `undefined` at runtime with no warning. Optional makes the contract honest and forces callers that need the value (the archive dialog) to handle the missing case, which it already does.
+**Why optional, not required `number | null`:** the field is genuinely only emitted by `GetSquad`. Server-side `squadToResponse` in `server/internal/handler/squad.go:44-59` is the converter for *all four* Squad-returning endpoints (`ListSquads`, `CreateSquad`, `UpdateSquad`, `GetSquad`), and only `GetSquad` overrides `resp.IssueCount` after calling it. Combined with `omitempty` on a nil `*int64`, list/create/update responses do not contain the JSON key at all. Declaring the TS field as required `number | null` would lie about those three shapes — TypeScript would happily let consumers read `squad.issue_count` from a `listSquads()` result and get `undefined` at runtime with no warning. Optional makes the contract honest and forces callers that need the value (the archive dialog) to handle the missing case, which it already does.
 
 **Step 2: Add `SquadSchema` in `schemas.ts` (with `.loose()` per local convention)**
 
@@ -324,15 +332,15 @@ export const SquadSchema = z.object({
   updated_at: z.string(),
   archived_at: z.string().nullable().catch(null),
   archived_by: z.string().nullable().catch(null),
-  active_issue_count: z.number().nullable().optional().catch(null),
+  issue_count: z.number().nullable().optional().catch(null),
 }).loose();
 ```
 
 Two convention points enforced here:
 1. `.loose()` follows `packages/core/api/schemas.ts:25-31` — without it, zod 4 would silently strip any unknown server-side field a future PR adds; with it, unknown fields pass through unchanged.
-2. `active_issue_count` is `.nullable().optional().catch(null)` — accepts `number`, `null`, or **missing**, and falls back to `null` on any malformed value. This is what makes the schema compatible with all four endpoint shapes: missing on list/create/update, present-with-number on `GetSquad`, present-with-null when the server's count query errors.
+2. `issue_count` is `.nullable().optional().catch(null)` — accepts `number`, `null`, or **missing**, and falls back to `null` on any malformed value. This is what makes the schema compatible with all four endpoint shapes: missing on list/create/update, present-with-number on `GetSquad`, present-with-null when the server's count query errors.
 
-**Schema/normalization scope:** wrap **only `getSquad`** with `parseWithFallback` (Step 3). `listSquads`/`createSquad`/`updateSquad` stay as raw `this.fetch` — they are not consumed by any code that reads `active_issue_count`, and wrapping them now would create a precedent (no other list/create/update method in `client.ts` is schema-wrapped) without a concrete defensive payoff. If we later need defensive parsing for list, we add it then.
+**Schema/normalization scope:** wrap **only `getSquad`** with `parseWithFallback` (Step 3). `listSquads`/`createSquad`/`updateSquad` stay as raw `this.fetch` — they are not consumed by any code that reads `issue_count`, and wrapping them now would create a precedent (no other list/create/update method in `client.ts` is schema-wrapped) without a concrete defensive payoff. If we later need defensive parsing for list, we add it then.
 
 **Step 3: Use `parseWithFallback` in `getSquad`**
 
@@ -358,26 +366,26 @@ const baseSquad = {
   updated_at: "t", archived_at: null, archived_by: null,
 };
 
-it("SquadSchema accepts a response missing active_issue_count (old server / list endpoint)", () => {
+it("SquadSchema accepts a response missing issue_count (old server / list endpoint)", () => {
   const result = parseWithFallback(baseSquad, SquadSchema, null as never, { endpoint: "test" });
   // Field is optional — accept either undefined or null on read; both mean "unknown".
-  expect(result.active_issue_count ?? null).toBeNull();
+  expect(result.issue_count ?? null).toBeNull();
 });
 
-it("SquadSchema parses a response with active_issue_count: number", () => {
+it("SquadSchema parses a response with issue_count: number", () => {
   const result = parseWithFallback(
-    { ...baseSquad, active_issue_count: 3 },
+    { ...baseSquad, issue_count: 3 },
     SquadSchema, null as never, { endpoint: "test" }
   );
-  expect(result.active_issue_count).toBe(3);
+  expect(result.issue_count).toBe(3);
 });
 
-it("SquadSchema parses active_issue_count: null (server-side count error path)", () => {
+it("SquadSchema parses issue_count: null (server-side count error path)", () => {
   const result = parseWithFallback(
-    { ...baseSquad, active_issue_count: null },
+    { ...baseSquad, issue_count: null },
     SquadSchema, null as never, { endpoint: "test" }
   );
-  expect(result.active_issue_count).toBeNull();
+  expect(result.issue_count).toBeNull();
 });
 
 it("SquadSchema preserves unknown fields via .loose()", () => {
@@ -403,13 +411,13 @@ Expected: PASS.
 pnpm typecheck
 ```
 
-Expected: PASS — including `packages/views/squads/components/squad-detail-page.tsx` (existing usage of `Squad` does not destructure `active_issue_count`).
+Expected: PASS — including `packages/views/squads/components/squad-detail-page.tsx` (existing usage of `Squad` does not destructure `issue_count`).
 
 **Step 7: Commit**
 
 ```bash
 git add packages/core/types/squad.ts packages/core/api/schemas.ts packages/core/api/client.ts packages/core/api/schema.test.ts
-git commit -m "feat(squad): parse active_issue_count via SquadSchema in getSquad"
+git commit -m "feat(squad): parse issue_count via SquadSchema in getSquad"
 ```
 
 ---
@@ -427,9 +435,9 @@ Add a top-level `"archive_dialog"` block to `en/squads.json`:
 ```json
 "archive_dialog": {
   "title": "Archive squad \"{{name}}\"?",
-  "description_with_count_one": "{{leader}} will take over {{count}} active issue. The squad will no longer appear in the workspace list, and this cannot be undone.",
-  "description_with_count_other": "{{leader}} will take over {{count}} active issues. The squad will no longer appear in the workspace list, and this cannot be undone.",
-  "description_no_count": "{{leader}} will take over any active issues for this squad. The squad will no longer appear in the workspace list, and this cannot be undone.",
+  "description_with_count_one": "{{leader}} will take over {{count}} issue currently assigned to this squad (including closed ones). The squad will no longer appear in the workspace list, and this cannot be undone.",
+  "description_with_count_other": "{{leader}} will take over all {{count}} issues currently assigned to this squad (including closed ones). The squad will no longer appear in the workspace list, and this cannot be undone.",
+  "description_no_count": "{{leader}} will take over all issues currently assigned to this squad (including closed ones). The squad will no longer appear in the workspace list, and this cannot be undone.",
   "cancel": "Cancel",
   "confirm": "Archive",
   "archiving": "Archiving…"
@@ -441,14 +449,16 @@ Add a top-level `"archive_dialog"` block to `en/squads.json`:
 ```json
 "archive_dialog": {
   "title": "归档小队「{{name}}」?",
-  "description_with_count_one": "{{leader}} 将接管 {{count}} 个进行中的 issue。归档后小队不再出现在工作区列表中,该操作不可撤销。",
-  "description_with_count_other": "{{leader}} 将接管 {{count}} 个进行中的 issue。归档后小队不再出现在工作区列表中,该操作不可撤销。",
-  "description_no_count": "{{leader}} 将接管该小队所有进行中的 issue。归档后小队不再出现在工作区列表中,该操作不可撤销。",
+  "description_with_count_one": "{{leader}} 将接管该小队当前 {{count}} 个 issue(含已关闭)。归档后小队不再出现在工作区列表中,该操作不可撤销。",
+  "description_with_count_other": "{{leader}} 将接管该小队当前全部 {{count}} 个 issue(含已关闭)。归档后小队不再出现在工作区列表中,该操作不可撤销。",
+  "description_no_count": "{{leader}} 将接管该小队当前的全部 issue(含已关闭)。归档后小队不再出现在工作区列表中,该操作不可撤销。",
   "cancel": "取消",
   "confirm": "归档",
   "archiving": "归档中…"
 }
 ```
+
+> Copy intent: be explicit that closed issues are also reassigned, so the user isn't surprised when they later open a closed issue and see the leader's badge instead of the (now archived) squad. See *Archive semantics decision (v3) → Product trade-off acknowledged*.
 
 **Step 3: Add Role combobox keys**
 
@@ -508,7 +518,7 @@ describe("ArchiveSquadConfirmDialog", () => {
         open
         squadName="Squirtle"
         leaderName="Squirtle-Leader"
-        activeIssueCount={3}
+        issueCount={3}
         onCancel={() => {}}
         onConfirm={async () => {}}
         pending={false}
@@ -518,23 +528,23 @@ describe("ArchiveSquadConfirmDialog", () => {
     expect(screen.getByText(/3/)).toBeInTheDocument();
   });
 
-  it("falls back to no-count copy when activeIssueCount is null", () => {
+  it("falls back to no-count copy when issueCount is null", () => {
     render(
       <ArchiveSquadConfirmDialog
         open squadName="S" leaderName="L"
-        activeIssueCount={null}
+        issueCount={null}
         onCancel={() => {}} onConfirm={async () => {}}
         pending={false}
       />
     );
-    expect(screen.getByText(/any active issues/i)).toBeInTheDocument();
+    expect(screen.getByText(/all issues currently assigned/i)).toBeInTheDocument();
   });
 
   it("disables confirm and cancel while pending", () => {
     render(
       <ArchiveSquadConfirmDialog
         open squadName="S" leaderName="L"
-        activeIssueCount={1}
+        issueCount={1}
         onCancel={() => {}} onConfirm={async () => {}}
         pending
       />
@@ -547,7 +557,7 @@ describe("ArchiveSquadConfirmDialog", () => {
     render(
       <ArchiveSquadConfirmDialog
         open squadName="S" leaderName="L"
-        activeIssueCount={1}
+        issueCount={1}
         onCancel={() => {}} onConfirm={onConfirm}
         pending={false}
       />
@@ -579,26 +589,26 @@ import {
 import { useT } from "../../i18n";
 
 export function ArchiveSquadConfirmDialog({
-  open, squadName, leaderName, activeIssueCount,
+  open, squadName, leaderName, issueCount,
   onCancel, onConfirm, pending,
 }: {
   open: boolean;
   squadName: string;
   leaderName: string;
-  activeIssueCount: number | null;
+  issueCount: number | null;
   onCancel: () => void;
   onConfirm: () => Promise<void> | void;
   pending: boolean;
 }) {
   const { t } = useT("squads");
   const description =
-    activeIssueCount == null
+    issueCount == null
       ? t(($) => $.archive_dialog.description_no_count, { leader: leaderName })
       : t(
-          ($) => activeIssueCount === 1
+          ($) => issueCount === 1
             ? $.archive_dialog.description_with_count_one
             : $.archive_dialog.description_with_count_other,
-          { leader: leaderName, count: activeIssueCount }
+          { leader: leaderName, count: issueCount }
         );
 
   return (
@@ -687,10 +697,10 @@ Below the existing dialogs (after `showCreateAgent` block, before the closing `<
   open={archiveOpen}
   squadName={squad.name}
   leaderName={getEntityName("agent", squad.leader_id)}
-  // `active_issue_count` is `number | null | undefined` (optional). Coerce
+  // `issue_count` is `number | null | undefined` (optional). Coerce
   // `undefined` (older server / list-shaped data) to `null` so the dialog's
   // "no count" branch covers both cases identically.
-  activeIssueCount={squad.active_issue_count ?? null}
+  issueCount={squad.issue_count ?? null}
   pending={deleteMut.isPending}
   onCancel={() => setArchiveOpen(false)}
   onConfirm={async () => {
@@ -713,7 +723,8 @@ make dev
 - Navigate to a squad detail page → click `Archive` → AlertDialog opens with leader name and count
 - Click `Cancel` → closes, no mutation
 - Click `Archive` → button shows `Loader2`, disabled; after success, redirects to squads list (existing `deleteMut` `onSuccess` behavior)
-- Open DevTools → simulate `active_issue_count: null` response (older-server scenario) → dialog shows fallback copy
+- Open DevTools → simulate `issue_count: null` response (older-server scenario) → dialog shows fallback copy
+- Open a previously-closed issue that had been assigned to the now-archived squad → "Assigned to" badge shows the squad's former leader agent (v3 invariant: no archived-squad pointers remain)
 
 **Step 6: Run typecheck + view tests**
 
@@ -997,7 +1008,7 @@ test.beforeEach(async ({ page }) => {
 
 test.afterEach(async () => { await api.cleanup(); });
 
-test("archive dialog shows leader name + active issue count", async ({ page }) => {
+test("archive dialog shows leader name + total assigned issue count (all statuses)", async ({ page }) => {
   const squad = await api.createSquadWithLeader("Test Squad");
   await api.createIssue({ assignee_type: "squad", assignee_id: squad.id, title: "i1", status: "todo" });
   await api.createIssue({ assignee_type: "squad", assignee_id: squad.id, title: "i2", status: "in_progress" });
@@ -1006,7 +1017,7 @@ test("archive dialog shows leader name + active issue count", async ({ page }) =
   await page.goto(`/${api.workspaceSlug}/squads/${squad.id}`);
   await page.getByRole("button", { name: /archive/i }).first().click();
   await expect(page.getByRole("alertdialog")).toContainText(squad.leaderName);
-  await expect(page.getByRole("alertdialog")).toContainText("2"); // active only
+  await expect(page.getByRole("alertdialog")).toContainText("3"); // all statuses counted (v3)
 });
 
 test("role combobox commits on Enter and surfaces existing roles", async ({ page }) => {
@@ -1059,14 +1070,14 @@ No expected cleanup. If anything, run `pnpm lint --fix` and commit.
 
 ## Risks / Reviewer attention points
 
-1. **Param shape after `make sqlc`** — `CountActiveIssuesForSquadParams.AssigneeID` may be `pgtype.UUID` directly; do not assume a pointer helper. Verify and adjust handler call.
-2. **`active_issue_count` is `*int64` + `omitempty` on the wire; `number | null | undefined` (optional) in TS** — see *API Compatibility Notes* and Task 3 for the rationale. Old-server (no field) and count-error (null) collapse to the same "fallback copy" path in the dialog.
+1. **Param shape after `make sqlc`** — `CountIssuesForSquadParams.AssigneeID` may be `pgtype.UUID` directly; do not assume a pointer helper. Verify and adjust handler call.
+2. **`issue_count` is `*int64` + `omitempty` on the wire; `number | null | undefined` (optional) in TS** — see *API Compatibility Notes* and Task 3 for the rationale. Old-server (no field) and count-error (null) collapse to the same "fallback copy" path in the dialog.
 3. **`RoleEditor` export change** — internal helper, no consumers outside this file. Verify with `grep -rn "RoleEditor" packages/`.
 4. **Per-member saving state** — recommended approach adds local state to `MembersTab`. If the team prefers truly stateless, fall back to "always false" and rely on optimistic mutation behavior.
-5. **Archive transfer is now active-only** (resolved decision, see *Archive semantics decision*). Terminal-state issues (`done`, `cancelled`) keep their `assignee_id` pointing at the archived squad row. Squad row stays in the DB (only `archived_at` is set), so existing badge / lookup-by-id code paths continue to resolve the name. No UI changes required for "viewing a closed issue assigned to an archived squad".
-6. **No new DB index** (resolved, see *Index assumption*). `idx_issue_assignee (assignee_type, assignee_id)` is sufficient for `CountActiveIssuesForSquad` at realistic squad cardinality (low-hundreds of issues per squad). If profiling later shows the query becomes hot, add the partial index suggested in that section.
+5. **Archive is count-all + transfer-all (v3, see *Archive semantics decision*).** After `ArchiveSquad`, no issue (active or terminal) retains `assignee_id=<archived squad>` — `TransferSquadAssignees` reassigns them all to the leader agent. This eliminates two structural issues that v2 left open: (a) `useActorName` rendering "Unknown Squad" for closed issues whose squad was archived (`packages/core/workspace/hooks.ts:11,23` + `squad.sql:13`), and (b) reopening a done/cancelled issue resurrecting an archived-squad assignee through the status-only update path (`issue.go:1453-1496,1563-1570`). Product trade-off: a closed issue's historical "Assigned to" badge now shows the leader instead of the (archived) squad. Acceptable — see decision section for rationale.
+6. **No new DB index** (see *Index assumption*). `idx_issue_assignee (assignee_type, assignee_id)` is sufficient for `CountIssuesForSquad` at realistic squad cardinality (low-hundreds of issues per squad). If profiling later shows the query becomes hot, add the partial index suggested in that section.
 7. **API-compat checklist:**
-   - [x] `active_issue_count` is additive (old clients ignore it)
+   - [x] `issue_count` is additive (old clients ignore it)
    - [x] TS field declared optional — list/create/update responses do not lie about shape
    - [x] Schema is `.loose()` (matches `schemas.ts:25` convention) and tolerates missing / null / numeric values
    - [x] `parseWithFallback` wired in `getSquad`; list/create/update intentionally not wrapped (no consumer)

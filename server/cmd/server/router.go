@@ -219,6 +219,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Post("/api/webhooks/github", h.HandleGitHubWebhook)
 	r.Get("/api/github/setup", h.GitHubSetupCallback)
 
+	// Install token exchange (RFC v6.1 §6.4). Public on purpose — install.sh
+	// runs on a brand-new machine and has only the mit_ token. The token
+	// itself authenticates the request: single use, 15-min expiry, workspace
+	// embedded at mint time.
+	r.Post("/api/install-tokens/exchange", h.ExchangeInstallToken)
+
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(queries, patCache, daemonTokenCache))
@@ -532,6 +538,22 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Delete("/", h.DeleteAgentRuntime)
 				})
 			})
+
+			// Computers (RFC v6.1 §6.2 / §6.3): aggregate read paths +
+			// daemon-scoped Remove. Coexists permanently with /api/runtimes —
+			// each agent_runtime row is still mutated through the per-row
+			// canonical path; /api/computers groups them by daemon_id (§6.1).
+			r.Route("/api/computers", func(r chi.Router) {
+				r.Get("/", h.ListComputers)
+				r.Get("/{daemonId}", h.GetComputer)
+				r.Delete("/{daemonId}", h.DeleteComputer)
+			})
+
+			// Install tokens (RFC v6.1 §6.4): short-lived mit_ + exchange to
+			// long-lived mdt_. Mint requires workspace membership; exchange
+			// is unauthenticated apart from the token itself (install.sh
+			// has no PAT at the point of exchange).
+			r.Post("/api/install-tokens", h.MintInstallToken)
 
 			// Tasks (user-facing, with ownership check)
 			r.Post("/api/tasks/{taskId}/cancel", h.CancelTaskByUser)

@@ -14,7 +14,7 @@ import (
 const createDaemonToken = `-- name: CreateDaemonToken :one
 INSERT INTO daemon_token (token_hash, workspace_id, daemon_id, expires_at)
 VALUES ($1, $2, $3, $4)
-RETURNING id, token_hash, workspace_id, daemon_id, expires_at, created_at
+RETURNING id, token_hash, workspace_id, daemon_id, expires_at, created_at, revoked_at
 `
 
 type CreateDaemonTokenParams struct {
@@ -39,6 +39,7 @@ func (q *Queries) CreateDaemonToken(ctx context.Context, arg CreateDaemonTokenPa
 		&i.DaemonID,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
@@ -93,10 +94,14 @@ func (q *Queries) DeleteExpiredDaemonTokens(ctx context.Context) error {
 }
 
 const getDaemonTokenByHash = `-- name: GetDaemonTokenByHash :one
-SELECT id, token_hash, workspace_id, daemon_id, expires_at, created_at FROM daemon_token
-WHERE token_hash = $1 AND expires_at > now()
+SELECT id, token_hash, workspace_id, daemon_id, expires_at, created_at, revoked_at FROM daemon_token
+WHERE token_hash = $1 AND expires_at > now() AND revoked_at IS NULL
 `
 
+// §6.4 / D4: keep the original `expires_at > now()` filter and AND-stack
+// `revoked_at IS NULL`. mdt_ tokens are issued with expires_at = now() + 100y,
+// so the live path uses revoked_at as the kill switch while the cleanup query
+// below stays untouched and still collects genuinely expired rows.
 func (q *Queries) GetDaemonTokenByHash(ctx context.Context, tokenHash string) (DaemonToken, error) {
 	row := q.db.QueryRow(ctx, getDaemonTokenByHash, tokenHash)
 	var i DaemonToken
@@ -107,6 +112,59 @@ func (q *Queries) GetDaemonTokenByHash(ctx context.Context, tokenHash string) (D
 		&i.DaemonID,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.RevokedAt,
 	)
 	return i, err
+}
+
+const revokeDaemonToken = `-- name: RevokeDaemonToken :exec
+UPDATE daemon_token
+SET revoked_at = now()
+WHERE token_hash = $1 AND revoked_at IS NULL
+`
+
+// §6.4 / D4 explicit revoke path. Sets revoked_at = now(); GetDaemonTokenByHash
+// starts returning no rows immediately. The row itself stays until the 100-year
+// expires_at + cleanup catches it (purely a tidy-up — auth is already dead).
+func (q *Queries) RevokeDaemonToken(ctx context.Context, tokenHash string) error {
+	_, err := q.db.Exec(ctx, revokeDaemonToken, tokenHash)
+	return err
+}
+
+const revokeDaemonTokensByWorkspaceAndDaemon = `-- name: RevokeDaemonTokensByWorkspaceAndDaemon :many
+UPDATE daemon_token
+SET revoked_at = now()
+WHERE workspace_id = $1
+  AND daemon_id = $2
+  AND revoked_at IS NULL
+RETURNING token_hash
+`
+
+type RevokeDaemonTokensByWorkspaceAndDaemonParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    string      `json:"daemon_id"`
+}
+
+// §6.3 DELETE /api/computers/<daemon_id>: revoke every daemon_token for this
+// (workspace, daemon) pair without touching tokens that belong to the same
+// daemon in other workspaces. Returns token_hash so the caller can invalidate
+// DaemonTokenCache before the 10-minute TTL expires.
+func (q *Queries) RevokeDaemonTokensByWorkspaceAndDaemon(ctx context.Context, arg RevokeDaemonTokensByWorkspaceAndDaemonParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, revokeDaemonTokensByWorkspaceAndDaemon, arg.WorkspaceID, arg.DaemonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var token_hash string
+		if err := rows.Scan(&token_hash); err != nil {
+			return nil, err
+		}
+		items = append(items, token_hash)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

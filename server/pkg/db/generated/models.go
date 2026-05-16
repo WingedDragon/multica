@@ -230,6 +230,7 @@ type DaemonToken struct {
 	DaemonID    string             `json:"daemon_id"`
 	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type Feedback struct {
@@ -290,6 +291,16 @@ type InboxItem struct {
 	ActorType     pgtype.Text        `json:"actor_type"`
 	ActorID       pgtype.UUID        `json:"actor_id"`
 	Details       []byte             `json:"details"`
+}
+
+type InstallToken struct {
+	ID              pgtype.UUID        `json:"id"`
+	TokenHash       string             `json:"token_hash"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	CreatedByUserID pgtype.UUID        `json:"created_by_user_id"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	UsedAt          pgtype.Timestamptz `json:"used_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
 type Issue struct {

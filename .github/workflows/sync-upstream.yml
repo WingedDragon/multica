@@ -1,0 +1,25 @@
+name: Sync upstream main
+
+# Keep this fork's `main` fast-forwarded from upstream multica-ai/multica.
+# Scheduled workflows run from the default branch (fork-main), so this file
+# must live on fork-main. It only touches `main`, never fork-main.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # every 6 hours
+  workflow_dispatch: {} # allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync fork main from upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh repo sync "${{ github.repository }}" \
+            --source multica-ai/multica \
+            --branch main

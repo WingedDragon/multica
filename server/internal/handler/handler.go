@@ -24,6 +24,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	composio "github.com/multica-ai/multica/server/internal/integrations/composio"
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
+	"github.com/multica-ai/multica/server/internal/integrations/octo"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -228,7 +229,13 @@ type Handler struct {
 	// Config); when unconfigured its Enabled() reports false and callers fall
 	// back silently.
 	LLM *llm.Client
-	cfg Config
+	// OctoInstall owns the Octo bot registration/list/revoke lifecycle. Nil
+	// unless MULTICA_OCTO_SECRET_KEY is set.
+	OctoInstall *octo.InstallService
+	// OctoBindingTokens mints/redeems the user-binding tokens behind the
+	// "link your Octo account" prompt. Nil unless Octo is configured.
+	OctoBindingTokens *octo.BindingTokenService
+	cfg               Config
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {

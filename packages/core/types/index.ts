@@ -141,6 +141,12 @@ export type {
   RedeemSlackBindingTokenResponse,
 } from "./slack";
 export type {
+  OctoInstallation,
+  ListOctoInstallationsResponse,
+  RegisterOctoBYORequest,
+  RedeemOctoBindingTokenResponse,
+} from "./octo";
+export type {
   Autopilot,
   AutopilotStatus,
   AutopilotExecutionMode,

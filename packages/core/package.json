@@ -89,6 +89,8 @@
     "./lark/queries": "./lark/queries.ts",
     "./composio": "./composio/index.ts",
     "./composio/queries": "./composio/queries.ts",
+    "./octo": "./octo/index.ts",
+    "./octo/queries": "./octo/queries.ts",
     "./slack": "./slack/index.ts",
     "./slack/queries": "./slack/queries.ts",
     "./feedback": "./feedback/index.ts",

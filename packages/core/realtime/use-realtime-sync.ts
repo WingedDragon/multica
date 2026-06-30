@@ -23,6 +23,7 @@ import {
 } from "../agents/queries";
 import { githubKeys } from "../github/queries";
 import { larkKeys } from "../lark/queries";
+import { octoKeys } from "../octo/queries";
 import { slackKeys } from "../slack/queries";
 import {
   onIssueCreated,
@@ -674,6 +675,10 @@ export function useRealtimeSync(
       slack_installation: () => {
         const wsId = getCurrentWsId();
         if (wsId) qc.invalidateQueries({ queryKey: slackKeys.installations(wsId) });
+      },
+      octo_installation: () => {
+        const wsId = getCurrentWsId();
+        if (wsId) qc.invalidateQueries({ queryKey: octoKeys.installations(wsId) });
       },
       pull_request: () => {
         // PR list is keyed by issue id, not workspace, so we invalidate all

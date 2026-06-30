@@ -126,6 +126,10 @@ import type {
   ListSlackInstallationsResponse,
   RegisterSlackBYORequest,
   RedeemSlackBindingTokenResponse,
+  OctoInstallation,
+  ListOctoInstallationsResponse,
+  RegisterOctoBYORequest,
+  RedeemOctoBindingTokenResponse,
   Squad,
   SquadMember,
   SquadMemberStatusListResponse,
@@ -2555,6 +2559,36 @@ export class ApiClient {
 
   async redeemSlackBindingToken(token: string): Promise<RedeemSlackBindingTokenResponse> {
     return this.fetch(`/api/slack/binding/redeem`, {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+  }
+
+  // Octo integration
+  async listOctoInstallations(workspaceId: string): Promise<ListOctoInstallationsResponse> {
+    return this.fetch(`/api/workspaces/${workspaceId}/octo/installations`);
+  }
+
+  async registerOctoBYO(
+    workspaceId: string,
+    agentId: string,
+    body: RegisterOctoBYORequest,
+  ): Promise<OctoInstallation> {
+    const search = new URLSearchParams({ agent_id: agentId });
+    return this.fetch(`/api/workspaces/${workspaceId}/octo/install/byo?${search.toString()}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async deleteOctoInstallation(workspaceId: string, installationId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/octo/installations/${installationId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async redeemOctoBindingToken(token: string): Promise<RedeemOctoBindingTokenResponse> {
+    return this.fetch(`/api/octo/binding/redeem`, {
       method: "POST",
       body: JSON.stringify({ token }),
     });

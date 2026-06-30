@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { LarkTab } from "./lark-tab";
 import { ComposioTab } from "./composio-tab";
+import { OctoTab } from "./octo-tab";
 import { SlackTab } from "./slack-tab";
 import { ApiError } from "@multica/core/api";
 import { composioToolkitsOptions } from "@multica/core/composio";
@@ -13,7 +14,7 @@ import { SettingsSection, SettingsTab } from "./settings-layout";
 
 // Integrations is the umbrella tab for third-party platform connections.
 // GitHub has its own top-level tab (see github-tab.tsx); everything else
-// — currently Lark, Composio, and Slack, with Linear etc. to follow — lives in
+// — currently Lark, Composio, Slack, and Octo, with Linear etc. to follow — lives in
 // here under its own section heading so additional integrations slot in without
 // changing the IA. IntegrationsTab is just the host; each integration owns its
 // own description and install flow.
@@ -43,6 +44,9 @@ export function IntegrationsTab() {
       )}
       <SettingsSection title={t(($) => $.slack.section_title)}>
         <SlackTab />
+      </SettingsSection>
+      <SettingsSection title="Octo">
+        <OctoTab />
       </SettingsSection>
     </SettingsTab>
   );

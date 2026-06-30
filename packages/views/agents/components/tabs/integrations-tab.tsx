@@ -6,9 +6,11 @@ import type { Agent } from "@multica/core/types";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { larkInstallationsOptions } from "@multica/core/lark";
+import { octoInstallationsOptions } from "@multica/core/octo";
 import { slackInstallationsOptions } from "@multica/core/slack";
 import { memberListOptions } from "@multica/core/workspace/queries";
 import { LarkAgentBindButton } from "../../../settings/components/lark-tab";
+import { OctoAgentBindButton } from "../../../settings/components/octo-tab";
 import { SlackAgentBindButton } from "../../../settings/components/slack-tab";
 import { useT } from "../../../i18n";
 
@@ -43,6 +45,10 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
     ...slackInstallationsOptions(wsId),
     enabled: !!wsId,
   });
+  const { data: octoListing } = useQuery({
+    ...octoInstallationsOptions(wsId),
+    enabled: !!wsId,
+  });
   const { data: members = [] } = useQuery({
     ...memberListOptions(wsId),
     enabled: !!wsId,
@@ -71,6 +77,12 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
   const slackInstallSupported = slackListing?.install_supported === true;
   const slackHasActiveInstall =
     slackListing?.installations.some(
+      (inst) => inst.agent_id === agent.id && inst.status === "active",
+    ) ?? false;
+  const octoConfigured = octoListing?.configured === true;
+  const octoInstallSupported = octoListing?.install_supported === true;
+  const octoHasActiveInstall =
+    octoListing?.installations.some(
       (inst) => inst.agent_id === agent.id && inst.status === "active",
     ) ?? false;
 
@@ -180,6 +192,33 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
             </div>
           ) : (
             <SlackAgentBindButton agentId={agent.id} agentName={agent.name} />
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-lg border">
+        <div className="flex items-start gap-3 p-4">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground">
+            <MessagesSquare className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1 space-y-1">
+            <h3 className="text-sm font-medium">Octo</h3>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Connect an Octo IM bot to this agent.
+            </p>
+          </div>
+        </div>
+        <div className="border-t px-4 py-3">
+          {!octoConfigured ? (
+            <p className="text-xs text-muted-foreground">
+              Octo integration is not enabled.
+            </p>
+          ) : !octoInstallSupported && !octoHasActiveInstall ? (
+            <p className="text-xs text-muted-foreground">
+              Octo install is not available on this deployment.
+            </p>
+          ) : (
+            <OctoAgentBindButton agentId={agent.id} agentName={agent.name} />
           )}
         </div>
       </section>

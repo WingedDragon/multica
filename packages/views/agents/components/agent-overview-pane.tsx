@@ -12,6 +12,7 @@ import { useFeatureEnabled } from "@multica/core/config";
 import { COMPOSIO_MCP_APPS_FLAG } from "@multica/core/feature-flags";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { larkInstallationsOptions } from "@multica/core/lark";
+import { octoInstallationsOptions } from "@multica/core/octo";
 import { slackInstallationsOptions } from "@multica/core/slack";
 import {
   AlertDialog,
@@ -171,9 +172,15 @@ export function AgentOverviewPane({
     ...slackInstallationsOptions(wsId),
     enabled: !!wsId,
   });
+  const { data: octoListing } = useQuery({
+    ...octoInstallationsOptions(wsId),
+    enabled: !!wsId,
+  });
 
   const integrationsConfigured =
-    larkListing?.configured === true || slackListing?.configured === true;
+    larkListing?.configured === true ||
+    slackListing?.configured === true ||
+    octoListing?.configured === true;
 
   const visibleCapabilityTabs = useMemo(() => {
     const showMcp = runtime

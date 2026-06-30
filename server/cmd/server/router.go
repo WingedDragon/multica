@@ -28,6 +28,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	composiointeg "github.com/multica-ai/multica/server/internal/integrations/composio"
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
+	"github.com/multica-ai/multica/server/internal/integrations/octo"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -608,6 +609,39 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		slog.Info("composio integration disabled (COMPOSIO_API_KEY not set)")
 	}
 
+	// Octo integration. Octo is an IM platform backed by the Octo Bot API for
+	// registration/outbound and WuKongIM WebSocket protocol for inbound. It is
+	// independent from OpenClaw; only the Octo/WuKongIM protocol contract is
+	// implemented by the adapter.
+	if octoKey, err := secretbox.LoadKey("MULTICA_OCTO_SECRET_KEY"); err == nil {
+		box, err := secretbox.New(octoKey)
+		if err != nil {
+			slog.Error("octo: secretbox.New failed; octo integration disabled", "error", err)
+		} else {
+			octoBindingSvc := octo.NewBindingTokenService(queries, pool)
+			h.OctoBindingTokens = octoBindingSvc
+			octoReplier := octo.NewOutboundReplier(octo.OutboundReplierConfig{
+				Binding: octoBindingSvc,
+				Decrypt: box.Open,
+				AppURL:  appURLFromEnv(),
+				Logger:  slog.Default(),
+			})
+			channelRouter.Register(octo.TypeOcto, octo.NewOctoResolverSet(queries, pool, octoReplier))
+			octo.NewOutbound(queries, box.Open, slog.Default()).Register(bus)
+			octo.RegisterOcto(channelRegistry, octo.ChannelDeps{Decrypt: box.Open, Logger: slog.Default()})
+
+			installSvc, ierr := octo.NewInstallService(queries, pool, box, slog.Default())
+			if ierr != nil {
+				slog.Error("octo: InstallService init failed; install disabled", "error", ierr)
+			} else {
+				h.OctoInstall = installSvc
+			}
+			slog.Info("octo integration enabled")
+		}
+	} else {
+		slog.Info("octo integration disabled (MULTICA_OCTO_SECRET_KEY not set)")
+	}
+
 	if opts.HeartbeatScheduler != nil {
 		h.HeartbeatScheduler = opts.HeartbeatScheduler
 	}
@@ -944,6 +978,18 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Delete("/slack/installations/{installationId}", h.RevokeSlackInstallation)
 					r.Post("/slack/install/byo", h.RegisterSlackBYO)
 				})
+
+				// Octo integration. Same admin/member split as Slack/Lark:
+				// listing is member-visible, install/revoke require admin.
+				r.Group(func(r chi.Router) {
+					r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "id"))
+					r.Get("/octo/installations", h.ListOctoInstallations)
+				})
+				r.Group(func(r chi.Router) {
+					r.Use(middleware.RequireWorkspaceRoleFromURL(queries, "id", "owner", "admin"))
+					r.Delete("/octo/installations/{installationId}", h.RevokeOctoInstallation)
+					r.Post("/octo/install/byo", h.RegisterOctoBYO)
+				})
 			})
 		})
 
@@ -960,6 +1006,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// logged-in user (from the session) is bound to the Slack id the token
 		// carries.
 		r.Post("/api/slack/binding/redeem", h.RedeemSlackBindingToken)
+		// Octo binding-token redemption. Same flow as Lark/Slack.
+		r.Post("/api/octo/binding/redeem", h.RedeemOctoBindingToken)
 
 		// Composio integration (MUL-3720). User-scoped (no workspace context):
 		// a connection belongs to a user. These four require a logged-in

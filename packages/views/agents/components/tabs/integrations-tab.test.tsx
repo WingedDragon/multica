@@ -61,6 +61,13 @@ vi.mock("@multica/core/slack", () => ({
   }),
 }));
 
+vi.mock("@multica/core/octo", () => ({
+  octoInstallationsOptions: () => ({
+    queryKey: ["octo", "installations"],
+    queryFn: vi.fn(),
+  }),
+}));
+
 vi.mock("@multica/core/auth", () => {
   const useAuthStore = Object.assign(
     (sel?: (s: { user: { id: string } }) => unknown) =>
@@ -91,6 +98,12 @@ vi.mock("../../../settings/components/lark-tab", () => ({
 vi.mock("../../../settings/components/slack-tab", () => ({
   SlackAgentBindButton: ({ agentId }: { agentId: string }) => (
     <div data-testid="slack-bind-button" data-agent-id={agentId} />
+  ),
+}));
+
+vi.mock("../../../settings/components/octo-tab", () => ({
+  OctoAgentBindButton: ({ agentId }: { agentId: string }) => (
+    <div data-testid="octo-bind-button" data-agent-id={agentId} />
   ),
 }));
 
@@ -146,12 +159,14 @@ function resetFixtures() {
 describe("IntegrationsTab", () => {
   beforeEach(resetFixtures);
 
-  it("renders the shared bind entry for both platforms for an owner when configured and supported", () => {
+  it("renders the shared bind entry for every platform for an owner when configured and supported", () => {
     renderTab(<IntegrationsTab agent={agent} />);
     expect(screen.getByText("Lark")).toBeTruthy();
     expect(screen.getByText("Slack")).toBeTruthy();
+    expect(screen.getByText("Octo")).toBeTruthy();
     expect(screen.getByTestId("lark-bind-button").getAttribute("data-agent-id")).toBe("agent-1");
     expect(screen.getByTestId("slack-bind-button").getAttribute("data-agent-id")).toBe("agent-1");
+    expect(screen.getByTestId("octo-bind-button").getAttribute("data-agent-id")).toBe("agent-1");
   });
 
   it("shows the coming-soon notice when the install transport is not wired", () => {
@@ -186,6 +201,7 @@ describe("IntegrationsTab", () => {
     ).toBeTruthy();
     expect(screen.queryByTestId("lark-bind-button")).toBeNull();
     expect(screen.queryByTestId("slack-bind-button")).toBeNull();
+    expect(screen.queryByTestId("octo-bind-button")).toBeNull();
   });
 
   it("lets a non-admin agent owner bind Lark but keeps Slack admin-only", () => {

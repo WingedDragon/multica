@@ -156,4 +156,6 @@ const (
 	// invalidate the Slack installations query on either.
 	EventSlackInstallationCreated = "slack_installation:created"
 	EventSlackInstallationRevoked = "slack_installation:revoked"
+	EventOctoInstallationCreated  = "octo_installation:created"
+	EventOctoInstallationRevoked  = "octo_installation:revoked"
 )

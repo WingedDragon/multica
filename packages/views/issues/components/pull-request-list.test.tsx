@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
-import type { GitHubPullRequest } from "@multica/core/types";
+import type { GitHubPullRequest, GitLabMergeRequest } from "@multica/core/types";
 import enCommon from "../../locales/en/common.json";
 import enIssues from "../../locales/en/issues.json";
 
@@ -22,9 +22,24 @@ vi.mock("@multica/core/github/queries", async () => {
   };
 });
 
+vi.mock("@multica/core/gitlab/queries", async () => {
+  const actual = await vi.importActual<typeof import("@multica/core/gitlab/queries")>(
+    "@multica/core/gitlab/queries",
+  );
+  return {
+    ...actual,
+    issueGitLabMergeRequestsOptions: (issueId: string) => ({
+      queryKey: ["gitlab", "merge-requests", issueId],
+      queryFn: async () => ({ merge_requests: mockMRs }),
+      enabled: !!issueId,
+    }),
+  };
+});
+
 import { PullRequestList } from "./pull-request-list";
 
 let mockPRs: GitHubPullRequest[] = [];
+let mockMRs: GitLabMergeRequest[] = [];
 
 function makePR(overrides: Partial<GitHubPullRequest> = {}): GitHubPullRequest {
   return {
@@ -55,15 +70,46 @@ function makePR(overrides: Partial<GitHubPullRequest> = {}): GitHubPullRequest {
   };
 }
 
-function renderList() {
+function makeMR(overrides: Partial<GitLabMergeRequest> = {}): GitLabMergeRequest {
+  return {
+    id: "mr-1",
+    workspace_id: "ws-1",
+    project_path: "group/repo",
+    gitlab_project_id: 101,
+    iid: 7,
+    title: "Test MR",
+    state: "open",
+    web_url: "https://gitlab.example.test/group/repo/-/merge_requests/7",
+    source_branch: "feat/y",
+    target_branch: "main",
+    author_username: "alice",
+    author_avatar_url: null,
+    sha: "abc123",
+    detailed_merge_status: null,
+    has_conflicts: null,
+    pipeline_status: null,
+    pipeline_url: null,
+    additions: 0,
+    deletions: 0,
+    changed_files: 0,
+    merged_at: null,
+    closed_at: null,
+    mr_created_at: "2026-01-02T00:00:00Z",
+    mr_updated_at: "2026-01-02T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function renderList(issueId = "issue-1") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const result = render(
     <QueryClientProvider client={qc}>
       <I18nProvider resources={TEST_RESOURCES} locale="en">
-        <PullRequestList issueId="issue-1" />
+        <PullRequestList issueId={issueId} />
       </I18nProvider>
     </QueryClientProvider>,
   );
+  return { ...result, queryClient: qc };
 }
 
 async function waitForRender() {
@@ -71,6 +117,11 @@ async function waitForRender() {
 }
 
 describe("PullRequestList sidebar rows", () => {
+  beforeEach(() => {
+    mockPRs = [];
+    mockMRs = [];
+  });
+
   it("uses the sidebar list-row surface instead of a card surface", async () => {
     mockPRs = [makePR({ title: "Visual row" })];
     renderList();
@@ -175,6 +226,92 @@ describe("PullRequestList sidebar rows", () => {
     expect(screen.getByText("1 file")).toBeInTheDocument();
   });
 
+  it("renders GitHub PRs and GitLab MRs in the same sidebar list", async () => {
+    mockPRs = [makePR({ title: "GitHub fix" })];
+    mockMRs = [
+      makeMR({
+        title: "GitLab feature",
+        source_branch: "feat/gitlab",
+        target_branch: "main",
+      }),
+    ];
+    renderList();
+    await waitForRender();
+    expect(screen.getByText("GitHub fix")).toBeInTheDocument();
+    expect(screen.getByText("GitLab feature")).toBeInTheDocument();
+    expect(screen.getByText(/group\/repo!7/)).toBeInTheDocument();
+    const gitlabRow = screen.getByText("GitLab feature").closest('[data-testid="pull-request-row"]');
+    expect(gitlabRow).toHaveTextContent("GitLab");
+    expect(gitlabRow).toHaveTextContent("feat/gitlab -> main");
+  });
+
+  it("sorts mixed GitHub PR and GitLab MR rows by created time descending", async () => {
+    mockPRs = [makePR({ title: "Older GitHub PR", pr_created_at: "2026-01-01T00:00:00Z" })];
+    mockMRs = [makeMR({ title: "Newer GitLab MR", mr_created_at: "2026-01-03T00:00:00Z" })];
+    renderList();
+    const rows = await screen.findAllByTestId("pull-request-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("Newer GitLab MR");
+    expect(rows[1]).toHaveTextContent("Older GitHub PR");
+  });
+
+  it("renders blocked GitLab merge status before a passed pipeline", async () => {
+    mockMRs = [
+      makeMR({
+        title: "Blocked MR",
+        detailed_merge_status: "not_approved",
+        pipeline_status: "passed",
+      }),
+    ];
+    renderList();
+    await waitForRender();
+    expect(screen.getByText("Merge blocked")).toBeInTheDocument();
+    expect(screen.queryByText("All checks passed")).not.toBeInTheDocument();
+  });
+
+  it("renders unknown GitLab status safely instead of passed pipeline text", async () => {
+    mockMRs = [
+      makeMR({
+        title: "Unknown MR",
+        state: "locked" as GitLabMergeRequest["state"],
+        detailed_merge_status: "unexpected_status",
+        pipeline_status: "passed",
+      }),
+    ];
+    renderList();
+    await waitForRender();
+    expect(screen.getByText("Merge status unknown")).toBeInTheDocument();
+    expect(screen.queryByText("All checks passed")).not.toBeInTheDocument();
+  });
+
+  it("renders failed GitLab pipeline when merge status is missing", async () => {
+    mockMRs = [
+      makeMR({
+        title: "Failed pipeline MR",
+        detailed_merge_status: null,
+        pipeline_status: "failed",
+      }),
+    ];
+    renderList();
+    await waitForRender();
+    expect(screen.getByText("Some checks failed")).toBeInTheDocument();
+    expect(screen.queryByText("Merge status unknown")).not.toBeInTheDocument();
+  });
+
+  it("renders pending GitLab pipeline when merge status is unknown", async () => {
+    mockMRs = [
+      makeMR({
+        title: "Pending pipeline MR",
+        detailed_merge_status: "future_status",
+        pipeline_status: "pending",
+      }),
+    ];
+    renderList();
+    await waitForRender();
+    expect(screen.getByText("Some checks haven't completed yet")).toBeInTheDocument();
+    expect(screen.queryByText("Merge status unknown")).not.toBeInTheDocument();
+  });
+
   it("collapses extra PR rows past the visible limit behind Show more toggle", async () => {
     mockPRs = [
       makePR({ id: "a", number: 1, title: "PR-A" }),
@@ -206,6 +343,40 @@ describe("PullRequestList sidebar rows", () => {
     expect(screen.getByText("PR-B")).toBeInTheDocument();
     expect(screen.getByText("PR-C")).toBeInTheDocument();
     expect(screen.queryByText("PR-D")).not.toBeInTheDocument();
+    expect(screen.getByText("Show 1 more")).toBeInTheDocument();
+  });
+
+  it("resets expanded mixed rows when switching issues", async () => {
+    mockPRs = [
+      makePR({ id: "a-pr-1", number: 1, title: "Issue A PR 1" }),
+      makePR({ id: "a-pr-2", number: 2, title: "Issue A PR 2" }),
+    ];
+    mockMRs = [
+      makeMR({ id: "a-mr-1", iid: 1, title: "Issue A MR 1" }),
+      makeMR({ id: "a-mr-2", iid: 2, title: "Issue A MR 2" }),
+    ];
+    const view = renderList("issue-a");
+    await waitForRender();
+    fireEvent.click(screen.getByText("Show 1 more"));
+    expect(screen.getAllByTestId("pull-request-row")).toHaveLength(4);
+
+    mockPRs = [
+      makePR({ id: "b-pr-1", number: 1, title: "Issue B PR 1" }),
+      makePR({ id: "b-pr-2", number: 2, title: "Issue B PR 2" }),
+    ];
+    mockMRs = [
+      makeMR({ id: "b-mr-1", iid: 1, title: "Issue B MR 1" }),
+      makeMR({ id: "b-mr-2", iid: 2, title: "Issue B MR 2" }),
+    ];
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <I18nProvider resources={TEST_RESOURCES} locale="en">
+          <PullRequestList issueId="issue-b" />
+        </I18nProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByText("Issue B MR 1");
+    expect(screen.getAllByTestId("pull-request-row")).toHaveLength(3);
     expect(screen.getByText("Show 1 more")).toBeInTheDocument();
   });
 });

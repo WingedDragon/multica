@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -21,10 +21,12 @@ import {
   type PullRequestStatusKind,
   type PullRequestProgressSegment,
 } from "@multica/core/github";
+import { issueGitLabMergeRequestsOptions } from "@multica/core/gitlab";
 import type {
   GitHubPullRequest,
   GitHubPullRequestChecksConclusion,
-  GitHubPullRequestState,
+  GitLabMergeRequest,
+  GitLabPipelineStatus,
 } from "@multica/core/types";
 import { cn } from "@multica/ui/lib/utils";
 import { useT } from "../../i18n";
@@ -36,7 +38,7 @@ type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 const PR_LIMIT_BEFORE_COLLAPSE = 4;
 
 const STATE_ICON: Record<
-  GitHubPullRequestState,
+  string,
   { icon: React.ComponentType<{ className?: string }>; className: string }
 > = {
   open: { icon: GitPullRequestArrow, className: "text-emerald-600 dark:text-emerald-400" },
@@ -54,16 +56,74 @@ const CHECKS_ICON: Record<
   pending: { icon: CircleDashed, className: "text-amber-600 dark:text-amber-400" },
 };
 
-export function PullRequestList({ issueId }: { issueId: string }) {
+type PullRequestRowEntry =
+  | { provider: "github"; item: GitHubPullRequest }
+  | { provider: "gitlab"; item: GitLabMergeRequest };
+
+type GitLabMergeRequestStatusKind =
+  | PullRequestStatusKind
+  | "gitlab_blocked"
+  | "gitlab_checking"
+  | "gitlab_unknown";
+
+const GITLAB_CONFLICT_STATUSES = new Set(["conflict", "need_rebase"]);
+
+const GITLAB_BLOCKED_STATUSES = new Set([
+  "ci_must_pass",
+  "commits_status",
+  "discussions_not_resolved",
+  "draft_status",
+  "jira_association_missing",
+  "locked_lfs_files",
+  "locked_paths",
+  "merge_request_blocked",
+  "merge_time",
+  "not_approved",
+  "not_open",
+  "requested_changes",
+  "security_policy_pipeline_check",
+  "security_policy_violations",
+  "status_checks_must_pass",
+  "title_regex",
+]);
+
+const GITLAB_CHECKING_STATUSES = new Set([
+  "approvals_syncing",
+  "checking",
+  "ci_still_running",
+  "preparing",
+  "unchecked",
+]);
+
+export function PullRequestList({
+  issueId,
+  includeGitHub = true,
+}: {
+  issueId: string;
+  includeGitHub?: boolean;
+}) {
   const { t } = useT("issues");
   const [expanded, setExpanded] = useState(false);
-  const { data, isLoading } = useQuery(issuePullRequestsOptions(issueId));
-  const prs = data?.pull_requests ?? [];
+  const githubQuery = useQuery({
+    ...issuePullRequestsOptions(issueId),
+    enabled: includeGitHub && !!issueId,
+  });
+  const gitlabQuery = useQuery(issueGitLabMergeRequestsOptions(issueId));
+  const rows: PullRequestRowEntry[] = [
+    ...(includeGitHub
+      ? (githubQuery.data?.pull_requests ?? []).map((pr) => ({ provider: "github" as const, item: pr }))
+      : []),
+    ...(gitlabQuery.data?.merge_requests ?? []).map((mr) => ({ provider: "gitlab" as const, item: mr })),
+  ].sort((a, b) => createdAt(b).localeCompare(createdAt(a)));
 
-  if (isLoading) {
+  useEffect(() => {
+    setExpanded(false);
+  }, [issueId]);
+
+  if ((includeGitHub && githubQuery.isLoading) || gitlabQuery.isLoading) {
     return <p className="text-xs text-muted-foreground px-2">{t(($) => $.detail.pull_requests_loading)}</p>;
   }
-  if (prs.length === 0) {
+  if (rows.length === 0) {
     return (
       <p className="text-xs text-muted-foreground px-2">
         {t(($) => $.detail.pull_requests_empty)}
@@ -75,19 +135,19 @@ export function PullRequestList({ issueId }: { issueId: string }) {
   //   - <  PR_LIMIT_BEFORE_COLLAPSE: every PR row is visible.
   //   - >= PR_LIMIT_BEFORE_COLLAPSE: first (LIMIT - 1) rows are visible and
   //     the remainder sits behind a toggle.
-  const useCollapse = prs.length >= PR_LIMIT_BEFORE_COLLAPSE;
-  const expandedHead = useCollapse ? prs.slice(0, PR_LIMIT_BEFORE_COLLAPSE - 1) : prs;
-  const collapsedTail = useCollapse ? prs.slice(PR_LIMIT_BEFORE_COLLAPSE - 1) : [];
+  const useCollapse = rows.length >= PR_LIMIT_BEFORE_COLLAPSE;
+  const expandedHead = useCollapse ? rows.slice(0, PR_LIMIT_BEFORE_COLLAPSE - 1) : rows;
+  const collapsedTail = useCollapse ? rows.slice(PR_LIMIT_BEFORE_COLLAPSE - 1) : [];
 
   return (
     <div className="space-y-1">
-      {expandedHead.map((pr) => (
-        <PullRequestRow key={pr.id} pr={pr} />
+      {expandedHead.map((row) => (
+        <ProviderPullRequestRow key={`${row.provider}:${row.item.id}`} row={row} />
       ))}
       {useCollapse ? (
         <div className="space-y-1">
           {expanded
-            ? collapsedTail.map((pr) => <PullRequestRow key={pr.id} pr={pr} />)
+            ? collapsedTail.map((row) => <ProviderPullRequestRow key={`${row.provider}:${row.item.id}`} row={row} />)
             : null}
           <button
             type="button"
@@ -102,6 +162,18 @@ export function PullRequestList({ issueId }: { issueId: string }) {
       ) : null}
     </div>
   );
+}
+
+function ProviderPullRequestRow({ row }: { row: PullRequestRowEntry }) {
+  return row.provider === "github" ? (
+    <PullRequestRow pr={row.item} />
+  ) : (
+    <GitLabMergeRequestRow mr={row.item} />
+  );
+}
+
+function createdAt(row: PullRequestRowEntry): string {
+  return row.provider === "github" ? row.item.pr_created_at : row.item.mr_created_at;
 }
 
 function PullRequestRow({ pr }: { pr: GitHubPullRequest }) {
@@ -194,7 +266,7 @@ function PullRequestRowDetails({
 
   return (
     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
-      {showStats ? <PullRequestStats pr={pr} /> : null}
+      {showStats ? <PullRequestStats stats={pr} /> : null}
       <PullRequestProgressStrip segments={segments} />
       <span className="truncate">{statusText}</span>
       {showChecksBadge ? <PullRequestBadge badge={checksBadge} /> : null}
@@ -203,16 +275,89 @@ function PullRequestRowDetails({
   );
 }
 
-function PullRequestStats({ pr }: { pr: GitHubPullRequest }) {
+function GitLabMergeRequestRow({ mr }: { mr: GitLabMergeRequest }) {
+  const { t } = useT("issues");
+  const cfg = STATE_ICON[mr.state] ?? { icon: GitPullRequest, className: "" };
+  const StateIcon = cfg.icon;
+  const counts = getGitLabPipelineCounts(mr.pipeline_status);
+  const kind = deriveGitLabMergeRequestStatusKind(mr, counts);
+  const segments = deriveGitLabMergeRequestProgressSegments(mr.state, counts);
+  const showStats = shouldShowPullRequestStats({
+    additions: mr.additions,
+    deletions: mr.deletions,
+    changed_files: mr.changed_files,
+  });
+  const statusText = getGitLabStatusText(kind, t);
+  const draftPrefix = mr.state === "draft";
+  const stateLabel = getStateLabel(mr.state, t);
+  const branchLabel = getGitLabBranchLabel(mr);
+
+  return (
+    <a
+      data-testid="pull-request-row"
+      href={mr.web_url}
+      target="_blank"
+      rel="noreferrer noopener"
+      className={cn(
+        "flex items-start gap-2 rounded-md px-2 py-1.5 -mx-2 hover:bg-accent/50 transition-colors group",
+        draftPrefix ? "opacity-80" : null,
+      )}
+    >
+      <StateIcon className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", cfg.className)} />
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-medium leading-snug truncate group-hover:text-foreground">
+          {mr.title}
+        </p>
+        <p className="text-[11px] text-muted-foreground truncate">
+          {t(($) => $.detail.merge_request_provider_gitlab)} · {mr.project_path}!{mr.iid}
+          {branchLabel ? ` · ${branchLabel}` : null} · {stateLabel}
+          {mr.author_username ? ` · @${mr.author_username}` : null}
+        </p>
+        <GitLabMergeRequestRowDetails
+          mr={mr}
+          segments={segments}
+          showStats={showStats}
+          statusText={
+            draftPrefix
+              ? t(($) => $.detail.pull_request_card_draft_prefix, { status: statusText })
+              : statusText
+          }
+        />
+      </div>
+    </a>
+  );
+}
+
+function GitLabMergeRequestRowDetails({
+  mr,
+  segments,
+  showStats,
+  statusText,
+}: {
+  mr: GitLabMergeRequest;
+  segments: PullRequestProgressSegment[] | null;
+  showStats: boolean;
+  statusText: string;
+}) {
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+      {showStats ? <PullRequestStats stats={mr} /> : null}
+      <PullRequestProgressStrip segments={segments} />
+      <span className="truncate">{statusText}</span>
+    </div>
+  );
+}
+
+function PullRequestStats({ stats }: { stats: { additions?: number; deletions?: number; changed_files?: number } }) {
   const { t } = useT("issues");
   return (
     <span className="inline-flex items-center gap-1.5 tabular-nums">
-      <span className="text-emerald-600 dark:text-emerald-400">+{pr.additions ?? 0}</span>
-      <span className="text-rose-600 dark:text-rose-400">−{pr.deletions ?? 0}</span>
+      <span className="text-emerald-600 dark:text-emerald-400">+{stats.additions ?? 0}</span>
+      <span className="text-rose-600 dark:text-rose-400">−{stats.deletions ?? 0}</span>
       <span aria-hidden="true">·</span>
       <span>
         {t(($) => $.detail.pull_request_card_files_count, {
-          count: pr.changed_files ?? 0,
+          count: stats.changed_files ?? 0,
         })}
       </span>
     </span>
@@ -299,7 +444,7 @@ function getChecksBadge(
 }
 
 function getStateLabel(
-  state: GitHubPullRequestState,
+  state: string,
   t: IssuesT,
 ): string {
   return state === "open"
@@ -311,6 +456,95 @@ function getStateLabel(
         : state === "closed"
           ? t(($) => $.detail.pull_request_state_closed)
           : state;
+}
+
+function getGitLabPipelineCounts(status: GitLabPipelineStatus | string | null): {
+  failed: number;
+  pending: number;
+  passed: number;
+} {
+  return {
+    failed: status === "failed" ? 1 : 0,
+    pending: status === "pending" ? 1 : 0,
+    passed: status === "passed" ? 1 : 0,
+  };
+}
+
+function deriveGitLabMergeRequestStatusKind(
+  mr: GitLabMergeRequest,
+  counts: { failed: number; pending: number; passed: number },
+): GitLabMergeRequestStatusKind {
+  if (mr.state === "closed") return "closed";
+  if (mr.state === "merged") return "merged";
+
+  const detail = mr.detailed_merge_status ?? null;
+  if (mr.has_conflicts === true || (detail && GITLAB_CONFLICT_STATUSES.has(detail))) {
+    return "conflicts";
+  }
+  if (mr.state !== "open" && mr.state !== "draft") {
+    return "gitlab_unknown";
+  }
+  if (detail && GITLAB_BLOCKED_STATUSES.has(detail)) {
+    return "gitlab_blocked";
+  }
+  if (detail && GITLAB_CHECKING_STATUSES.has(detail)) {
+    return "gitlab_checking";
+  }
+  if (counts.failed > 0) return "checks_failed";
+  if (counts.pending > 0) return "checks_pending";
+  if (detail !== "mergeable") {
+    return "gitlab_unknown";
+  }
+  if (counts.passed > 0) return "checks_passed";
+  return "ready";
+}
+
+function getGitLabBranchLabel(mr: GitLabMergeRequest): string | null {
+  if (mr.source_branch && mr.target_branch) {
+    return `${mr.source_branch} -> ${mr.target_branch}`;
+  }
+  return mr.source_branch ?? mr.target_branch ?? null;
+}
+
+function deriveGitLabMergeRequestProgressSegments(
+  state: string,
+  counts: { failed: number; pending: number; passed: number },
+): PullRequestProgressSegment[] | null {
+  if (state === "closed" || state === "merged") return null;
+  const total = counts.failed + counts.pending + counts.passed;
+  if (total === 0) return null;
+  const segments: PullRequestProgressSegment[] = [];
+  if (counts.failed > 0) segments.push({ kind: "failed", ratio: counts.failed / total });
+  if (counts.pending > 0) segments.push({ kind: "pending", ratio: counts.pending / total });
+  if (counts.passed > 0) segments.push({ kind: "passed", ratio: counts.passed / total });
+  return segments;
+}
+
+function getGitLabStatusText(kind: GitLabMergeRequestStatusKind, t: IssuesT): string {
+  switch (kind) {
+    case "gitlab_blocked":
+      return t(($) => $.detail.merge_request_card_status_blocked);
+    case "gitlab_checking":
+      return t(($) => $.detail.merge_request_card_status_checking);
+    case "gitlab_unknown":
+      return t(($) => $.detail.merge_request_card_status_unknown);
+    case "closed":
+      return t(($) => $.detail.pull_request_card_status_closed);
+    case "merged":
+      return t(($) => $.detail.pull_request_card_status_merged);
+    case "conflicts":
+      return t(($) => $.detail.pull_request_card_status_conflicts);
+    case "checks_failed":
+      return t(($) => $.detail.pull_request_card_status_checks_failed);
+    case "checks_pending":
+      return t(($) => $.detail.pull_request_card_status_checks_pending);
+    case "checks_passed":
+      return t(($) => $.detail.pull_request_card_status_checks_passed);
+    case "ready":
+      return t(($) => $.detail.pull_request_card_status_ready);
+    case "unknown":
+      return t(($) => $.detail.pull_request_card_status_unknown);
+  }
 }
 
 function useStatusText(kind: PullRequestStatusKind): string {

@@ -10,6 +10,9 @@ import enIssues from "../../locales/en/issues.json";
 const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
 
 const mockViewport = vi.hoisted(() => ({ isMobile: false }));
+const mockGitHubSettings = vi.hoisted(() => ({
+  value: { enabled: true, prSidebar: true, coAuthor: true, autoLinkPRs: true },
+}));
 
 vi.mock("@multica/ui/hooks/use-mobile", () => ({
   useIsMobile: () => mockViewport.isMobile,
@@ -22,6 +25,16 @@ vi.mock("@multica/ui/hooks/use-mobile", () => ({
 vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
 }));
+
+vi.mock("@multica/core/github", async () => {
+  const actual = await vi.importActual<typeof import("@multica/core/github")>(
+    "@multica/core/github",
+  );
+  return {
+    ...actual,
+    useGitHubSettings: () => mockGitHubSettings.value,
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -216,6 +229,8 @@ const mockApiObj = vi.hoisted(() => ({
   listIssueReactions: vi.fn().mockResolvedValue([]),
   addIssueReaction: vi.fn(),
   removeIssueReaction: vi.fn(),
+  listIssuePullRequests: vi.fn().mockResolvedValue({ pull_requests: [] }),
+  listIssueGitLabMergeRequests: vi.fn().mockResolvedValue({ merge_requests: [] }),
   listAttachments: vi.fn().mockResolvedValue([]),
   addCommentReaction: vi.fn(),
   removeCommentReaction: vi.fn(),
@@ -530,6 +545,8 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueReactions.mockResolvedValue([]);
     mockApiObj.listIssueSubscribers.mockResolvedValue([]);
     mockApiObj.listChildIssues.mockResolvedValue({ issues: [] });
+    mockApiObj.listIssuePullRequests.mockResolvedValue({ pull_requests: [] });
+    mockApiObj.listIssueGitLabMergeRequests.mockResolvedValue({ merge_requests: [] });
     mockApiObj.listIssues.mockResolvedValue({ issues: [], total: 0 });
     mockApiObj.getActiveTasksForIssue.mockResolvedValue({ tasks: [] });
     mockApiObj.listTasksByIssue.mockResolvedValue([]);
@@ -541,6 +558,7 @@ describe("IssueDetail (shared)", () => {
     // Reset project mock — individual tests override per case. Default fixture
     // has project_id: null so getProject is not invoked.
     mockApiObj.getProject.mockReset();
+    mockGitHubSettings.value = { enabled: true, prSidebar: true, coAuthor: true, autoLinkPRs: true };
   });
 
   it("shows loading skeleton while data is loading", () => {
@@ -649,6 +667,84 @@ describe("IssueDetail (shared)", () => {
     // The "+ Add property" affordance is always offered while any
     // optional field is still hidden.
     expect(screen.getByText("Add property")).toBeInTheDocument();
+  });
+
+  it("shows GitLab merge requests without leaking GitHub PRs when the GitHub PR sidebar setting is disabled", async () => {
+    mockGitHubSettings.value = { enabled: false, prSidebar: false, coAuthor: false, autoLinkPRs: false };
+    mockApiObj.listIssuePullRequests.mockResolvedValue({
+      pull_requests: [
+        {
+          id: "pr-1",
+          workspace_id: "ws-1",
+          repo_owner: "acme",
+          repo_name: "widget",
+          number: 1,
+          title: "Hidden GitHub PR",
+          state: "open",
+          html_url: "https://github.example.test/acme/widget/pull/1",
+          branch: "feat/github",
+          author_login: "octocat",
+          author_avatar_url: null,
+          merged_at: null,
+          closed_at: null,
+          pr_created_at: "2026-01-01T00:00:00Z",
+          pr_updated_at: "2026-01-01T00:00:00Z",
+          mergeable_state: null,
+          checks_conclusion: null,
+          checks_passed: 0,
+          checks_failed: 0,
+          checks_pending: 0,
+          additions: 0,
+          deletions: 0,
+          changed_files: 0,
+        },
+      ],
+    });
+    mockApiObj.listIssueGitLabMergeRequests.mockResolvedValue({
+      merge_requests: [
+        {
+          id: "mr-1",
+          workspace_id: "ws-1",
+          project_path: "group/repo",
+          gitlab_project_id: 101,
+          iid: 7,
+          title: "GitLab-only MR",
+          state: "open",
+          web_url: "https://gitlab.example.test/group/repo/-/merge_requests/7",
+          source_branch: "feat/gitlab",
+          target_branch: "main",
+          author_username: "alice",
+          author_avatar_url: null,
+          sha: "abc123",
+          detailed_merge_status: "mergeable",
+          has_conflicts: false,
+          pipeline_status: null,
+          pipeline_url: null,
+          additions: 1,
+          deletions: 0,
+          changed_files: 1,
+          merged_at: null,
+          closed_at: null,
+          mr_created_at: "2026-01-02T00:00:00Z",
+          mr_updated_at: "2026-01-02T00:00:00Z",
+        },
+      ],
+    });
+
+    renderIssueDetail();
+
+    expect(await screen.findByText("Pull/Merge requests")).toBeInTheDocument();
+    expect(await screen.findByText("GitLab-only MR")).toBeInTheDocument();
+    expect(screen.queryByText("Hidden GitHub PR")).not.toBeInTheDocument();
+  });
+
+  it("hides the Pull/Merge requests section when GitHub sidebar is disabled and there are no GitLab MRs", async () => {
+    mockGitHubSettings.value = { enabled: false, prSidebar: false, coAuthor: false, autoLinkPRs: false };
+
+    renderIssueDetail();
+
+    await screen.findByText("Details");
+    expect(screen.queryByText("Pull/Merge requests")).not.toBeInTheDocument();
   });
 
   it("hides every optional property row when none are set", async () => {

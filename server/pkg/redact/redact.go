@@ -60,6 +60,10 @@ var patterns = []secretPattern{
 	// keys (pk_live_) are intentionally excluded — they are not secret.
 	{regexp.MustCompile(`\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b`), "[REDACTED STRIPE KEY]"},
 
+	// GitLab webhook/token values in env, JSON, and header-ish error text.
+	{regexp.MustCompile(`(?i)\bGITLAB_WEBHOOK_SECRET\s*[=:]\s*["']?[^"',\s}]+["']?`), "GITLAB_WEBHOOK_SECRET=[REDACTED]"},
+	{regexp.MustCompile(`(?i)["']?(?:secret-token|hook-secret|token)["']?\s*[=:]\s*["']?[^"',\s}]+["']?`), "[REDACTED CREDENTIAL]"},
+
 	// JWT tokens (three base64url segments)
 	{regexp.MustCompile(`\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`), "[REDACTED JWT]"},
 

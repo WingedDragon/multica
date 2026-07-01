@@ -583,6 +583,75 @@ RETURNING id
 	}
 }
 
+func TestGitLabProjectBindingResponseRedactsLastSyncError(t *testing.T) {
+	rawErr := `hook failed: GITLAB_WEBHOOK_SECRET=super-secret {"token":"json-secret"} secret-token: raw-secret glpat-AbCdEfGhIjKlMnOpQrStUvWx`
+	resp := gitLabProjectBindingToResponse(db.GitlabProjectBinding{
+		LastSyncError: pgtype.Text{String: rawErr, Valid: true},
+	})
+	if resp.LastSyncError == nil {
+		t.Fatal("expected last_sync_error to be present")
+	}
+	got := *resp.LastSyncError
+	if !strings.Contains(got, "GITLAB_WEBHOOK_SECRET") || !strings.Contains(got, "[REDACTED") {
+		t.Fatalf("expected redacted marker, got: %s", got)
+	}
+	for _, leak := range []string{
+		"=super-secret",
+		"json-secret",
+		"raw-secret",
+		"glpat-AbCdEfGhIjKlMnOpQrStUvWx",
+	} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("response mapper leaked %q in last_sync_error: %s", leak, got)
+		}
+	}
+}
+
+func TestGitLabConfigRedactsStoredLastSyncError(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	const projectID int64 = 96002
+	binding := seedGitLabProjectBinding(t, testWorkspaceID, projectID)
+	rawErr := `hook failed: GITLAB_WEBHOOK_SECRET=super-secret {"token":"json-secret"} secret-token: raw-secret glpat-AbCdEfGhIjKlMnOpQrStUvWx`
+	if _, err := testPool.Exec(
+		context.Background(),
+		`UPDATE gitlab_project_binding SET last_sync_error = $1 WHERE id = $2`,
+		rawErr,
+		binding.ID,
+	); err != nil {
+		t.Fatalf("seed raw last_sync_error: %v", err)
+	}
+
+	router := chi.NewRouter()
+	router.Route("/api/workspaces/{id}", func(r chi.Router) {
+		r.Use(middleware.RequireWorkspaceMemberFromURL(testHandler.Queries, "id"))
+		r.Get("/gitlab/config", testHandler.GetGitLabConfig)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+testWorkspaceID+"/gitlab/config", nil)
+	req.Header.Set("X-User-ID", testUserID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET config: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "GITLAB_WEBHOOK_SECRET") || !strings.Contains(body, "[REDACTED") {
+		t.Fatalf("expected redacted marker in response body, got: %s", body)
+	}
+	for _, leak := range []string{
+		"=super-secret",
+		"json-secret",
+		"raw-secret",
+		"glpat-AbCdEfGhIjKlMnOpQrStUvWx",
+	} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("GET config leaked %q in response body: %s", leak, body)
+		}
+	}
+}
+
 func TestGitLabWebhookLinksMRFromTitleBodyAndBranch(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("handler test fixture not initialized (no DB?)")

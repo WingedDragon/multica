@@ -223,6 +223,25 @@ func TestRedactGitLabToken(t *testing.T) {
 	}
 }
 
+func TestRedactGitLabWebhookSecretShapes(t *testing.T) {
+	t.Parallel()
+	input := `hook failed: GITLAB_WEBHOOK_SECRET=super-secret {"token":"json-secret"} token: header-secret secret-token: raw-secret hook-secret: hook-secret-value glpat-AbCdEfGhIjKlMnOpQrStUvWx`
+	got := Text(input)
+	leaks := []string{
+		"=super-secret",
+		"json-secret",
+		"header-secret",
+		"raw-secret",
+		"hook-secret-value",
+		"glpat-AbCdEfGhIjKlMnOpQrStUvWx",
+	}
+	for _, leak := range leaks {
+		if strings.Contains(got, leak) {
+			t.Fatalf("GitLab secret shape leaked %q in: %s", leak, got)
+		}
+	}
+}
+
 func TestRedactJWT(t *testing.T) {
 	t.Parallel()
 	input := "token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"

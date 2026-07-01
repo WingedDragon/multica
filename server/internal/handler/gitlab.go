@@ -19,6 +19,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/gitlab"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
+	"github.com/multica-ai/multica/server/pkg/redact"
 )
 
 type gitLabAPI interface {
@@ -91,9 +92,17 @@ func gitLabProjectBindingToResponse(row db.GitlabProjectBinding) GitLabProjectBi
 		WebURL:            row.WebUrl,
 		HookID:            int64PtrFromPg(row.HookID),
 		HookEnabled:       row.HookEnabled,
-		LastSyncError:     textToPtr(row.LastSyncError),
+		LastSyncError:     redactedTextPtr(row.LastSyncError),
 		CreatedAt:         timestampToString(row.CreatedAt),
 	}
+}
+
+func redactedTextPtr(t pgtype.Text) *string {
+	if !t.Valid {
+		return nil
+	}
+	s := redact.Text(t.String)
+	return &s
 }
 
 func int64PtrFromPg(v pgtype.Int8) *int64 {
@@ -236,7 +245,7 @@ func (h *Handler) CreateGitLabProjectBinding(w http.ResponseWriter, r *http.Requ
 	} else if h.cfg.PublicURL != "" {
 		hook, err := api.CreateProjectHook(r.Context(), project.ID, webhookURL, cfg.WebhookSecret)
 		if err != nil {
-			lastSyncError = strToText(err.Error())
+			lastSyncError = strToText(redact.Text(err.Error()))
 		} else {
 			hookEnabled = true
 			hookID = pgtype.Int8{Int64: hook.ID, Valid: true}

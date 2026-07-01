@@ -30,8 +30,15 @@
   "packageManager": "pnpm@10.28.2",
   "pnpm": {
     "onlyBuiltDependencies": [
+      "core-js",
+      "electron",
+      "electron-winstaller",
       "esbuild",
-      "electron"
+      "msw",
+      "protobufjs",
+      "sharp",
+      "unicode-animations",
+      "unrs-resolver"
     ],
     "overrides": {
       "@types/react": "catalog:",

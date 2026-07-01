@@ -29,6 +29,7 @@ require (
 	github.com/slack-go/slack v0.26.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
+	golang.org/x/net v0.43.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.35.0
 	google.golang.org/protobuf v1.36.8
@@ -70,6 +71,5 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 )

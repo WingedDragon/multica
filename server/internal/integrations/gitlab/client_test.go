@@ -79,7 +79,7 @@ func TestGetProjectEncodesPathWithNamespace(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":42,"path_with_namespace":"group/repo","web_url":"https://code.mlamp.cn/group/repo"}`))
+		_, _ = w.Write([]byte(`{"id":42,"path_with_namespace":"group/repo","web_url":"https://code.mlamp.cn/group/repo","http_url_to_repo":"https://code.mlamp.cn/group/repo.git","ssh_url_to_repo":"git@code.mlamp.cn:group/repo.git"}`))
 	}))
 	defer srv.Close()
 
@@ -96,6 +96,9 @@ func TestGetProjectEncodesPathWithNamespace(t *testing.T) {
 	}
 	if project.ID != 42 || project.PathWithNamespace != "group/repo" {
 		t.Fatalf("project = %+v", project)
+	}
+	if project.HTTPURLToRepo != "https://code.mlamp.cn/group/repo.git" || project.SSHURLToRepo != "git@code.mlamp.cn:group/repo.git" {
+		t.Fatalf("project clone URLs = http %q ssh %q", project.HTTPURLToRepo, project.SSHURLToRepo)
 	}
 }
 

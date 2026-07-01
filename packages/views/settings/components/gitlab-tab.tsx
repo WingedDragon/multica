@@ -19,8 +19,10 @@ import {
 } from "@multica/ui/components/ui/alert-dialog";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { gitlabConfigOptions, gitlabKeys } from "@multica/core/gitlab";
+import { workspaceKeys } from "@multica/core/workspace/queries";
 import { api } from "@multica/core/api";
 import type { GitLabProjectBinding } from "@multica/core/types";
+import { useNavigation } from "../../navigation";
 import { useT } from "../../i18n";
 import { GitLabMark } from "./gitlab-mark";
 
@@ -28,6 +30,7 @@ export function GitLabTab() {
   const { t } = useT("settings");
   const wsId = useWorkspaceId();
   const qc = useQueryClient();
+  const navigation = useNavigation();
   const [projectInput, setProjectInput] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<GitLabProjectBinding | null>(null);
 
@@ -35,12 +38,16 @@ export function GitLabTab() {
   const configured = data?.configured === true;
   const canManage = data?.can_manage === true;
   const projects = data?.projects ?? [];
+  const repositoriesHref = `${navigation.pathname}?tab=repositories`;
 
   const createProject = useMutation({
     mutationFn: (project: string) => api.createGitLabProject(wsId, { project }),
     onSuccess: async () => {
       setProjectInput("");
-      await qc.invalidateQueries({ queryKey: gitlabKeys.config(wsId) });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: gitlabKeys.config(wsId) }),
+        qc.invalidateQueries({ queryKey: workspaceKeys.list() }),
+      ]);
       toast.success(t(($) => $.gitlab.toast_project_added));
     },
     onError: (e) => {
@@ -178,6 +185,27 @@ export function GitLabTab() {
             </CardContent>
           </Card>
         )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold">{t(($) => $.gitlab.section_repositories)}</h2>
+        <Card>
+          <CardContent>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm font-medium">
+                {t(($) => $.gitlab.repositories_shortcut_label)}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigation.push(repositoriesHref)}
+              >
+                <ExternalLink className="h-3 w-3" />
+                {t(($) => $.gitlab.repositories_shortcut_link)}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       </section>
 
       <AlertDialog

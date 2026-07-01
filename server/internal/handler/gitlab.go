@@ -271,6 +271,9 @@ func (h *Handler) CreateGitLabProjectBinding(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to save gitlab project")
 		return
 	}
+	if err := h.ensureGitLabProjectWorkspaceRepo(r.Context(), wsUUID, project, requestUserID(r)); err != nil {
+		slog.Warn("gitlab: add project to workspace repos failed", "err", err, "workspace_id", workspaceID, "project_id", project.ID)
+	}
 	resp := gitLabProjectBindingToResponse(binding)
 	h.publish(protocol.EventGitLabProjectCreated, workspaceID, "system", "", map[string]any{
 		"project": resp,
@@ -279,6 +282,60 @@ func (h *Handler) CreateGitLabProjectBinding(w http.ResponseWriter, r *http.Requ
 		"project":            resp,
 		"manual_webhook_url": webhookURL,
 	})
+}
+
+func gitLabProjectCloneURL(project gitlab.Project) string {
+	for _, candidate := range []string{project.HTTPURLToRepo, project.SSHURLToRepo} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func (h *Handler) ensureGitLabProjectWorkspaceRepo(ctx context.Context, workspaceID pgtype.UUID, project gitlab.Project, userID string) error {
+	repoURL := gitLabProjectCloneURL(project)
+	if repoURL == "" || !isValidGitRepoURL(repoURL) {
+		return nil
+	}
+
+	ws, err := h.Queries.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+
+	var repos []workspaceRepoRef
+	if len(ws.Repos) > 0 {
+		if err := json.Unmarshal(ws.Repos, &repos); err != nil {
+			return err
+		}
+	}
+	for _, repo := range repos {
+		if strings.TrimSpace(repo.URL) == repoURL {
+			return nil
+		}
+	}
+
+	repos = append(repos, workspaceRepoRef{
+		URL:         repoURL,
+		Description: "GitLab: " + project.PathWithNamespace,
+	})
+	reposJSON, err := validateAndNormalizeWorkspaceRepos(repos)
+	if err != nil {
+		return err
+	}
+	updated, err := h.Queries.UpdateWorkspace(ctx, db.UpdateWorkspaceParams{
+		ID:    workspaceID,
+		Repos: reposJSON,
+	})
+	if err != nil {
+		return err
+	}
+	h.publish(protocol.EventWorkspaceUpdated, uuidToString(workspaceID), "member", userID, map[string]any{
+		"workspace": workspaceToResponse(updated),
+	})
+	return nil
 }
 
 func (h *Handler) findExistingGitLabProjectBinding(ctx context.Context, workspaceID, connectionID pgtype.UUID, projectID int64) (db.GitlabProjectBinding, bool) {

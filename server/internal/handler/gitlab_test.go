@@ -126,6 +126,38 @@ func withPublicURLForGitLabTest(t *testing.T, publicURL string) {
 	t.Cleanup(func() { testHandler.cfg.PublicURL = prev })
 }
 
+func withWorkspaceReposForGitLabTest(t *testing.T, workspaceID string, repos []workspaceRepoRef) {
+	t.Helper()
+	ctx := context.Background()
+	var previous []byte
+	if err := testPool.QueryRow(ctx, `SELECT repos FROM workspace WHERE id = $1`, workspaceID).Scan(&previous); err != nil {
+		t.Fatalf("read workspace repos: %v", err)
+	}
+	next, err := json.Marshal(repos)
+	if err != nil {
+		t.Fatalf("marshal workspace repos: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE workspace SET repos = $1 WHERE id = $2`, next, workspaceID); err != nil {
+		t.Fatalf("set workspace repos: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `UPDATE workspace SET repos = $1 WHERE id = $2`, previous, workspaceID)
+	})
+}
+
+func readWorkspaceReposForGitLabTest(t *testing.T, workspaceID string) []workspaceRepoRef {
+	t.Helper()
+	var raw []byte
+	if err := testPool.QueryRow(context.Background(), `SELECT repos FROM workspace WHERE id = $1`, workspaceID).Scan(&raw); err != nil {
+		t.Fatalf("read workspace repos: %v", err)
+	}
+	var repos []workspaceRepoRef
+	if err := json.Unmarshal(raw, &repos); err != nil {
+		t.Fatalf("decode workspace repos: %v", err)
+	}
+	return repos
+}
+
 func seedGitLabProjectBinding(t *testing.T, workspaceID string, projectID int64) db.GitlabProjectBinding {
 	t.Helper()
 	ctx := context.Background()
@@ -358,6 +390,48 @@ func TestCreateGitLabProjectBindingReusesExistingHook(t *testing.T) {
 	}
 	if !matches[0].HookID.Valid || matches[0].HookID.Int64 != 88001 || !matches[0].HookEnabled {
 		t.Fatalf("binding hook state = id %+v enabled %v, want id 88001 enabled", matches[0].HookID, matches[0].HookEnabled)
+	}
+}
+
+func TestCreateGitLabProjectBindingAddsProjectToWorkspaceRepos(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	withPublicURLForGitLabTest(t, "https://multica.example")
+	withWorkspaceReposForGitLabTest(t, testWorkspaceID, []workspaceRepoRef{
+		{URL: "https://github.com/acme/existing.git", Description: "existing"},
+	})
+	const projectID int64 = 98002
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+
+	fake := &fakeGitLabAPI{
+		project: gitlab.Project{
+			ID:                projectID,
+			PathWithNamespace: "group/shared",
+			WebURL:            "https://code.mlamp.cn/group/shared",
+			HTTPURLToRepo:     "https://code.mlamp.cn/group/shared.git",
+			SSHURLToRepo:      "git@code.mlamp.cn:group/shared.git",
+		},
+		createHookID: 88002,
+	}
+	installFakeGitLabClient(t, fake)
+
+	rec := httptest.NewRecorder()
+	testHandler.CreateGitLabProjectBinding(rec, createGitLabProjectBindingRequest(t, testWorkspaceID, "group/shared"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("CreateGitLabProjectBinding: expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	repos := readWorkspaceReposForGitLabTest(t, testWorkspaceID)
+	if len(repos) != 2 {
+		t.Fatalf("expected GitLab project to be appended to workspace repos, got %+v", repos)
+	}
+	if repos[1].URL != "https://code.mlamp.cn/group/shared.git" || repos[1].Description != "GitLab: group/shared" {
+		t.Fatalf("gitlab repo entry = %+v", repos[1])
 	}
 }
 

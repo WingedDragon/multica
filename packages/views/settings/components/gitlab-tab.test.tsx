@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "@multica/core/i18n/react";
 import type { GitLabConfigResponse } from "@multica/core/types";
 import { gitlabKeys } from "@multica/core/gitlab";
+import { workspaceKeys } from "@multica/core/workspace/queries";
 import enCommon from "../../locales/en/common.json";
 import enSettings from "../../locales/en/settings.json";
 
@@ -13,6 +14,7 @@ const mockCreateGitLabProject = vi.hoisted(() => vi.fn());
 const mockDeleteGitLabProject = vi.hoisted(() => vi.fn());
 const mockToastSuccess = vi.hoisted(() => vi.fn());
 const mockToastError = vi.hoisted(() => vi.fn());
+const mockNavPush = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: () => "workspace-1",
@@ -24,6 +26,17 @@ vi.mock("@multica/core/api", () => ({
     createGitLabProject: mockCreateGitLabProject,
     deleteGitLabProject: mockDeleteGitLabProject,
   },
+}));
+
+vi.mock("../../navigation", () => ({
+  useNavigation: () => ({
+    push: mockNavPush,
+    replace: vi.fn(),
+    back: vi.fn(),
+    pathname: "/acme/settings",
+    searchParams: new URLSearchParams("tab=gitlab"),
+    getShareableUrl: (p: string) => `https://app.example${p}`,
+  }),
 }));
 
 vi.mock("sonner", () => ({
@@ -91,6 +104,10 @@ describe("GitLabTab", () => {
     vi.clearAllMocks();
   });
 
+  afterEach(() => {
+    cleanup();
+  });
+
   it("shows the configured base URL and add form", async () => {
     renderGitLabTab();
 
@@ -98,6 +115,19 @@ describe("GitLabTab", () => {
     expect(screen.getByText("https://code.mlamp.cn")).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "group/project or URL" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add project" })).toBeTruthy();
+  });
+
+  it("points repository URL management to the shared repositories tab", async () => {
+    const user = userEvent.setup();
+    renderGitLabTab();
+
+    expect(
+      await screen.findByText("Repository URLs live in the Repositories tab"),
+    ).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Manage repositories →" }));
+
+    expect(mockNavPush).toHaveBeenCalledWith("/acme/settings?tab=repositories");
   });
 
   it("shows manual webhook details for projects without a registered hook without exposing secrets", async () => {
@@ -144,6 +174,9 @@ describe("GitLabTab", () => {
     expect((input as HTMLInputElement).value).toBe("");
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: gitlabKeys.config("workspace-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: workspaceKeys.list(),
     });
   });
 

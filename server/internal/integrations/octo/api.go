@@ -28,6 +28,13 @@ type octoOutboundMessage struct {
 	ChannelID   string
 	ChannelType octoChannelType
 	Text        string
+	ReplyTo     string
+}
+
+type octoInteractionTarget struct {
+	ChannelID   string
+	ChannelType octoChannelType
+	MessageIDs  []string
 }
 
 type sendMessageRequest struct {
@@ -66,34 +73,90 @@ func (s *octoSender) Send(ctx context.Context, out octoOutboundMessage) (channel
 		},
 		ClientMsgNo: uuid.NewString(),
 	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return channel.SendResult{}, fmt.Errorf("octo: encode send message request: %w", err)
+	if out.ReplyTo != "" {
+		reqBody.Payload.Reply = &replyPayload{MessageID: out.ReplyTo}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, octoURL(s.creds.APIURL, "/v1/bot/sendMessage"), bytes.NewReader(body))
+	respBody, err := s.postBotJSON(ctx, "/v1/bot/sendMessage", reqBody)
 	if err != nil {
-		return channel.SendResult{}, fmt.Errorf("octo: build send message request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.creds.IMToken)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return channel.SendResult{}, fmt.Errorf("octo: send message: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, octoAPITimeoutBodyLimit))
-	if err != nil {
-		return channel.SendResult{}, fmt.Errorf("octo: read send message response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return channel.SendResult{}, fmt.Errorf("octo: send message failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return channel.SendResult{}, err
 	}
 	messageID, err := octoMessageIDFromResponse(respBody)
 	if err != nil {
 		return channel.SendResult{}, err
 	}
 	return channel.SendResult{MessageID: messageID}, nil
+}
+
+func (s *octoSender) SendTyping(ctx context.Context, target octoInteractionTarget) error {
+	if err := s.validateInteractionTarget(target); err != nil {
+		return err
+	}
+	_, err := s.postBotJSON(ctx, "/v1/bot/typing", map[string]any{
+		"channel_id":   target.ChannelID,
+		"channel_type": target.ChannelType,
+	})
+	return err
+}
+
+func (s *octoSender) SendReadReceipt(ctx context.Context, target octoInteractionTarget) error {
+	if err := s.validateInteractionTarget(target); err != nil {
+		return err
+	}
+	body := map[string]any{
+		"channel_id":   target.ChannelID,
+		"channel_type": target.ChannelType,
+	}
+	if len(target.MessageIDs) > 0 {
+		body["message_ids"] = target.MessageIDs
+	}
+	_, err := s.postBotJSON(ctx, "/v1/bot/readReceipt", body)
+	return err
+}
+
+func (s *octoSender) validateInteractionTarget(target octoInteractionTarget) error {
+	if s.creds.APIURL == "" {
+		return errors.New("octo: api url not configured")
+	}
+	if s.creds.IMToken == "" {
+		return errors.New("octo: im token not configured")
+	}
+	if strings.TrimSpace(target.ChannelID) == "" {
+		return errors.New("octo: channel id is required")
+	}
+	return nil
+}
+
+func (s *octoSender) postBotJSON(ctx context.Context, path string, payload any) ([]byte, error) {
+	if s.creds.APIURL == "" {
+		return nil, errors.New("octo: api url not configured")
+	}
+	if s.creds.IMToken == "" {
+		return nil, errors.New("octo: im token not configured")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("octo: encode %s request: %w", path, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, octoURL(s.creds.APIURL, path), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("octo: build %s request: %w", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.creds.IMToken)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("octo: post %s: %w", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, octoAPITimeoutBodyLimit))
+	if err != nil {
+		return nil, fmt.Errorf("octo: read %s response: %w", path, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("octo: %s failed (%d): %s", path, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return respBody, nil
 }
 
 func octoURL(base, path string) string {

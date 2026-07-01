@@ -21,8 +21,8 @@ type octoBindingConfig struct {
 	ChannelType octoChannelType `json:"channel_type"`
 }
 
-func NewOctoResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.OutboundReplier) engine.ResolverSet {
-	return engine.ResolverSet{
+func NewOctoResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.OutboundReplier, typing ...engine.TypingNotifier) engine.ResolverSet {
+	set := engine.ResolverSet{
 		Installation: &installationResolver{q: q},
 		Identity:     &identityResolver{q: q},
 		Dedup:        &deduper{q: q},
@@ -35,6 +35,10 @@ func NewOctoResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.Outbo
 		Replier:    replier,
 		OriginType: originOctoChat,
 	}
+	if len(typing) > 0 {
+		set.Typing = typing[0]
+	}
+	return set
 }
 
 var (

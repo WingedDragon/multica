@@ -132,6 +132,7 @@ func (r *OutboundReplier) post(ctx context.Context, inst engine.ResolvedInstalla
 		ChannelID:   msg.Source.ChatID,
 		ChannelType: octoChannelTypeFromMessage(msg),
 		Text:        text,
+		ReplyTo:     msg.MessageID,
 	}); err != nil {
 		return fmt.Errorf("post octo reply: %w", err)
 	}

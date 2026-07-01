@@ -12,7 +12,6 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
-	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -45,6 +44,7 @@ func NewOutbound(q outboundQueries, decrypt Decrypter, logger *slog.Logger) *Out
 }
 
 func (o *Outbound) Register(bus *events.Bus) {
+	bus.Subscribe(protocol.EventTaskFailed, o.handleEvent)
 	bus.Subscribe(protocol.EventChatDone, o.handleEvent)
 }
 
@@ -58,8 +58,8 @@ func (o *Outbound) handleEvent(e events.Event) {
 }
 
 func (o *Outbound) processEvent(ctx context.Context, e events.Event) error {
-	sessionID, err := util.ParseUUID(e.ChatSessionID)
-	if err != nil || !sessionID.Valid {
+	sessionID, ok := octoChatSessionIDFromEvent(e)
+	if !ok {
 		return nil
 	}
 	binding, err := o.q.GetChannelChatSessionBindingBySession(ctx, db.GetChannelChatSessionBindingBySessionParams{
@@ -72,7 +72,7 @@ func (o *Outbound) processEvent(ctx context.Context, e events.Event) error {
 		}
 		return fmt.Errorf("lookup octo chat binding: %w", err)
 	}
-	content := chatDoneContent(e.Payload)
+	content := outboundEventContent(e)
 	if content == "" {
 		return nil
 	}
@@ -95,14 +95,34 @@ func (o *Outbound) processEvent(ctx context.Context, e events.Event) error {
 		ChannelID:   target.ChannelID,
 		ChannelType: target.ChannelType,
 		Text:        content,
+		ReplyTo:     target.ReplyTo,
 	}); err != nil {
 		return fmt.Errorf("post octo reply: %w", err)
 	}
 	return nil
 }
 
-func outboundTarget(b db.ChannelChatSessionBinding) octoBindingConfig {
-	target := octoBindingConfig{
+const taskFailedText = "The agent run failed before it could reply. Please try again."
+
+func outboundEventContent(e events.Event) string {
+	switch e.Type {
+	case protocol.EventChatDone:
+		return chatDoneContent(e.Payload)
+	case protocol.EventTaskFailed:
+		return taskFailedText
+	default:
+		return ""
+	}
+}
+
+type octoOutboundTarget struct {
+	ChannelID   string
+	ChannelType octoChannelType
+	ReplyTo     string
+}
+
+func outboundTarget(b db.ChannelChatSessionBinding) octoOutboundTarget {
+	target := octoOutboundTarget{
 		ChannelID:   b.ChannelChatID,
 		ChannelType: octoChannelTypeGroup,
 	}
@@ -119,6 +139,9 @@ func outboundTarget(b db.ChannelChatSessionBinding) octoBindingConfig {
 				target.ChannelType = cfg.ChannelType
 			}
 		}
+	}
+	if b.LastMessageID.Valid {
+		target.ReplyTo = b.LastMessageID.String
 	}
 	return target
 }

@@ -141,6 +141,29 @@ func TestInboundFromBotMessageRichTextUsesPlain(t *testing.T) {
 	}
 }
 
+func TestInboundFromBotMessageCarriesReplyContext(t *testing.T) {
+	msg, ok := inboundFromBotMessage(botMessage{
+		MessageID:   "9007",
+		MessageSeq:  11,
+		FromUID:     "u-alice",
+		ChannelID:   "group-1",
+		ChannelType: octoChannelTypeGroup,
+		Timestamp:   1700000004,
+		Payload: messagePayload{
+			Type:    octoMessageTypeText,
+			Content: "replying to this",
+			Reply:   &replyPayload{MessageID: "9001"},
+			Mention: &mentionPayload{UIDs: []string{"r-bot"}},
+		},
+	}, "r-bot")
+	if !ok {
+		t.Fatal("expected reply message to be ingestable")
+	}
+	if msg.ReplyTo == nil || msg.ReplyTo.MessageID != "9001" {
+		t.Fatalf("ReplyTo = %+v, want message 9001", msg.ReplyTo)
+	}
+}
+
 func TestInboundFromBotMessageSkipsSelfAndUnsupportedTypes(t *testing.T) {
 	if _, ok := inboundFromBotMessage(botMessage{
 		MessageID:   "9005",

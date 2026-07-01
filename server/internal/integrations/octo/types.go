@@ -49,9 +49,17 @@ type messagePayload struct {
 	URL     string          `json:"url,omitempty"`
 	Name    string          `json:"name,omitempty"`
 	Mention *mentionPayload `json:"mention,omitempty"`
+	Reply   *replyPayload   `json:"reply,omitempty"`
 	Plain   string          `json:"plain,omitempty"`
 	Users   []forwardUser   `json:"users,omitempty"`
 	Msgs    []forwardMsg    `json:"msgs,omitempty"`
+}
+
+type replyPayload struct {
+	MessageID string          `json:"message_id,omitempty"`
+	Payload   *messagePayload `json:"payload,omitempty"`
+	FromUID   string          `json:"from_uid,omitempty"`
+	FromName  string          `json:"from_name,omitempty"`
 }
 
 type mentionPayload struct {

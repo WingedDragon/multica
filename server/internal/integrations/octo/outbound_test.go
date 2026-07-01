@@ -67,13 +67,21 @@ func octoChatDoneEvent(sessionID string, content string) events.Event {
 	}
 }
 
-func TestOutboundPostsReplyWithBoundOctoChannelType(t *testing.T) {
+func octoTaskFailedEvent(sessionID string) events.Event {
+	return events.Event{
+		Type:    protocol.EventTaskFailed,
+		Payload: map[string]any{"chat_session_id": sessionID},
+	}
+}
+
+func TestOutboundPostsReplyWithBoundOctoChannelTypeAndQuoteTarget(t *testing.T) {
 	cfg, _ := json.Marshal(octoBindingConfig{ChannelID: "group-1____topic-1", ChannelType: octoChannelTypeCommunityTopic})
 	q := &fakeOctoOutboundQueries{
 		binding: db.ChannelChatSessionBinding{
 			InstallationID: testUUID(1),
 			ChannelChatID:  "group-1____topic-1",
 			Config:         cfg,
+			LastMessageID:  pgtype.Text{String: "9001", Valid: true},
 		},
 		inst: db.ChannelInstallation{ID: testUUID(1), Status: "active", Config: octoInstallConfigJSON()},
 	}
@@ -89,8 +97,43 @@ func TestOutboundPostsReplyWithBoundOctoChannelType(t *testing.T) {
 	if fs.got.ChannelID != "group-1____topic-1" || fs.got.ChannelType != octoChannelTypeCommunityTopic {
 		t.Errorf("target = %+v", fs.got)
 	}
+	if fs.got.ReplyTo != "9001" {
+		t.Errorf("reply target = %q, want last inbound message", fs.got.ReplyTo)
+	}
 	if fs.got.Text != "done" {
 		t.Errorf("text = %q", fs.got.Text)
+	}
+}
+
+func TestOutboundPostsTaskFailedNotice(t *testing.T) {
+	const sid = "00000000-0000-0000-0000-000000000001"
+	cfg, _ := json.Marshal(octoBindingConfig{ChannelID: "group-1", ChannelType: octoChannelTypeGroup})
+	q := &fakeOctoOutboundQueries{
+		binding: db.ChannelChatSessionBinding{
+			InstallationID: testUUID(1),
+			ChannelChatID:  "group-1",
+			Config:         cfg,
+			LastMessageID:  pgtype.Text{String: "9001", Valid: true},
+		},
+		inst: db.ChannelInstallation{ID: testUUID(1), Status: "active", Config: octoInstallConfigJSON()},
+	}
+	fs := &fakeOctoSender{}
+	o := NewOutbound(q, nil, nil)
+	o.newSender = func(credentials) octoReplySender { return fs }
+
+	o.handleEvent(octoTaskFailedEvent(sid))
+
+	if fs.called != 1 {
+		t.Fatalf("sender called %d times, want 1", fs.called)
+	}
+	if fs.got.ChannelID != "group-1" || fs.got.ChannelType != octoChannelTypeGroup {
+		t.Fatalf("target = %+v", fs.got)
+	}
+	if fs.got.ReplyTo != "9001" {
+		t.Fatalf("failed notice should quote last inbound message, got %q", fs.got.ReplyTo)
+	}
+	if fs.got.Text == "" {
+		t.Fatal("failed notice text must be non-empty")
 	}
 }
 

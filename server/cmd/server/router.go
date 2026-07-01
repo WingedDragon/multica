@@ -626,7 +626,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				AppURL:  appURLFromEnv(),
 				Logger:  slog.Default(),
 			})
-			channelRouter.Register(octo.TypeOcto, octo.NewOctoResolverSet(queries, pool, octoReplier))
+			octoTyping := octo.NewTypingIndicatorManager(queries, box.Open, slog.Default())
+			octoTyping.Register(bus)
+			channelRouter.Register(octo.TypeOcto, octo.NewOctoResolverSet(queries, pool, octoReplier, octoTyping))
 			octo.NewOutbound(queries, box.Open, slog.Default()).Register(bus)
 			octo.RegisterOcto(channelRegistry, octo.ChannelDeps{Decrypt: box.Open, Logger: slog.Default()})
 

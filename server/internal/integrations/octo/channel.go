@@ -30,7 +30,7 @@ type octoChannel struct {
 func (c *octoChannel) Type() channel.Type { return TypeOcto }
 
 func (c *octoChannel) Capabilities() channel.Capability {
-	return channel.CapText
+	return channel.CapText | channel.CapThreadReply | channel.CapQuoteReply | channel.CapTypingIndicator
 }
 
 func (c *octoChannel) Connect(ctx context.Context) error {
@@ -47,10 +47,17 @@ func (c *octoChannel) Send(ctx context.Context, out channel.OutboundMessage) (ch
 	if c.sender == nil {
 		return channel.SendResult{}, errors.New("octo: sender not configured")
 	}
+	channelID := out.ChatID
+	channelType := octoChannelTypeDM
+	if out.ThreadID != "" {
+		channelID = out.ThreadID
+		channelType = octoChannelTypeCommunityTopic
+	}
 	return c.sender.Send(ctx, octoOutboundMessage{
-		ChannelID:   out.ChatID,
-		ChannelType: octoChannelTypeDM,
+		ChannelID:   channelID,
+		ChannelType: channelType,
 		Text:        out.Text,
+		ReplyTo:     out.ReplyTo,
 	})
 }
 

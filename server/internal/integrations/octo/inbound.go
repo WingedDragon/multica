@@ -36,6 +36,7 @@ func inboundFromBotMessage(m botMessage, robotID string) (channel.InboundMessage
 		MessageID:      m.MessageID,
 		Type:           msgType,
 		Text:           text,
+		ReplyTo:        replyCtxFromPayload(m.Payload),
 		AddressedToBot: addressed,
 		Source: channel.Source{
 			ChannelType: TypeOcto,
@@ -45,6 +46,13 @@ func inboundFromBotMessage(m botMessage, robotID string) (channel.InboundMessage
 		},
 		Raw: raw,
 	}, true
+}
+
+func replyCtxFromPayload(p messagePayload) *channel.ReplyCtx {
+	if p.Reply == nil || p.Reply.MessageID == "" {
+		return nil
+	}
+	return &channel.ReplyCtx{MessageID: p.Reply.MessageID}
 }
 
 func normalizeChatType(t octoChannelType) channel.ChatType {

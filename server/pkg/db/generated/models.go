@@ -502,6 +502,71 @@ type GithubPullRequestCheckSuite struct {
 	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
 }
 
+type GitlabConnection struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	BaseUrl       string             `json:"base_url"`
+	Host          string             `json:"host"`
+	ConnectedByID pgtype.UUID        `json:"connected_by_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+type GitlabMergeRequest struct {
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	ProjectBindingID    pgtype.UUID        `json:"project_binding_id"`
+	GitlabProjectID     int64              `json:"gitlab_project_id"`
+	MrIid               int32              `json:"mr_iid"`
+	Title               string             `json:"title"`
+	Description         pgtype.Text        `json:"description"`
+	State               string             `json:"state"`
+	WebUrl              string             `json:"web_url"`
+	SourceBranch        pgtype.Text        `json:"source_branch"`
+	TargetBranch        pgtype.Text        `json:"target_branch"`
+	AuthorUsername      pgtype.Text        `json:"author_username"`
+	AuthorAvatarUrl     pgtype.Text        `json:"author_avatar_url"`
+	Sha                 string             `json:"sha"`
+	MergeCommitSha      pgtype.Text        `json:"merge_commit_sha"`
+	DetailedMergeStatus pgtype.Text        `json:"detailed_merge_status"`
+	HasConflicts        pgtype.Bool        `json:"has_conflicts"`
+	Additions           int32              `json:"additions"`
+	Deletions           int32              `json:"deletions"`
+	ChangedFiles        int32              `json:"changed_files"`
+	MrCreatedAt         pgtype.Timestamptz `json:"mr_created_at"`
+	MrUpdatedAt         pgtype.Timestamptz `json:"mr_updated_at"`
+	MergedAt            pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt            pgtype.Timestamptz `json:"closed_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+}
+
+type GitlabMrPipeline struct {
+	MergeRequestID    pgtype.UUID        `json:"merge_request_id"`
+	PipelineID        int64              `json:"pipeline_id"`
+	Sha               string             `json:"sha"`
+	Ref               pgtype.Text        `json:"ref"`
+	Status            string             `json:"status"`
+	WebUrl            pgtype.Text        `json:"web_url"`
+	PipelineUpdatedAt pgtype.Timestamptz `json:"pipeline_updated_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type GitlabProjectBinding struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	ConnectionID      pgtype.UUID        `json:"connection_id"`
+	GitlabProjectID   int64              `json:"gitlab_project_id"`
+	PathWithNamespace string             `json:"path_with_namespace"`
+	WebUrl            string             `json:"web_url"`
+	HookID            pgtype.Int8        `json:"hook_id"`
+	HookEnabled       bool               `json:"hook_enabled"`
+	LastSyncError     pgtype.Text        `json:"last_sync_error"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type InboxItem struct {
 	ID            pgtype.UUID        `json:"id"`
 	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
@@ -553,6 +618,16 @@ type IssueDependency struct {
 	IssueID          pgtype.UUID `json:"issue_id"`
 	DependsOnIssueID pgtype.UUID `json:"depends_on_issue_id"`
 	Type             string      `json:"type"`
+}
+
+type IssueGitlabMergeRequest struct {
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	IssueID        pgtype.UUID        `json:"issue_id"`
+	MergeRequestID pgtype.UUID        `json:"merge_request_id"`
+	CloseIntent    bool               `json:"close_intent"`
+	LinkedByType   pgtype.Text        `json:"linked_by_type"`
+	LinkedByID     pgtype.UUID        `json:"linked_by_id"`
+	LinkedAt       pgtype.Timestamptz `json:"linked_at"`
 }
 
 type IssueLabel struct {

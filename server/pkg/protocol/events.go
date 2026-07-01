@@ -140,6 +140,11 @@ const (
 	EventPullRequestUpdated        = "pull_request:updated"
 	EventPullRequestUnlinked       = "pull_request:unlinked"
 
+	// GitLab integration events
+	EventGitLabProjectCreated      = "gitlab_project:created"
+	EventGitLabProjectDeleted      = "gitlab_project:deleted"
+	EventGitLabMergeRequestUpdated = "gitlab_merge_request:updated"
+
 	// Lark integration events. `created` covers both first-install
 	// (UNIQUE on (workspace_id, agent_id) means at most one row per
 	// agent) and re-install via UpsertLarkInstallation — front-ends

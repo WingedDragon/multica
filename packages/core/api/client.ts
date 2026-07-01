@@ -115,6 +115,10 @@ import type {
   GitHubPullRequest,
   ListGitHubInstallationsResponse,
   GitHubConnectResponse,
+  CreateGitLabProjectRequest,
+  CreateGitLabProjectResponse,
+  GitLabConfigResponse,
+  ListGitLabMergeRequestsResponse,
   ListLarkInstallationsResponse,
   BeginLarkInstallResponse,
   LarkInstallStatusResponse,
@@ -232,6 +236,7 @@ import {
   EMPTY_CHAT_DRAFT_RESTORES,
   CreateFeedbackResponseSchema,
   EMPTY_CREATE_FEEDBACK_RESPONSE,
+  EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
   InboxUnreadSummarySchema,
   EMPTY_INBOX_UNREAD_SUMMARY,
   LabelSchema,
@@ -240,6 +245,11 @@ import {
   EMPTY_LABEL,
   EMPTY_LIST_LABELS_RESPONSE,
   EMPTY_RESOURCE_LABELS_RESPONSE,
+  CreateGitLabProjectResponseSchema,
+  EMPTY_GITLAB_CONFIG_RESPONSE,
+  EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
+  GitLabConfigResponseSchema,
+  ListGitLabMergeRequestsResponseSchema,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -2456,6 +2466,46 @@ export class ApiClient {
 
   async listIssuePullRequests(issueId: string): Promise<{ pull_requests: GitHubPullRequest[] }> {
     return this.fetch(`/api/issues/${issueId}/pull-requests`);
+  }
+
+  // GitLab integration
+  async getGitLabConfig(workspaceId: string): Promise<GitLabConfigResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/gitlab/config`);
+    return parseWithFallback(raw, GitLabConfigResponseSchema, EMPTY_GITLAB_CONFIG_RESPONSE, {
+      endpoint: "GET /api/workspaces/:id/gitlab/config",
+    });
+  }
+
+  async createGitLabProject(
+    workspaceId: string,
+    input: CreateGitLabProjectRequest,
+  ): Promise<CreateGitLabProjectResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/gitlab/projects`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return parseWithFallback(
+      raw,
+      CreateGitLabProjectResponseSchema,
+      EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
+      { endpoint: "POST /api/workspaces/:id/gitlab/projects" },
+    );
+  }
+
+  async deleteGitLabProject(workspaceId: string, bindingId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/gitlab/projects/${bindingId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async listIssueGitLabMergeRequests(issueId: string): Promise<ListGitLabMergeRequestsResponse> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/gitlab/merge-requests`);
+    return parseWithFallback(
+      raw,
+      ListGitLabMergeRequestsResponseSchema,
+      EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
+      { endpoint: "GET /api/issues/:id/gitlab/merge-requests" },
+    );
   }
 
   // Lark integration

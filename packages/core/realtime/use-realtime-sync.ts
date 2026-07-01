@@ -22,6 +22,7 @@ import {
   agentTasksKeys,
 } from "../agents/queries";
 import { githubKeys } from "../github/queries";
+import { gitlabKeys } from "../gitlab/queries";
 import { larkKeys } from "../lark/queries";
 import { octoKeys } from "../octo/queries";
 import { slackKeys } from "../slack/queries";
@@ -667,6 +668,13 @@ export function useRealtimeSync(
       github_installation: () => {
         const wsId = getCurrentWsId();
         if (wsId) qc.invalidateQueries({ queryKey: githubKeys.installations(wsId) });
+      },
+      gitlab_project: () => {
+        const wsId = getCurrentWsId();
+        if (wsId) qc.invalidateQueries({ queryKey: gitlabKeys.config(wsId) });
+      },
+      gitlab_merge_request: () => {
+        qc.invalidateQueries({ queryKey: ["gitlab", "merge-requests"] });
       },
       lark_installation: () => {
         const wsId = getCurrentWsId();

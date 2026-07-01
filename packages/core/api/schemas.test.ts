@@ -7,14 +7,20 @@ import {
   DashboardUsageDailyListSchema,
   ChatDraftRestoresResponseSchema,
   CreateFeedbackResponseSchema,
+  CreateGitLabProjectResponseSchema,
   DuplicateIssueErrorBodySchema,
   EMPTY_CHAT_DRAFT_RESTORES,
   EMPTY_CREATE_FEEDBACK_RESPONSE,
+  EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
+  EMPTY_GITLAB_CONFIG_RESPONSE,
   EMPTY_INBOX_UNREAD_SUMMARY,
   EMPTY_SEARCH_PROJECTS_RESPONSE,
+  EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
   EMPTY_USER,
+  GitLabConfigResponseSchema,
   InboxUnreadSummarySchema,
   IssueTriggerPreviewSchema,
+  ListGitLabMergeRequestsResponseSchema,
   ListIssuesResponseSchema,
   SearchProjectsResponseSchema,
   RuntimeHourlyActivityListSchema,
@@ -337,6 +343,115 @@ describe("CreateFeedbackResponseSchema", () => {
     expect(
       parseWithFallback(null, CreateFeedbackResponseSchema, EMPTY_CREATE_FEEDBACK_RESPONSE, ENDPOINT),
     ).toBe(EMPTY_CREATE_FEEDBACK_RESPONSE);
+  });
+});
+
+describe("GitLab API schemas", () => {
+  it("accepts config responses with future fields", () => {
+    const parsed = GitLabConfigResponseSchema.parse({
+      configured: true,
+      can_manage: true,
+      base_url: "https://gitlab.example.com",
+      manual_webhook_url: "https://app.example.com/gitlab/webhook",
+      projects: [
+        {
+          id: "binding-1",
+          workspace_id: "workspace-1",
+          gitlab_project_id: 42,
+          path_with_namespace: "team/project",
+          web_url: "https://gitlab.example.com/team/project",
+          hook_id: 1001,
+          hook_enabled: true,
+          last_sync_error: null,
+          created_at: "2026-07-01T00:00:00Z",
+          future_field: "kept",
+        },
+      ],
+      future_top_level: true,
+    });
+
+    expect(parsed.projects[0]?.path_with_namespace).toBe("team/project");
+    expect(parsed.projects[0]?.future_field).toBe("kept");
+  });
+
+  it("falls back for malformed config responses", () => {
+    const parsed = parseWithFallback(
+      { configured: "yes", projects: "nope" },
+      GitLabConfigResponseSchema,
+      EMPTY_GITLAB_CONFIG_RESPONSE,
+      { endpoint: "GET /api/workspaces/:id/gitlab/config" },
+    );
+
+    expect(parsed).toEqual(EMPTY_GITLAB_CONFIG_RESPONSE);
+  });
+
+  it("falls back for malformed create project responses", () => {
+    const parsed = parseWithFallback(
+      {
+        project: {
+          id: "binding-1",
+          workspace_id: "workspace-1",
+          gitlab_project_id: "42",
+          path_with_namespace: "team/project",
+          web_url: "https://gitlab.example.com/team/project",
+          hook_enabled: true,
+          created_at: "2026-07-01T00:00:00Z",
+        },
+      },
+      CreateGitLabProjectResponseSchema,
+      EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
+      { endpoint: "POST /api/workspaces/:id/gitlab/projects" },
+    );
+
+    expect(parsed).toEqual(EMPTY_CREATE_GITLAB_PROJECT_RESPONSE);
+  });
+
+  it("accepts merge request responses with future state/status values", () => {
+    const parsed = ListGitLabMergeRequestsResponseSchema.parse({
+      merge_requests: [
+        {
+          id: "mr-1",
+          workspace_id: "workspace-1",
+          project_path: "team/project",
+          gitlab_project_id: 42,
+          iid: 7,
+          title: "Add GitLab integration",
+          state: "locked",
+          web_url: "https://gitlab.example.com/team/project/-/merge_requests/7",
+          source_branch: "feature",
+          target_branch: "main",
+          author_username: "ada",
+          author_avatar_url: null,
+          sha: "abc123",
+          detailed_merge_status: "checking",
+          has_conflicts: false,
+          pipeline_status: "skipped",
+          pipeline_url: null,
+          additions: 10,
+          deletions: 2,
+          changed_files: 3,
+          merged_at: null,
+          closed_at: null,
+          mr_created_at: "2026-07-01T00:00:00Z",
+          mr_updated_at: "2026-07-01T00:00:00Z",
+          future_field: "kept",
+        },
+      ],
+    });
+
+    expect(parsed.merge_requests[0]?.state).toBe("locked");
+    expect(parsed.merge_requests[0]?.pipeline_status).toBe("skipped");
+  });
+
+  it("falls back for malformed merge request responses", () => {
+    const parsed = parseWithFallback(
+      { merge_requests: [{ id: "mr-1", iid: "7" }] },
+      ListGitLabMergeRequestsResponseSchema,
+      EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
+      { endpoint: "GET /api/issues/:id/gitlab/merge-requests" },
+    );
+
+    expect(parsed).toEqual(EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE);
   });
 });
 

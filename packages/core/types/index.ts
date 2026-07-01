@@ -123,6 +123,16 @@ export type {
   GitHubConnectResponse,
 } from "./github";
 export type {
+  CreateGitLabProjectRequest,
+  CreateGitLabProjectResponse,
+  GitLabConfigResponse,
+  GitLabMergeRequest,
+  GitLabMergeRequestState,
+  GitLabPipelineStatus,
+  GitLabProjectBinding,
+  ListGitLabMergeRequestsResponse,
+} from "./gitlab";
+export type {
   LarkInstallation,
   ListLarkInstallationsResponse,
   BeginLarkInstallResponse,

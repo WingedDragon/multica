@@ -78,6 +78,9 @@ export type WSEventType =
   | "invitation:revoked"
   | "github_installation:created"
   | "github_installation:deleted"
+  | "gitlab_project:created"
+  | "gitlab_project:deleted"
+  | "gitlab_merge_request:updated"
   | "pull_request:linked"
   | "pull_request:updated"
   | "pull_request:unlinked";
@@ -512,6 +515,9 @@ export interface WSEventPayloadMap {
   "pin:reordered": unknown;
   "github_installation:created": unknown;
   "github_installation:deleted": unknown;
+  "gitlab_project:created": unknown;
+  "gitlab_project:deleted": unknown;
+  "gitlab_merge_request:updated": unknown;
   "pull_request:linked": unknown;
   "pull_request:updated": unknown;
   "pull_request:unlinked": unknown;

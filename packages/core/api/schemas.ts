@@ -16,11 +16,15 @@ import type {
   CreateAgentFromTemplateResponse,
   CreateBillingCheckoutSessionResponse,
   CreateBillingPortalSessionResponse,
+  CreateGitLabProjectResponse,
+  GitLabConfigResponse,
+  GitLabProjectBinding,
   GroupedIssuesResponse,
   InboxWorkspaceUnread,
   Label,
   ListIssuesResponse,
   ListLabelsResponse,
+  ListGitLabMergeRequestsResponse,
   ListWebhookDeliveriesResponse,
   ResourceLabelsResponse,
   SearchIssuesResponse,
@@ -1103,6 +1107,95 @@ export const InboxUnreadSummarySchema = z.array(
 );
 
 export const EMPTY_INBOX_UNREAD_SUMMARY: InboxWorkspaceUnread[] = [];
+
+// ---------------------------------------------------------------------------
+// GitLab integration schemas
+//
+// These endpoints feed settings/issue-detail integration UI and may drift as
+// the backend mirrors more GitLab fields. String enums intentionally parse as
+// plain strings and every object stays `.loose()` so a new GitLab state/status
+// or additive backend field does not white-screen older clients.
+// ---------------------------------------------------------------------------
+
+export const GitLabProjectBindingSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  gitlab_project_id: z.number(),
+  path_with_namespace: z.string(),
+  web_url: z.string(),
+  hook_id: z.number().optional(),
+  hook_enabled: z.boolean(),
+  last_sync_error: z.string().nullable().optional(),
+  created_at: z.string(),
+}).loose();
+
+export const EMPTY_GITLAB_PROJECT_BINDING: GitLabProjectBinding = {
+  id: "",
+  workspace_id: "",
+  gitlab_project_id: 0,
+  path_with_namespace: "",
+  web_url: "",
+  hook_enabled: false,
+  last_sync_error: null,
+  created_at: "",
+};
+
+export const GitLabConfigResponseSchema = z.object({
+  configured: z.boolean(),
+  can_manage: z.boolean().optional(),
+  base_url: z.string().optional(),
+  manual_webhook_url: z.string().optional(),
+  projects: z.array(GitLabProjectBindingSchema).default([]),
+}).loose();
+
+export const EMPTY_GITLAB_CONFIG_RESPONSE: GitLabConfigResponse = {
+  configured: false,
+  projects: [],
+};
+
+export const CreateGitLabProjectResponseSchema = z.object({
+  project: GitLabProjectBindingSchema,
+  manual_webhook_url: z.string().optional(),
+}).loose();
+
+export const EMPTY_CREATE_GITLAB_PROJECT_RESPONSE: CreateGitLabProjectResponse = {
+  project: EMPTY_GITLAB_PROJECT_BINDING,
+};
+
+export const GitLabMergeRequestSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  project_path: z.string(),
+  gitlab_project_id: z.number(),
+  iid: z.number(),
+  title: z.string(),
+  state: z.string(),
+  web_url: z.string(),
+  source_branch: z.string().nullable(),
+  target_branch: z.string().nullable(),
+  author_username: z.string().nullable(),
+  author_avatar_url: z.string().nullable(),
+  sha: z.string(),
+  detailed_merge_status: z.string().nullable(),
+  has_conflicts: z.boolean().nullable(),
+  pipeline_status: z.string().nullable(),
+  pipeline_url: z.string().nullable(),
+  additions: z.number().optional(),
+  deletions: z.number().optional(),
+  changed_files: z.number().optional(),
+  merged_at: z.string().nullable(),
+  closed_at: z.string().nullable(),
+  mr_created_at: z.string(),
+  mr_updated_at: z.string(),
+}).loose();
+
+export const ListGitLabMergeRequestsResponseSchema = z.object({
+  merge_requests: z.array(GitLabMergeRequestSchema).default([]),
+}).loose();
+
+export const EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE: ListGitLabMergeRequestsResponse = {
+  merge_requests: [],
+};
 
 // ---------------------------------------------------------------------------
 // Billing schemas (cloud-billing proxy surface)

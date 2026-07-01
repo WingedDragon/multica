@@ -227,6 +227,9 @@ func TestRedactGitLabWebhookSecretShapes(t *testing.T) {
 	t.Parallel()
 	input := `hook failed: GITLAB_WEBHOOK_SECRET=super-secret {"token":"json-secret"} token: header-secret secret-token: raw-secret hook-secret: hook-secret-value glpat-AbCdEfGhIjKlMnOpQrStUvWx`
 	got := Text(input)
+	if !strings.Contains(got, "GITLAB_WEBHOOK_SECRET") {
+		t.Fatalf("GitLab webhook secret key name should remain identifiable: %s", got)
+	}
 	leaks := []string{
 		"=super-secret",
 		"json-secret",

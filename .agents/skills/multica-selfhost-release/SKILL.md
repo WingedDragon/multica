@@ -23,6 +23,7 @@ Use this skill for the recurring self-hosted Multica release path:
 - Do not use `git add .`. Stage only the files that belong to the requested release.
 - If the remote working tree has a valuable change, copy it back locally, commit it on the current branch, rebase, push, then fast-forward the remote checkout.
 - If the remote working tree has only generated noise, leave it uncommitted or restore it only when it blocks a Git operation.
+- If a rebase rewrites the feature branch history, the deployment checkout may no longer fast-forward. Only reset the remote checkout after confirming the only remote dirty file is generated `apps/web/next-env.d.ts`; abort on any other remote local changes.
 
 ## Standard Workflow
 

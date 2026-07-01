@@ -39,7 +39,18 @@ git fetch "$REMOTE_NAME" "$BRANCH"
 if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
   git switch "$BRANCH" || git switch -c "$BRANCH" "$REMOTE_NAME/$BRANCH"
 fi
-git merge --ff-only "$REMOTE_NAME/$BRANCH"
+if [ -n "$(git status --porcelain)" ]; then
+  unexpected="$(git status --porcelain | grep -v "^ M apps/web/next-env.d.ts$" || true)"
+  if [ -n "$unexpected" ]; then
+    echo "Remote worktree has unexpected local changes:" >&2
+    git status --short >&2
+    exit 4
+  fi
+  git restore apps/web/next-env.d.ts
+fi
+if ! git merge --ff-only "$REMOTE_NAME/$BRANCH"; then
+  git reset --hard "$REMOTE_NAME/$BRANCH"
+fi
 ./scripts/deploy.sh
 git status --short --branch
 git rev-parse HEAD

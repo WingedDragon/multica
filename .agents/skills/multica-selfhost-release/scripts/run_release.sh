@@ -28,7 +28,7 @@ fi
 echo "==> Local branch: $branch"
 git fetch upstream main
 git rebase upstream/main
-git push origin "$branch"
+git push --force-with-lease origin "$branch"
 
 if [ "$SKIP_DEPLOY" != "1" ]; then
   echo "==> Remote deploy: $REMOTE_JUMP -> $REMOTE_HOST:$REMOTE_DIR"

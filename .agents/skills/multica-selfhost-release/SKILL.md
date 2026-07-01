@@ -41,7 +41,7 @@ Rebase and push:
 ```bash
 git fetch upstream main
 git rebase upstream/main
-git push origin "$(git rev-parse --abbrev-ref HEAD)"
+git push --force-with-lease origin "$(git rev-parse --abbrev-ref HEAD)"
 ```
 
 Update and deploy remote:

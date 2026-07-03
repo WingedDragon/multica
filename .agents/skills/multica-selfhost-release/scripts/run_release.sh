@@ -42,7 +42,7 @@ run_my_mini_zsh() {
   local script="$1"
   # Rebase note: use zsh -lc for my-mini so Homebrew is discoverable even from
   # a non-login ssh command; this matches prior daemon/PATH recovery work.
-  ssh "$REMOTE_JUMP" "zsh -lc $(printf '%q' "$script")"
+  ssh -o RequestTTY=no "$REMOTE_JUMP" "zsh -lc $(printf '%q' "$script")"
 }
 
 install_my_mini_cli() {
@@ -54,8 +54,9 @@ if command -v brew >/dev/null 2>&1 && brew list --formula multica >/dev/null 2>&
   brew uninstall multica
 fi
 '
-  scp "$CLI_BIN" "$REMOTE_JUMP:~/.local/bin/multica"
-  run_my_mini_zsh 'chmod 0755 "$HOME/.local/bin/multica" && "$HOME/.local/bin/multica" version'
+  remote_tmp=".local/bin/multica.upload.$$"
+  scp -o RequestTTY=no "$CLI_BIN" "$REMOTE_JUMP:~/$remote_tmp"
+  run_my_mini_zsh "chmod 0755 \"\$HOME/$remote_tmp\" && mv \"\$HOME/$remote_tmp\" \"\$HOME/.local/bin/multica\" && \"\$HOME/.local/bin/multica\" version"
 }
 
 cd "$REPO"

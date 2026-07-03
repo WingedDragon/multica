@@ -9,8 +9,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -434,13 +436,43 @@ func newIssueCreateTestCmd() *cobra.Command {
 	cmd.Flags().String("assignee", "", "")
 	cmd.Flags().String("assignee-id", "", "")
 	cmd.Flags().String("parent", "", "")
+	cmd.Flags().Int("stage", 0, "")
 	cmd.Flags().String("project", "", "")
+	cmd.Flags().String("start-date", "", "")
 	cmd.Flags().String("due-date", "", "")
 	cmd.Flags().Bool("allow-duplicate", false, "")
 	cmd.Flags().String("output", "json", "")
 	cmd.Flags().StringSlice("attachment", nil, "")
 	cmd.Flags().StringSlice("attachment-id", nil, "")
 	return cmd
+}
+
+func setFakeGitOriginURL(t *testing.T, remoteURL string) {
+	t.Helper()
+	fakeBin := t.TempDir()
+	gitPath := filepath.Join(fakeBin, "git")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", remoteURL)
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func chdirTemp(t *testing.T) {
+	t.Helper()
+	wd := t.TempDir()
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(wd); err != nil {
+		t.Fatalf("chdir temp: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
 }
 
 func TestRunIssueCreateSendsAllowDuplicate(t *testing.T) {
@@ -525,6 +557,231 @@ func TestRunIssueCreateSendsExistingAttachmentIDs(t *testing.T) {
 	for i, w := range want {
 		if got[i] != w {
 			t.Fatalf("attachment_ids[%d] = %#v, want %q (all=%#v)", i, got[i], w, got)
+		}
+	}
+}
+
+func TestRunIssueCreateDefaultsProjectFromCurrentGitRemote(t *testing.T) {
+	const projectID = "31163d2d-2a4d-49c0-93fb-abc9169afc70"
+
+	setFakeGitOriginURL(t, "git@code.mlamp.cn:cosynth/cosynth.git")
+	chdirTemp(t)
+
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			if got := r.URL.Query().Get("workspace_id"); got != "ws-1" {
+				t.Errorf("workspace_id query = %q, want ws-1", got)
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"projects": []map[string]any{
+					{
+						"id":             projectID,
+						"title":          "cosynth",
+						"status":         "in_progress",
+						"resource_count": 1,
+					},
+					{
+						"id":             "00000000-0000-0000-0000-000000000002",
+						"title":          "empty",
+						"status":         "planned",
+						"resource_count": 0,
+					},
+				},
+			})
+		case "/api/projects/" + projectID + "/resources":
+			json.NewEncoder(w).Encode(map[string]any{
+				"resources": []map[string]any{
+					{
+						"id":            "resource-1",
+						"resource_type": "github_repo",
+						"resource_ref": map[string]any{
+							"url": "https://code.mlamp.cn/cosynth/cosynth.git",
+						},
+					},
+				},
+			})
+		case "/api/issues":
+			if r.Method != http.MethodPost {
+				t.Errorf("method = %s, want POST", r.Method)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"id":         "issue-1",
+				"identifier": "MUL-1",
+				"title":      "Repo-bound task",
+				"status":     "todo",
+				"priority":   "none",
+				"project_id": projectID,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+	t.Setenv("MULTICA_TOKEN", "test-token")
+
+	cmd := newIssueCreateTestCmd()
+	_ = cmd.Flags().Set("title", "Repo-bound task")
+	if err := runIssueCreate(cmd, nil); err != nil {
+		t.Fatalf("runIssueCreate: %v", err)
+	}
+	if got := body["project_id"]; got != projectID {
+		t.Fatalf("project_id = %#v, want %q", got, projectID)
+	}
+}
+
+func TestRunIssueCreateExplicitProjectSkipsGitRemoteDefault(t *testing.T) {
+	const projectID = "11111111-1111-1111-1111-111111111111"
+
+	setFakeGitOriginURL(t, "git@code.mlamp.cn:cosynth/cosynth.git")
+	chdirTemp(t)
+
+	var projectLookups atomic.Int32
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			projectLookups.Add(1)
+			http.Error(w, "automatic project lookup should not run", http.StatusInternalServerError)
+		case "/api/issues":
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"id":         "issue-1",
+				"identifier": "MUL-1",
+				"title":      "Explicit project",
+				"status":     "todo",
+				"priority":   "none",
+				"project_id": projectID,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+	t.Setenv("MULTICA_TOKEN", "test-token")
+
+	cmd := newIssueCreateTestCmd()
+	_ = cmd.Flags().Set("title", "Explicit project")
+	_ = cmd.Flags().Set("project", projectID)
+	if err := runIssueCreate(cmd, nil); err != nil {
+		t.Fatalf("runIssueCreate: %v", err)
+	}
+	if got := projectLookups.Load(); got != 0 {
+		t.Fatalf("automatic project lookups = %d, want 0 when --project is explicit", got)
+	}
+	if got := body["project_id"]; got != projectID {
+		t.Fatalf("project_id = %#v, want explicit %q", got, projectID)
+	}
+}
+
+func TestRunIssueCreateDoesNotDefaultProjectWithoutUniqueRemoteMatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		projects  []map[string]any
+		resources map[string][]map[string]any
+	}{
+		{
+			name: "no matching project resource",
+			projects: []map[string]any{
+				{"id": "11111111-1111-1111-1111-111111111111", "title": "other", "resource_count": 1},
+			},
+			resources: map[string][]map[string]any{
+				"11111111-1111-1111-1111-111111111111": {
+					{"resource_ref": map[string]any{"url": "https://code.mlamp.cn/other/repo.git"}},
+				},
+			},
+		},
+		{
+			name: "ambiguous project resources",
+			projects: []map[string]any{
+				{"id": "11111111-1111-1111-1111-111111111111", "title": "cosynth-a", "resource_count": 1},
+				{"id": "22222222-2222-2222-2222-222222222222", "title": "cosynth-b", "resource_count": 1},
+			},
+			resources: map[string][]map[string]any{
+				"11111111-1111-1111-1111-111111111111": {
+					{"resource_ref": map[string]any{"url": "https://code.mlamp.cn/cosynth/cosynth.git"}},
+				},
+				"22222222-2222-2222-2222-222222222222": {
+					{"resource_ref": map[string]any{"url": "git@code.mlamp.cn:cosynth/cosynth.git"}},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setFakeGitOriginURL(t, "git@code.mlamp.cn:cosynth/cosynth.git")
+			chdirTemp(t)
+
+			var body map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/api/projects":
+					json.NewEncoder(w).Encode(map[string]any{"projects": tt.projects})
+				case strings.HasPrefix(r.URL.Path, "/api/projects/") && strings.HasSuffix(r.URL.Path, "/resources"):
+					trimmed := strings.TrimPrefix(r.URL.Path, "/api/projects/")
+					projectID := strings.TrimSuffix(trimmed, "/resources")
+					json.NewEncoder(w).Encode(map[string]any{"resources": tt.resources[projectID]})
+				case r.URL.Path == "/api/issues":
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode body: %v", err)
+					}
+					json.NewEncoder(w).Encode(map[string]any{
+						"id":         "issue-1",
+						"identifier": "MUL-1",
+						"title":      "No unique project",
+						"status":     "todo",
+						"priority":   "none",
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			t.Setenv("MULTICA_SERVER_URL", srv.URL)
+			t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+			t.Setenv("MULTICA_TOKEN", "test-token")
+
+			cmd := newIssueCreateTestCmd()
+			_ = cmd.Flags().Set("title", "No unique project")
+			if err := runIssueCreate(cmd, nil); err != nil {
+				t.Fatalf("runIssueCreate: %v", err)
+			}
+			if _, ok := body["project_id"]; ok {
+				t.Fatalf("project_id = %#v, want absent without a unique repo match", body["project_id"])
+			}
+		})
+	}
+}
+
+func TestNormalizeGitRepoURLKey(t *testing.T) {
+	tests := map[string]string{
+		"git@code.mlamp.cn:cosynth/cosynth.git":       "code.mlamp.cn/cosynth/cosynth",
+		"ssh://git@code.mlamp.cn/cosynth/cosynth.git": "code.mlamp.cn/cosynth/cosynth",
+		"https://CODE.MLAMP.cn/cosynth/cosynth.git/":  "code.mlamp.cn/cosynth/cosynth",
+		"https://code.mlamp.cn:8443/cosynth/repo.git": "code.mlamp.cn:8443/cosynth/repo",
+		"https://code.mlamp.cn/Org/Repo.git":          "code.mlamp.cn/Org/Repo",
+	}
+	for input, want := range tests {
+		got, ok := normalizeGitRepoURLKey(input)
+		if !ok {
+			t.Fatalf("normalizeGitRepoURLKey(%q) returned ok=false", input)
+		}
+		if got != want {
+			t.Fatalf("normalizeGitRepoURLKey(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

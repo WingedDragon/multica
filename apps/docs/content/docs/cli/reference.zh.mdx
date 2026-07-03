@@ -294,6 +294,8 @@ multica issue create --title "Fix login bug" --assignee-id 5fb87ac7-23b5-4a7a-81
 
 Flags: `--title` (required), `--description`, `--status`, `--priority`, `--assignee` / `--assignee-id`, `--parent`, `--project`, `--due-date`. 脚本里如果已经拿到了 UUID（例如来自 `multica workspace member list --output json`），传 `--assignee-id <uuid>`（与 `--assignee` 互斥）以精确锁定。
 
+如果当前目录是 git checkout，且 `git remote get-url origin` 能唯一匹配当前 workspace 某个项目资源的 `resource_ref.url`，`issue create` 会默认把 issue 绑定到该项目。显式 `--project <id>` 优先；多个项目匹配同一 repo 时不会猜测，请手动传 `--project`。
+
 ### Update Issue
 
 ```bash
@@ -411,6 +413,8 @@ multica project delete <id>
 
 Use the `--project` flag on `issue create` / `issue update` to attach an issue to a
 project, or on `issue list` to filter issues by project:
+
+`issue create` 在 git checkout 内也会尝试根据 `origin` remote 自动匹配项目资源；只有唯一匹配时才自动绑定。需要覆盖或消除歧义时，直接传 `--project <project-id>`。
 
 ```bash
 multica issue create --title "Login bug" --project <project-id>

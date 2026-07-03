@@ -6,6 +6,7 @@
 - `project create` / `project update` accept `--start-date` / `--due-date` (calendar days, `YYYY-MM-DD`), mapping to the project `start_date` / `due_date` columns (migration `166_project_dates`); an empty `--start-date ""`/`--due-date ""` on update clears the date, mirroring the issue date flags in `cmd_issue.go`.
 - `project resource add` supports shortcuts for `github_repo` (`--url`, non-JSON `--ref` for checkout ref, `--default-branch-hint`) and `local_directory` (`--local-path`, `--daemon-id`, `--ref-label`), or generic JSON `--ref '<json>'`.
 - `project resource update` merges shortcut edits with existing `resource_ref` so a partial edit does not clobber required fields; non-JSON `--ref` updates `github_repo.resource_ref.ref`.
+- `server/cmd/multica/cmd_issue.go` calls `resolveProjectFromCurrentGitRemote` for top-level `issue create` calls without `--project`; `server/cmd/multica/cmd_issue_project_auto.go` normalizes `git remote get-url origin` and project resource `resource_ref.url`, then binds only on a unique match.
 - `server/cmd/server/router.go` exposes `/api/projects` plus `/api/projects/{projectId}/resources` routes.
 - `server/pkg/db/queries/project_resource.sql` is the CRUD query surface for `project_resource` rows.
 - Project resources are written into `.multica/project/resources.json` for agent workdirs.

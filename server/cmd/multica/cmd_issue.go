@@ -1102,12 +1102,30 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 		}
 		body["parent_issue_id"] = parent.ID
 	}
+	projectFlagChanged := cmd.Flags().Changed("project")
 	if v, _ := cmd.Flags().GetString("project"); v != "" {
 		project, err := resolveProjectID(ctx, client, v)
 		if err != nil {
 			return fmt.Errorf("resolve project: %w", err)
 		}
 		body["project_id"] = project.ID
+	}
+	parentFlag, _ := cmd.Flags().GetString("parent")
+	// Rebase note: keep this automatic project binding after explicit
+	// --project and --parent handling. It is a convenience for top-level
+	// repo-bound issue creates only; explicit --project wins, and parent
+	// issues keep their server-side project inheritance semantics. Use a
+	// child timeout so slow project-resource discovery never cancels the real
+	// /api/issues create request that follows.
+	if !projectFlagChanged && strings.TrimSpace(parentFlag) == "" {
+		autoProjectCtx, autoProjectCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer autoProjectCancel()
+		project, ok, err := resolveProjectFromCurrentGitRemote(autoProjectCtx, client)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Skipping automatic project binding: %v\n", err)
+		} else if ok {
+			body["project_id"] = project.ID
+		}
 	}
 	if cmd.Flags().Changed("stage") {
 		stage, _ := cmd.Flags().GetInt("stage")

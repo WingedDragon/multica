@@ -55,6 +55,12 @@ For `github_repo`, non-JSON `--ref` sets `resource_ref.ref`, the default checkou
 
 `--start-date` / `--due-date` are optional calendar days (`YYYY-MM-DD`, like issue dates). On `project update`, pass an empty string (`--start-date ""`) to clear a date; an unset flag leaves it untouched.
 
+`multica issue create` is repo-aware: when it runs inside a git checkout and
+`git remote get-url origin` uniquely matches a project resource
+`resource_ref.url` in the active workspace, the CLI automatically sends that
+project id. Explicit `--project` still wins. If multiple projects match the
+same repo URL, the CLI does not guess; pass `--project <id>` explicitly.
+
 ## When to add a resource
 
 Add/update a project resource when the user asks for durable project context: "把这个 GitHub repo 绑到项目上", "以后都用这个 repo", "agent 总是拿不到这个项目的仓库", or "这个项目要在我的本地目录里跑".

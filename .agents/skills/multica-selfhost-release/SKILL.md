@@ -10,11 +10,12 @@ Use this skill for the recurring self-hosted Multica release path:
 1. Commit only task-related changes on the current branch.
 2. Rebase on `upstream/main`.
 3. Push the current branch to `origin`.
-4. Update `dj:~/apps/multica` through `ssh my-mini` then `ssh dj`.
-5. Run remote `./scripts/deploy.sh`.
-6. Run local `./scripts/package.sh`.
-7. Replace local `/Applications/Multica.app` with the generated app bundle.
-8. Verify remote services and local app version/config.
+4. Build the current branch's `multica` CLI, uninstall Homebrew `multica`, and install the binary to `~/.local/bin/multica` locally and on `my-mini`.
+5. Update `dj:~/apps/multica` through `ssh my-mini` then `ssh dj`.
+6. Run remote `./scripts/deploy.sh`.
+7. Run local `./scripts/package.sh`.
+8. Replace local `/Applications/Multica.app` with the generated app bundle.
+9. Verify remote services and local app/CLI version/config.
 
 ## Important Judgement
 
@@ -45,6 +46,22 @@ git rebase upstream/main
 git push --force-with-lease origin "$(git rev-parse --abbrev-ref HEAD)"
 ```
 
+Build and install the current CLI on this Mac and on `my-mini`:
+
+```bash
+cd /Users/dong/.wtc/projects/multica
+(cd server && go build -ldflags "-X main.version=$(git describe --tags --always --dirty) -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" -o bin/multica ./cmd/multica)
+
+brew list --formula multica >/dev/null 2>&1 && brew uninstall multica || true
+mkdir -p ~/.local/bin
+install -m 0755 server/bin/multica ~/.local/bin/multica
+~/.local/bin/multica version
+
+ssh my-mini 'zsh -lc "mkdir -p ~/.local/bin && if command -v brew >/dev/null 2>&1 && brew list --formula multica >/dev/null 2>&1; then brew uninstall multica; fi"'
+scp server/bin/multica my-mini:~/.local/bin/multica
+ssh my-mini 'zsh -lc "chmod 0755 ~/.local/bin/multica && ~/.local/bin/multica version"'
+```
+
 Update and deploy remote:
 
 ```bash
@@ -67,6 +84,8 @@ Verify:
 
 ```bash
 /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Multica.app/Contents/Info.plist
+~/.local/bin/multica version
+ssh my-mini 'zsh -lc "~/.local/bin/multica version"'
 cat ~/.multica/desktop.json
 ssh my-mini 'ssh dj "cd ~/apps/multica && git status --short --branch && git rev-parse HEAD && systemctl is-active multica-backend multica-frontend"'
 ```
@@ -90,6 +109,7 @@ MULTICA_REMOTE_NAME=wingeddragon
 MULTICA_SKIP_DEPLOY=1
 MULTICA_SKIP_PACKAGE=1
 MULTICA_SKIP_INSTALL=1
+MULTICA_SKIP_CLI_INSTALL=1
 ```
 
 The script intentionally exits on a dirty local worktree. Commit deliberately first, then rerun it.

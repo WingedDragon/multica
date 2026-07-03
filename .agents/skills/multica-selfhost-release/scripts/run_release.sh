@@ -10,6 +10,53 @@ REMOTE_NAME="${MULTICA_REMOTE_NAME:-wingeddragon}"
 SKIP_DEPLOY="${MULTICA_SKIP_DEPLOY:-0}"
 SKIP_PACKAGE="${MULTICA_SKIP_PACKAGE:-0}"
 SKIP_INSTALL="${MULTICA_SKIP_INSTALL:-0}"
+SKIP_CLI_INSTALL="${MULTICA_SKIP_CLI_INSTALL:-0}"
+
+CLI_BIN="$REPO/server/bin/multica"
+
+build_cli() {
+  echo "==> Build multica CLI"
+  local version commit date
+  version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+  commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  date="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  (
+    cd "$REPO/server"
+    go build -ldflags "-X main.version=$version -X main.commit=$commit -X main.date=$date" -o bin/multica ./cmd/multica
+  )
+}
+
+install_local_cli() {
+  echo "==> Local CLI install: $HOME/.local/bin/multica"
+  # Rebase note: Homebrew may shadow ~/.local/bin in interactive shells on
+  # this machine. Keep the uninstall before copying the freshly built CLI.
+  if command -v brew >/dev/null 2>&1 && brew list --formula multica >/dev/null 2>&1; then
+    brew uninstall multica
+  fi
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$CLI_BIN" "$HOME/.local/bin/multica"
+  "$HOME/.local/bin/multica" version
+}
+
+run_my_mini_zsh() {
+  local script="$1"
+  # Rebase note: use zsh -lc for my-mini so Homebrew is discoverable even from
+  # a non-login ssh command; this matches prior daemon/PATH recovery work.
+  ssh "$REMOTE_JUMP" "zsh -lc $(printf '%q' "$script")"
+}
+
+install_my_mini_cli() {
+  echo "==> my-mini CLI install: ~/.local/bin/multica"
+  run_my_mini_zsh '
+set -euo pipefail
+mkdir -p "$HOME/.local/bin"
+if command -v brew >/dev/null 2>&1 && brew list --formula multica >/dev/null 2>&1; then
+  brew uninstall multica
+fi
+'
+  scp "$CLI_BIN" "$REMOTE_JUMP:~/.local/bin/multica"
+  run_my_mini_zsh 'chmod 0755 "$HOME/.local/bin/multica" && "$HOME/.local/bin/multica" version'
+}
 
 cd "$REPO"
 
@@ -29,6 +76,12 @@ echo "==> Local branch: $branch"
 git fetch upstream main
 git rebase upstream/main
 git push --force-with-lease origin "$branch"
+
+if [ "$SKIP_CLI_INSTALL" != "1" ]; then
+  build_cli
+  install_local_cli
+  install_my_mini_cli
+fi
 
 if [ "$SKIP_DEPLOY" != "1" ]; then
   echo "==> Remote deploy: $REMOTE_JUMP -> $REMOTE_HOST:$REMOTE_DIR"

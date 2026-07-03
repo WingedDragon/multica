@@ -1,4 +1,4 @@
 interface:
   display_name: "Multica Selfhost Release"
-  short_description: "Deploy, package, and install self-hosted Multica"
-  default_prompt: "Use $multica-selfhost-release to deploy the current Multica branch, build the macOS DMG, and replace the local app."
+  short_description: "Deploy, update CLI, package, and install self-hosted Multica"
+  default_prompt: "Use $multica-selfhost-release to deploy the current Multica branch, update the CLI on this Mac and my-mini, build the macOS DMG, and replace the local app."

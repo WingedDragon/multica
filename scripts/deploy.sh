@@ -107,7 +107,18 @@ pnpm --filter @multica/web... build
 
 echo ""
 echo "==> [5/6] Build backend..."
-make build
+# Rebase note: do not call `make build` here. The root Makefile includes .env
+# as Make syntax, while production .env may contain multiline secrets such as
+# private keys; direct go builds keep deployment independent of Make's parser.
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+(
+  cd server
+  go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o bin/server ./cmd/server
+  go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT -X main.date=$DATE" -o bin/multica ./cmd/multica
+  go build -o bin/migrate ./cmd/migrate
+)
 
 echo ""
 echo "==> [6/6] Restart services..."

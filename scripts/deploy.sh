@@ -104,8 +104,22 @@ EOF
 echo ""
 echo "==> [4/6] Build frontend..."
 WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-3072}"
+WEB_BUILD_MEMORY_MAX="${MULTICA_WEB_BUILD_MEMORY_MAX:-5G}"
+WEB_BUILD_SWAP_MAX="${MULTICA_WEB_BUILD_SWAP_MAX:-512M}"
+build_node_options="${NODE_OPTIONS:-}"
+build_node_options="${build_node_options:+$build_node_options }--max-old-space-size=${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB}"
 echo "    Node heap limit: ${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB} MB"
-NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB}" pnpm --filter @multica/web... build
+echo "    cgroup MemoryMax: ${WEB_BUILD_MEMORY_MAX}, MemorySwapMax: ${WEB_BUILD_SWAP_MAX}"
+sudo systemd-run --wait --pipe --collect \
+  -p "MemoryMax=${WEB_BUILD_MEMORY_MAX}" \
+  -p "MemorySwapMax=${WEB_BUILD_SWAP_MAX}" \
+  --uid="$(id -u)" \
+  --gid="$(id -g)" \
+  --working-directory="$REPO_ROOT" \
+  --setenv="PATH=$PATH" \
+  --setenv="NODE_ENV=${NODE_ENV:-production}" \
+  --setenv="NODE_OPTIONS=$build_node_options" \
+  /usr/bin/env pnpm --filter @multica/web... build
 
 echo ""
 echo "==> [5/6] Build backend..."

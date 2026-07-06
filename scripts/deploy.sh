@@ -103,7 +103,9 @@ EOF
 
 echo ""
 echo "==> [4/6] Build frontend..."
-pnpm --filter @multica/web... build
+WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-3072}"
+echo "    Node heap limit: ${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB} MB"
+NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB}" pnpm --filter @multica/web... build
 
 echo ""
 echo "==> [5/6] Build backend..."

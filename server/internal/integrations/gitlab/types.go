@@ -41,6 +41,10 @@ type MergeRequest struct {
 	} `json:"author"`
 }
 
+type MergeRequestMergeOptions struct {
+	ShouldRemoveSourceBranch bool `json:"should_remove_source_branch"`
+}
+
 type Pipeline struct {
 	ID        int64  `json:"id"`
 	SHA       string `json:"sha"`

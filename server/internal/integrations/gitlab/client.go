@@ -92,6 +92,12 @@ func (c *Client) GetMergeRequest(ctx context.Context, projectID int64, iid int32
 	return out, err
 }
 
+func (c *Client) MergeMergeRequest(ctx context.Context, projectID int64, iid int32, opts MergeRequestMergeOptions) (MergeRequest, error) {
+	var out MergeRequest
+	err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("/api/v4/projects/%d/merge_requests/%d/merge", projectID, iid), opts, &out)
+	return out, err
+}
+
 func (c *Client) GetMergeRequestChanges(ctx context.Context, projectID int64, iid int32) (MergeRequestChanges, error) {
 	var out MergeRequestChanges
 	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/api/v4/projects/%d/merge_requests/%d/changes", projectID, iid), nil, &out)

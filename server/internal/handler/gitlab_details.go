@@ -209,6 +209,65 @@ func (h *Handler) RefreshGitLabMergeRequestForIssue(w http.ResponseWriter, r *ht
 	h.GetGitLabMergeRequestDetails(w, r)
 }
 
+func (h *Handler) MergeGitLabMergeRequestForIssue(w http.ResponseWriter, r *http.Request) {
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	mrID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "mrId"), "merge request id")
+	if !ok {
+		return
+	}
+	mr, err := h.Queries.GetGitLabMergeRequestForIssue(r.Context(), db.GetGitLabMergeRequestForIssueParams{
+		IssueID:     issue.ID,
+		ID:          mrID,
+		WorkspaceID: issue.WorkspaceID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "gitlab merge request not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load gitlab merge request")
+		return
+	}
+	cfg := gitlab.LoadConfigFromEnv()
+	if !cfg.Configured() {
+		writeError(w, http.StatusServiceUnavailable, "gitlab integration is not configured")
+		return
+	}
+	api, err := newGitLabClient(cfg)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	detailAPI, err := detailGitLabAPI(api)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if _, err := detailAPI.MergeMergeRequest(r.Context(), mr.GitlabProjectID, mr.MrIid, gitlab.MergeRequestMergeOptions{
+		ShouldRemoveSourceBranch: true,
+	}); err != nil {
+		h.markGitLabMergeRequestRefreshError(r.Context(), mr, err)
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	refreshed, summary, err := h.refreshGitLabMergeRequest(r.Context(), detailAPI, mr)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if len(summary.Errors) > 0 {
+		h.markGitLabMergeRequestRefreshError(r.Context(), refreshed, errors.New(strings.Join(summary.Errors, "; ")))
+	}
+	h.publish(protocol.EventGitLabMergeRequestUpdated, uuidToString(issue.WorkspaceID), "system", "", map[string]any{
+		"merge_request_id": uuidToString(refreshed.ID),
+		"linked_issue_ids": []string{uuidToString(issue.ID)},
+	})
+	h.GetGitLabMergeRequestDetails(w, r)
+}
+
 func (h *Handler) RefreshGitLabProjectBinding(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "workspace id")
 	if !ok {

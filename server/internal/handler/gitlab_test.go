@@ -131,6 +131,11 @@ type fakeGitLabDetailAPI struct {
 	traceErr       error
 	artifactsResp  *http.Response
 	artifactsErr   error
+	mergeCalled    bool
+	mergeProjectID int64
+	mergeIID       int32
+	mergeOptions   gitlab.MergeRequestMergeOptions
+	mergeErr       error
 }
 
 func (f *fakeGitLabDetailAPI) GetMergeRequest(context.Context, int64, int32) (gitlab.MergeRequest, error) {
@@ -197,6 +202,17 @@ func (f *fakeGitLabDetailAPI) DownloadJobArtifacts(context.Context, int64, int64
 		return f.artifactsResp, nil
 	}
 	return nil, errors.New("not used")
+}
+
+func (f *fakeGitLabDetailAPI) MergeMergeRequest(_ context.Context, projectID int64, iid int32, opts gitlab.MergeRequestMergeOptions) (gitlab.MergeRequest, error) {
+	f.mergeCalled = true
+	f.mergeProjectID = projectID
+	f.mergeIID = iid
+	f.mergeOptions = opts
+	if f.mergeErr != nil {
+		return gitlab.MergeRequest{}, f.mergeErr
+	}
+	return f.mr, nil
 }
 
 func installFakeGitLabClient(t *testing.T, fake *fakeGitLabAPI) {
@@ -756,6 +772,71 @@ func TestRefreshGitLabMergeRequestForIssueRecordsPartialErrors(t *testing.T) {
 	}
 	if strings.Contains(*out.MergeRequest.LastRefreshError, "secret-token") {
 		t.Fatalf("last_refresh_error leaked secret: %s", *out.MergeRequest.LastRefreshError)
+	}
+}
+
+func TestMergeGitLabMergeRequestForIssueDeletesSourceBranchAndRefreshes(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	const projectID int64 = 99118
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab merge", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 24, "oldsha")
+
+	fake := &fakeGitLabDetailAPI{
+		mr: gitlab.MergeRequest{
+			IID:                 24,
+			Title:               "Merged GitLab title",
+			State:               "merged",
+			WebURL:              "https://code.mlamp.cn/group/project-99118/-/merge_requests/24",
+			SourceBranch:        "feature/merge-button",
+			TargetBranch:        "main",
+			SHA:                 "mergedsha",
+			MergeCommitSHA:      "mergecommitsha",
+			DetailedMergeStatus: "merged",
+			CreatedAt:           "2026-04-28T00:00:00Z",
+			UpdatedAt:           "2026-04-30T00:00:00Z",
+			MergedAt:            "2026-04-30T00:02:00Z",
+		},
+		changes: gitlab.MergeRequestChanges{Changes: []gitlab.MergeRequestChange{{
+			OldPath: "a.go",
+			NewPath: "a.go",
+			Diff:    "@@ -1 +1 @@\n-a\n+b\n",
+		}}},
+		approval: gitlab.ApprovalState{Approved: true, ApprovalsLeft: int32Ptr(0)},
+	}
+	installFakeGitLabDetailClient(t, fake)
+
+	rec := httptest.NewRecorder()
+	req := newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/gitlab/merge-requests/"+uuidToString(mr.ID)+"/merge", nil)
+	req = withURLParams(req, "id", issue.ID, "mrId", uuidToString(mr.ID))
+	testHandler.MergeGitLabMergeRequestForIssue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !fake.mergeCalled {
+		t.Fatal("expected GitLab merge API to be called")
+	}
+	if fake.mergeProjectID != projectID || fake.mergeIID != 24 {
+		t.Fatalf("merge target = project %d iid %d", fake.mergeProjectID, fake.mergeIID)
+	}
+	if !fake.mergeOptions.ShouldRemoveSourceBranch {
+		t.Fatalf("merge options = %+v, want should_remove_source_branch", fake.mergeOptions)
+	}
+	var out GitLabMergeRequestDetailsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.MergeRequest.State != "merged" || out.MergeRequest.MergedAt == nil || out.MergeRequest.SHA != "mergedsha" {
+		t.Fatalf("merge request = %+v", out.MergeRequest)
+	}
+	if out.Approval == nil || !out.Approval.Approved {
+		t.Fatalf("approval = %+v", out.Approval)
 	}
 }
 

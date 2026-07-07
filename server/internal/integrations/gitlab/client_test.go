@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -261,5 +262,45 @@ func TestGetMergeRequestApprovalStateCombinesApprovalsAndRules(t *testing.T) {
 	}
 	if len(approval.Rules) != 1 || approval.Rules[0].Name != "Maintainers" || len(approval.Rules[0].ApprovedBy) != 1 {
 		t.Fatalf("rules = %+v", approval.Rules)
+	}
+}
+
+func TestMergeMergeRequestRemovesSourceBranch(t *testing.T) {
+	var gotPath string
+	var gotMethod string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != "token" {
+			t.Fatalf("PRIVATE-TOKEN = %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"iid":7,"title":"Fix issue","state":"merged","web_url":"https://code.mlamp.cn/group/repo/-/merge_requests/7","sha":"abc","created_at":"2026-07-06T00:00:00Z","updated_at":"2026-07-06T00:01:00Z"}`))
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	mr, err := c.MergeMergeRequest(context.Background(), 42, 7, MergeRequestMergeOptions{ShouldRemoveSourceBranch: true})
+	if err != nil {
+		t.Fatalf("MergeMergeRequest: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("method = %q", gotMethod)
+	}
+	if gotPath != "/api/v4/projects/42/merge_requests/7/merge" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotBody["should_remove_source_branch"] != true {
+		t.Fatalf("request body = %+v", gotBody)
+	}
+	if mr.State != "merged" || mr.IID != 7 {
+		t.Fatalf("merge request = %+v", mr)
 	}
 }

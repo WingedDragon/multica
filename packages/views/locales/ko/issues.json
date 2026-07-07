@@ -181,6 +181,8 @@
     "merge_request_card_status_unknown": "병합 상태 알 수 없음",
     "gitlab_details": "GitLab details",
     "gitlab_refresh": "Refresh GitLab merge request",
+    "gitlab_merge": "Merge",
+    "gitlab_merge_failed": "Merge failed",
     "gitlab_loading_details": "Loading GitLab details...",
     "gitlab_load_trace": "Load trace",
     "gitlab_approvals_approved": "Approvals satisfied",

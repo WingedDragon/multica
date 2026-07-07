@@ -177,4 +177,35 @@ describe("GitLabMergeRequestDetails", () => {
     });
     expect(await screen.findByText("fresh trace failure")).toBeInTheDocument();
   });
+
+  it("merges an open merge request from the details panel", async () => {
+    const user = userEvent.setup();
+    setApiInstance(new ApiClient("https://api.example.test"));
+    const mergedDetails = makeDetails();
+    mergedDetails.merge_request.state = "merged";
+    mergedDetails.merge_request.merged_at = "2026-07-06T00:03:00Z";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(mergedDetails), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <GitLabMergeRequestDetails issueId="issue-1" details={makeDetails()} />,
+      {
+        wrapper: TestWrapper,
+      },
+    );
+
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.example.test/api/issues/issue-1/gitlab/merge-requests/mr-1/merge",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+  });
 });

@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ExternalLink, GitMerge, RefreshCw } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { api } from "@multica/core/api";
+import { gitlabKeys } from "@multica/core/gitlab";
 import type {
   GitLabApprovalRule,
   GitLabJobTraceResponse,
@@ -21,6 +22,7 @@ export function GitLabMergeRequestDetails({
   details: GitLabMergeRequestDetailsResponse;
 }) {
   const { t } = useT("issues");
+  const queryClient = useQueryClient();
   const [loadedTraces, setLoadedTraces] = useState<
     Record<string, GitLabJobTraceResponse>
   >({});
@@ -30,6 +32,28 @@ export function GitLabMergeRequestDetails({
       setLoadedTraces((prev) => ({ ...prev, [jobId]: trace }));
     },
   });
+  const mergeMR = useMutation({
+    mutationFn: () =>
+      api.mergeGitLabMergeRequest(issueId, details.merge_request.id),
+    onSuccess: async (next) => {
+      queryClient.setQueryData(
+        gitlabKeys.mergeRequestDetails(issueId, next.merge_request.id),
+        next,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: gitlabKeys.mergeRequests(issueId),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: gitlabKeys.mergeRequestDetails(
+            issueId,
+            next.merge_request.id,
+          ),
+        }),
+      ]);
+    },
+  });
+  const canMerge = details.merge_request.state === "open";
   const failedJobs = details.jobs.filter((job) => job.status === "failed");
   const jobs = failedJobs.length > 0 ? failedJobs : details.jobs;
   const unresolved = details.discussions.filter(
@@ -44,6 +68,28 @@ export function GitLabMergeRequestDetails({
 
   return (
     <div className="mt-2 space-y-2 border-l border-border pl-3 text-[11px] text-muted-foreground">
+      {canMerge ? (
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="h-7 gap-1.5 px-2 text-[11px]"
+            aria-label={t(($) => $.detail.gitlab_merge)}
+            disabled={mergeMR.isPending}
+            onClick={() => mergeMR.mutate()}
+          >
+            <GitMerge className="h-3 w-3" />
+            <span>{t(($) => $.detail.gitlab_merge)}</span>
+          </Button>
+          {mergeMR.isError ? (
+            <span className="text-destructive">
+              {t(($) => $.detail.gitlab_merge_failed)}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
       {approval ? (
         <div className="space-y-1">
           <p className="font-medium text-foreground">

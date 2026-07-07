@@ -1127,6 +1127,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/gitlab/merge-requests", h.ListGitLabMergeRequestsForIssue)
 					r.Get("/gitlab/merge-requests/{mrId}/details", h.GetGitLabMergeRequestDetails)
 					r.Post("/gitlab/merge-requests/{mrId}/refresh", h.RefreshGitLabMergeRequestForIssue)
+					r.Post("/gitlab/merge-requests/{mrId}/merge", h.MergeGitLabMergeRequestForIssue)
 					r.Get("/gitlab/jobs/{jobId}/trace", h.GetGitLabJobTrace)
 					r.Get("/gitlab/jobs/{jobId}/artifacts", h.OpenGitLabJobArtifacts)
 				})

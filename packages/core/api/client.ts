@@ -2564,6 +2564,22 @@ export class ApiClient {
     );
   }
 
+  async mergeGitLabMergeRequest(
+    issueId: string,
+    mrId: string,
+  ): Promise<GitLabMergeRequestDetailsResponse> {
+    const raw = await this.fetch<unknown>(
+      `/api/issues/${issueId}/gitlab/merge-requests/${mrId}/merge`,
+      { method: "POST" },
+    );
+    return parseWithFallback(
+      raw,
+      GitLabMergeRequestDetailsResponseSchema,
+      EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
+      { endpoint: "POST /api/issues/:id/gitlab/merge-requests/:mrId/merge" },
+    );
+  }
+
   async getGitLabJobTrace(issueId: string, jobId: string): Promise<GitLabJobTraceResponse> {
     const raw = await this.fetch<unknown>(`/api/issues/${issueId}/gitlab/jobs/${jobId}/trace`);
     return parseWithFallback(raw, GitLabJobTraceResponseSchema, EMPTY_GITLAB_JOB_TRACE_RESPONSE, {

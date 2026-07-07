@@ -18,6 +18,7 @@ const gitLabFailedJobTraceLimit = 8192
 
 type gitLabDetailAPI interface {
 	GetMergeRequest(context.Context, int64, int32) (gitlab.MergeRequest, error)
+	MergeMergeRequest(context.Context, int64, int32, gitlab.MergeRequestMergeOptions) (gitlab.MergeRequest, error)
 	GetMergeRequestChanges(context.Context, int64, int32) (gitlab.MergeRequestChanges, error)
 	GetMergeRequestApprovalState(context.Context, int64, int32) (gitlab.ApprovalState, error)
 	ListMergeRequestDiscussions(context.Context, int64, int32) ([]gitlab.Discussion, error)

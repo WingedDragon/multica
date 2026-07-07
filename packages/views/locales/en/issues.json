@@ -183,6 +183,8 @@
     "merge_request_card_status_unknown": "Merge status unknown",
     "gitlab_details": "GitLab details",
     "gitlab_refresh": "Refresh GitLab merge request",
+    "gitlab_merge": "Merge",
+    "gitlab_merge_failed": "Merge failed",
     "gitlab_loading_details": "Loading GitLab details...",
     "gitlab_load_trace": "Load trace",
     "gitlab_approvals_approved": "Approvals satisfied",

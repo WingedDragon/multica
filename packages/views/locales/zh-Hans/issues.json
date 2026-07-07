@@ -181,6 +181,8 @@
     "merge_request_card_status_unknown": "合并状态未知",
     "gitlab_details": "GitLab 明细",
     "gitlab_refresh": "刷新 GitLab Merge Request",
+    "gitlab_merge": "合并",
+    "gitlab_merge_failed": "合并失败",
     "gitlab_loading_details": "正在加载 GitLab 明细...",
     "gitlab_load_trace": "加载 trace",
     "gitlab_approvals_approved": "审批已满足",

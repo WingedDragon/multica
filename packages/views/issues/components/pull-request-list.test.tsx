@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ApiClient, setApiInstance } from "@multica/core/api";
 import { I18nProvider } from "@multica/core/i18n/react";
-import type { GitHubPullRequest, GitLabMergeRequest } from "@multica/core/types";
+import type { GitHubPullRequest, GitLabMergeRequest, GitLabMergeRequestDetailsResponse } from "@multica/core/types";
 import enCommon from "../../locales/en/common.json";
 import enIssues from "../../locales/en/issues.json";
 
@@ -33,6 +34,11 @@ vi.mock("@multica/core/gitlab/queries", async () => {
       queryFn: async () => ({ merge_requests: mockMRs }),
       enabled: !!issueId,
     }),
+    gitlabMergeRequestDetailsOptions: (issueId: string, mrId: string) => ({
+      queryKey: ["gitlab", "merge-request-details", issueId, mrId],
+      queryFn: async () => mockDetails,
+      enabled: !!issueId && !!mrId,
+    }),
   };
 });
 
@@ -40,6 +46,7 @@ import { PullRequestList } from "./pull-request-list";
 
 let mockPRs: GitHubPullRequest[] = [];
 let mockMRs: GitLabMergeRequest[] = [];
+let mockDetails: GitLabMergeRequestDetailsResponse;
 
 function makePR(overrides: Partial<GitHubPullRequest> = {}): GitHubPullRequest {
   return {
@@ -118,8 +125,15 @@ async function waitForRender() {
 
 describe("PullRequestList sidebar rows", () => {
   beforeEach(() => {
+    setApiInstance(new ApiClient("https://api.example.test"));
     mockPRs = [];
     mockMRs = [];
+    mockDetails = {
+      merge_request: makeMR(),
+      approval: null,
+      discussions: [],
+      jobs: [],
+    };
   });
 
   it("uses the sidebar list-row surface instead of a card surface", async () => {
@@ -296,6 +310,51 @@ describe("PullRequestList sidebar rows", () => {
     await waitForRender();
     expect(screen.getByText("Some checks failed")).toBeInTheDocument();
     expect(screen.queryByText("Merge status unknown")).not.toBeInTheDocument();
+  });
+
+  it("expands GitLab merge request details", async () => {
+    mockMRs = [makeMR({ title: "GitLab detail MR" })];
+    mockDetails = {
+      merge_request: mockMRs[0]!,
+      approval: {
+        approved: false,
+        approvals_left: 1,
+        approved_by: [],
+        rules: [],
+      },
+      jobs: [{
+        id: "job-1",
+        pipeline_id: 77,
+        job_id: 9001,
+        name: "test",
+        status: "failed",
+        allow_failure: false,
+        artifacts_file_name: "artifacts.zip",
+        trace_summary: "assert failed",
+      }],
+      discussions: [{
+        id: "discussion-1",
+        gitlab_discussion_id: "abc",
+        individual_note: false,
+        resolved: false,
+        notes: [{
+          id: "note-1",
+          gitlab_note_id: 501,
+          body: "Please fix this",
+          system: false,
+          author_username: "grace",
+        }],
+      }],
+    };
+    renderList();
+
+    await screen.findByText("GitLab detail MR");
+    fireEvent.click(screen.getByRole("button", { name: "GitLab details" }));
+
+    expect(await screen.findByText("1 approval remaining")).toBeInTheDocument();
+    expect(screen.getByText("assert failed")).toBeInTheDocument();
+    expect(screen.getByText("artifacts.zip")).toBeInTheDocument();
+    expect(screen.getByText(/Please fix this/)).toBeInTheDocument();
   });
 
   it("renders pending GitLab pipeline when merge status is unknown", async () => {

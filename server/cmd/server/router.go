@@ -939,6 +939,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/github/connect", h.GitHubConnect)
 					r.Delete("/github/installations/{installationId}", h.DeleteGitHubInstallation)
 					r.Post("/gitlab/projects", h.CreateGitLabProjectBinding)
+					r.Post("/gitlab/projects/{bindingId}/refresh", h.RefreshGitLabProjectBinding)
 					r.Delete("/gitlab/projects/{bindingId}", h.DeleteGitLabProjectBinding)
 				})
 
@@ -1124,6 +1125,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Delete("/metadata/{key}", h.DeleteIssueMetadataKey)
 					r.Get("/pull-requests", h.ListPullRequestsForIssue)
 					r.Get("/gitlab/merge-requests", h.ListGitLabMergeRequestsForIssue)
+					r.Get("/gitlab/merge-requests/{mrId}/details", h.GetGitLabMergeRequestDetails)
+					r.Post("/gitlab/merge-requests/{mrId}/refresh", h.RefreshGitLabMergeRequestForIssue)
+					r.Get("/gitlab/jobs/{jobId}/trace", h.GetGitLabJobTrace)
+					r.Get("/gitlab/jobs/{jobId}/artifacts", h.OpenGitLabJobArtifacts)
 				})
 			})
 

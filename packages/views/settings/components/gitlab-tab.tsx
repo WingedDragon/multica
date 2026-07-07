@@ -3,10 +3,11 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ExternalLink, Trash2 } from "lucide-react";
+import { ExternalLink, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { Input } from "@multica/ui/components/ui/input";
+import { cn } from "@multica/ui/lib/utils";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -67,6 +68,19 @@ export function GitLabTab() {
     onError: (e) => {
       toast.error(
         e instanceof Error ? e.message : t(($) => $.gitlab.toast_project_delete_failed),
+      );
+    },
+  });
+
+  const refreshProject = useMutation({
+    mutationFn: (bindingId: string) => api.refreshGitLabProject(wsId, bindingId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: gitlabKeys.config(wsId) });
+      toast.success(t(($) => $.gitlab.toast_project_refreshed));
+    },
+    onError: (e) => {
+      toast.error(
+        e instanceof Error ? e.message : t(($) => $.gitlab.toast_project_refresh_failed),
       );
     },
   });
@@ -179,7 +193,9 @@ export function GitLabTab() {
                   manualWebhookUrl={data?.manual_webhook_url}
                   canManage={canManage}
                   deleting={deleteProject.isPending}
+                  refreshing={refreshProject.isPending && refreshProject.variables === project.id}
                   onDelete={() => setDeleteTarget(project)}
+                  onRefresh={() => refreshProject.mutate(project.id)}
                 />
               ))}
             </CardContent>
@@ -252,13 +268,17 @@ function ProjectRow({
   manualWebhookUrl,
   canManage,
   deleting,
+  refreshing,
   onDelete,
+  onRefresh,
 }: {
   project: GitLabProjectBinding;
   manualWebhookUrl?: string;
   canManage: boolean;
   deleting: boolean;
+  refreshing: boolean;
   onDelete: () => void;
+  onRefresh: () => void;
 }) {
   const { t } = useT("settings");
 
@@ -297,20 +317,51 @@ function ProjectRow({
               {t(($) => $.gitlab.manual_secret_hint)}
             </p>
           )}
+          <div className="space-y-0.5 text-xs text-muted-foreground">
+            {project.last_event_at || project.last_event_type ? (
+              <p>
+                {t(($) => $.gitlab.last_event, {
+                  type: project.last_event_type ?? "unknown",
+                  time: project.last_event_at ?? "unknown",
+                })}
+              </p>
+            ) : null}
+            {project.last_refresh_at ? (
+              <p>{t(($) => $.gitlab.last_refresh, { time: project.last_refresh_at })}</p>
+            ) : null}
+            {project.refresh_in_progress_at ? (
+              <p>{t(($) => $.gitlab.refresh_in_progress, { time: project.refresh_in_progress_at })}</p>
+            ) : null}
+            {project.last_refresh_error ? (
+              <p>{redactGitLabSecretText(project.last_refresh_error)}</p>
+            ) : null}
+          </div>
         </div>
       </div>
 
       {canManage && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label={t(($) => $.gitlab.remove_project)}
-          disabled={deleting}
-          onClick={onDelete}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={t(($) => $.gitlab.refresh_project)}
+            disabled={refreshing}
+            onClick={onRefresh}
+          >
+            <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={t(($) => $.gitlab.remove_project)}
+            disabled={deleting}
+            onClick={onDelete}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
       )}
     </div>
   );

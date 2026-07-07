@@ -188,3 +188,219 @@ JOIN issue_gitlab_merge_request imr
   ON imr.merge_request_id = mr.id
  AND imr.workspace_id = mr.workspace_id
 WHERE imr.workspace_id = $1 AND imr.issue_id = $2;
+
+-- name: MarkGitLabProjectBindingEvent :exec
+UPDATE gitlab_project_binding
+SET last_event_at = now(),
+    last_event_type = $3,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2;
+
+-- name: MarkGitLabProjectRefreshStarted :exec
+UPDATE gitlab_project_binding
+SET refresh_in_progress_at = now(),
+    last_refresh_error = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2;
+
+-- name: MarkGitLabProjectRefreshFinished :exec
+UPDATE gitlab_project_binding
+SET last_refresh_at = now(),
+    refresh_in_progress_at = NULL,
+    last_refresh_error = sqlc.narg('last_refresh_error'),
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2;
+
+-- name: GetGitLabMergeRequestByID :one
+SELECT * FROM gitlab_merge_request
+WHERE id = $1 AND workspace_id = $2;
+
+-- name: ListGitLabMergeRequestsByProjectBinding :many
+SELECT * FROM gitlab_merge_request
+WHERE workspace_id = $1 AND project_binding_id = $2
+ORDER BY mr_updated_at DESC, id ASC
+LIMIT $3;
+
+-- name: UpdateGitLabMergeRequestEnrichment :one
+UPDATE gitlab_merge_request
+SET title = $3,
+    description = sqlc.narg('description'),
+    state = $4,
+    web_url = $5,
+    source_branch = sqlc.narg('source_branch'),
+    target_branch = sqlc.narg('target_branch'),
+    author_username = sqlc.narg('author_username'),
+    author_avatar_url = sqlc.narg('author_avatar_url'),
+    sha = $6,
+    merge_commit_sha = sqlc.narg('merge_commit_sha'),
+    detailed_merge_status = sqlc.narg('detailed_merge_status'),
+    has_conflicts = sqlc.narg('has_conflicts'),
+    additions = $7,
+    deletions = $8,
+    changed_files = $9,
+    reviewers = $10,
+    assignees = $11,
+    labels = $12,
+    mr_updated_at = $13,
+    merged_at = sqlc.narg('merged_at'),
+    closed_at = sqlc.narg('closed_at'),
+    last_refreshed_at = now(),
+    last_refresh_error = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+RETURNING *;
+
+-- name: MarkGitLabMergeRequestRefreshError :exec
+UPDATE gitlab_merge_request
+SET last_refreshed_at = now(),
+    last_refresh_error = $3,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2;
+
+-- name: UpsertGitLabMRApprovalState :one
+INSERT INTO gitlab_mr_approval_state (
+    merge_request_id, workspace_id, approved, approvals_required,
+    approvals_left, approved_by, rules, raw_state, fetched_at
+) VALUES (
+    $1, $2, $3, sqlc.narg('approvals_required'),
+    sqlc.narg('approvals_left'), $4, $5, sqlc.narg('raw_state'), now()
+)
+ON CONFLICT (merge_request_id) DO UPDATE SET
+    approved = EXCLUDED.approved,
+    approvals_required = EXCLUDED.approvals_required,
+    approvals_left = EXCLUDED.approvals_left,
+    approved_by = EXCLUDED.approved_by,
+    rules = EXCLUDED.rules,
+    raw_state = EXCLUDED.raw_state,
+    fetched_at = now(),
+    updated_at = now()
+RETURNING *;
+
+-- name: UpsertGitLabMRDiscussion :one
+INSERT INTO gitlab_mr_discussion (
+    workspace_id, merge_request_id, gitlab_discussion_id, individual_note,
+    resolved, discussion_created_at, discussion_updated_at, fetched_at
+) VALUES (
+    $1, $2, $3, $4, sqlc.narg('resolved'),
+    sqlc.narg('discussion_created_at'), sqlc.narg('discussion_updated_at'), now()
+)
+ON CONFLICT (merge_request_id, gitlab_discussion_id) DO UPDATE SET
+    individual_note = EXCLUDED.individual_note,
+    resolved = EXCLUDED.resolved,
+    discussion_created_at = EXCLUDED.discussion_created_at,
+    discussion_updated_at = EXCLUDED.discussion_updated_at,
+    fetched_at = now(),
+    updated_at = now()
+RETURNING *;
+
+-- name: UpsertGitLabMRNote :one
+INSERT INTO gitlab_mr_note (
+    workspace_id, discussion_id, merge_request_id, gitlab_note_id,
+    author_username, author_avatar_url, body, system, resolved, resolvable,
+    note_created_at, note_updated_at
+) VALUES (
+    $1, $2, $3, $4,
+    sqlc.narg('author_username'), sqlc.narg('author_avatar_url'),
+    $5, $6, sqlc.narg('resolved'), sqlc.narg('resolvable'),
+    sqlc.narg('note_created_at'), sqlc.narg('note_updated_at')
+)
+ON CONFLICT (merge_request_id, gitlab_note_id) DO UPDATE SET
+    discussion_id = EXCLUDED.discussion_id,
+    author_username = EXCLUDED.author_username,
+    author_avatar_url = EXCLUDED.author_avatar_url,
+    body = EXCLUDED.body,
+    system = EXCLUDED.system,
+    resolved = EXCLUDED.resolved,
+    resolvable = EXCLUDED.resolvable,
+    note_created_at = EXCLUDED.note_created_at,
+    note_updated_at = EXCLUDED.note_updated_at,
+    updated_at = now()
+RETURNING *;
+
+-- name: ListGitLabMRPipelinesByMR :many
+SELECT * FROM gitlab_mr_pipeline
+WHERE merge_request_id = $1
+ORDER BY pipeline_updated_at DESC, pipeline_id DESC;
+
+-- name: UpsertGitLabPipelineJob :one
+INSERT INTO gitlab_pipeline_job (
+    workspace_id, merge_request_id, pipeline_id, job_id, name, stage,
+    status, ref, sha, web_url, started_at, finished_at, duration_seconds,
+    queued_duration_seconds, failure_reason, allow_failure,
+    artifacts_file_name, artifacts_file_size, artifacts_expire_at, fetched_at
+) VALUES (
+    $1, $2, $3, $4, $5, sqlc.narg('stage'),
+    $6, sqlc.narg('ref'), sqlc.narg('sha'), sqlc.narg('web_url'),
+    sqlc.narg('started_at'), sqlc.narg('finished_at'),
+    sqlc.narg('duration_seconds'), sqlc.narg('queued_duration_seconds'),
+    sqlc.narg('failure_reason'), $7,
+    sqlc.narg('artifacts_file_name'), sqlc.narg('artifacts_file_size'),
+    sqlc.narg('artifacts_expire_at'), now()
+)
+ON CONFLICT (merge_request_id, job_id) DO UPDATE SET
+    pipeline_id = EXCLUDED.pipeline_id,
+    name = EXCLUDED.name,
+    stage = EXCLUDED.stage,
+    status = EXCLUDED.status,
+    ref = EXCLUDED.ref,
+    sha = EXCLUDED.sha,
+    web_url = EXCLUDED.web_url,
+    started_at = EXCLUDED.started_at,
+    finished_at = EXCLUDED.finished_at,
+    duration_seconds = EXCLUDED.duration_seconds,
+    queued_duration_seconds = EXCLUDED.queued_duration_seconds,
+    failure_reason = EXCLUDED.failure_reason,
+    allow_failure = EXCLUDED.allow_failure,
+    artifacts_file_name = EXCLUDED.artifacts_file_name,
+    artifacts_file_size = EXCLUDED.artifacts_file_size,
+    artifacts_expire_at = EXCLUDED.artifacts_expire_at,
+    fetched_at = now(),
+    updated_at = now()
+RETURNING *;
+
+-- name: UpdateGitLabPipelineJobTraceSummary :exec
+UPDATE gitlab_pipeline_job
+SET trace_summary = $3,
+    trace_truncated = $4,
+    trace_fetched_at = now(),
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2;
+
+-- name: GetGitLabMergeRequestForIssue :one
+SELECT mr.*
+FROM gitlab_merge_request mr
+JOIN issue_gitlab_merge_request imr
+  ON imr.merge_request_id = mr.id
+ AND imr.workspace_id = mr.workspace_id
+WHERE imr.issue_id = $1
+  AND mr.id = $2
+  AND mr.workspace_id = $3;
+
+-- name: GetGitLabPipelineJobForIssue :one
+SELECT j.*
+FROM gitlab_pipeline_job j
+JOIN issue_gitlab_merge_request imr
+  ON imr.merge_request_id = j.merge_request_id
+ AND imr.workspace_id = j.workspace_id
+WHERE imr.issue_id = $1
+  AND j.id = $2
+  AND j.workspace_id = $3;
+
+-- name: ListGitLabMRDiscussions :many
+SELECT * FROM gitlab_mr_discussion
+WHERE workspace_id = $1 AND merge_request_id = $2
+ORDER BY COALESCE(discussion_updated_at, discussion_created_at, updated_at) DESC, id ASC;
+
+-- name: ListGitLabMRNotes :many
+SELECT * FROM gitlab_mr_note
+WHERE workspace_id = $1 AND merge_request_id = $2
+ORDER BY COALESCE(note_created_at, created_at) ASC, id ASC;
+
+-- name: ListGitLabPipelineJobsByMR :many
+SELECT * FROM gitlab_pipeline_job
+WHERE workspace_id = $1 AND merge_request_id = $2
+ORDER BY pipeline_id DESC, stage ASC NULLS LAST, job_id ASC;
+
+-- name: GetGitLabMRApprovalState :one
+SELECT * FROM gitlab_mr_approval_state
+WHERE workspace_id = $1 AND merge_request_id = $2;

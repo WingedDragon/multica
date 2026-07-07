@@ -539,6 +539,56 @@ type GitlabMergeRequest struct {
 	ClosedAt            pgtype.Timestamptz `json:"closed_at"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	Reviewers           []byte             `json:"reviewers"`
+	Assignees           []byte             `json:"assignees"`
+	Labels              []byte             `json:"labels"`
+	LastRefreshedAt     pgtype.Timestamptz `json:"last_refreshed_at"`
+	LastRefreshError    pgtype.Text        `json:"last_refresh_error"`
+}
+
+type GitlabMrApprovalState struct {
+	MergeRequestID    pgtype.UUID        `json:"merge_request_id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	Approved          bool               `json:"approved"`
+	ApprovalsRequired pgtype.Int4        `json:"approvals_required"`
+	ApprovalsLeft     pgtype.Int4        `json:"approvals_left"`
+	ApprovedBy        []byte             `json:"approved_by"`
+	Rules             []byte             `json:"rules"`
+	RawState          []byte             `json:"raw_state"`
+	FetchedAt         pgtype.Timestamptz `json:"fetched_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type GitlabMrDiscussion struct {
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	MergeRequestID      pgtype.UUID        `json:"merge_request_id"`
+	GitlabDiscussionID  string             `json:"gitlab_discussion_id"`
+	IndividualNote      bool               `json:"individual_note"`
+	Resolved            pgtype.Bool        `json:"resolved"`
+	DiscussionCreatedAt pgtype.Timestamptz `json:"discussion_created_at"`
+	DiscussionUpdatedAt pgtype.Timestamptz `json:"discussion_updated_at"`
+	FetchedAt           pgtype.Timestamptz `json:"fetched_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+}
+
+type GitlabMrNote struct {
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	DiscussionID    pgtype.UUID        `json:"discussion_id"`
+	MergeRequestID  pgtype.UUID        `json:"merge_request_id"`
+	GitlabNoteID    int64              `json:"gitlab_note_id"`
+	AuthorUsername  pgtype.Text        `json:"author_username"`
+	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
+	Body            string             `json:"body"`
+	System          bool               `json:"system"`
+	Resolved        pgtype.Bool        `json:"resolved"`
+	Resolvable      pgtype.Bool        `json:"resolvable"`
+	NoteCreatedAt   pgtype.Timestamptz `json:"note_created_at"`
+	NoteUpdatedAt   pgtype.Timestamptz `json:"note_updated_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 type GitlabMrPipeline struct {
@@ -553,18 +603,52 @@ type GitlabMrPipeline struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+type GitlabPipelineJob struct {
+	ID                    pgtype.UUID        `json:"id"`
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	MergeRequestID        pgtype.UUID        `json:"merge_request_id"`
+	PipelineID            int64              `json:"pipeline_id"`
+	JobID                 int64              `json:"job_id"`
+	Name                  string             `json:"name"`
+	Stage                 pgtype.Text        `json:"stage"`
+	Status                string             `json:"status"`
+	Ref                   pgtype.Text        `json:"ref"`
+	Sha                   pgtype.Text        `json:"sha"`
+	WebUrl                pgtype.Text        `json:"web_url"`
+	StartedAt             pgtype.Timestamptz `json:"started_at"`
+	FinishedAt            pgtype.Timestamptz `json:"finished_at"`
+	DurationSeconds       pgtype.Float8      `json:"duration_seconds"`
+	QueuedDurationSeconds pgtype.Float8      `json:"queued_duration_seconds"`
+	FailureReason         pgtype.Text        `json:"failure_reason"`
+	AllowFailure          bool               `json:"allow_failure"`
+	ArtifactsFileName     pgtype.Text        `json:"artifacts_file_name"`
+	ArtifactsFileSize     pgtype.Int8        `json:"artifacts_file_size"`
+	ArtifactsExpireAt     pgtype.Timestamptz `json:"artifacts_expire_at"`
+	TraceSummary          pgtype.Text        `json:"trace_summary"`
+	TraceTruncated        bool               `json:"trace_truncated"`
+	TraceFetchedAt        pgtype.Timestamptz `json:"trace_fetched_at"`
+	FetchedAt             pgtype.Timestamptz `json:"fetched_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
 type GitlabProjectBinding struct {
-	ID                pgtype.UUID        `json:"id"`
-	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
-	ConnectionID      pgtype.UUID        `json:"connection_id"`
-	GitlabProjectID   int64              `json:"gitlab_project_id"`
-	PathWithNamespace string             `json:"path_with_namespace"`
-	WebUrl            string             `json:"web_url"`
-	HookID            pgtype.Int8        `json:"hook_id"`
-	HookEnabled       bool               `json:"hook_enabled"`
-	LastSyncError     pgtype.Text        `json:"last_sync_error"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	ConnectionID        pgtype.UUID        `json:"connection_id"`
+	GitlabProjectID     int64              `json:"gitlab_project_id"`
+	PathWithNamespace   string             `json:"path_with_namespace"`
+	WebUrl              string             `json:"web_url"`
+	HookID              pgtype.Int8        `json:"hook_id"`
+	HookEnabled         bool               `json:"hook_enabled"`
+	LastSyncError       pgtype.Text        `json:"last_sync_error"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	LastRefreshAt       pgtype.Timestamptz `json:"last_refresh_at"`
+	LastRefreshError    pgtype.Text        `json:"last_refresh_error"`
+	LastEventAt         pgtype.Timestamptz `json:"last_event_at"`
+	LastEventType       pgtype.Text        `json:"last_event_type"`
+	RefreshInProgressAt pgtype.Timestamptz `json:"refresh_in_progress_at"`
 }
 
 type InboxItem struct {

@@ -1,4 +1,12 @@
-export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction } from "./issue";
+export type {
+  Issue,
+  IssueStatus,
+  IssuePriority,
+  IssueAssigneeType,
+  IssueMetadata,
+  IssueMetadataValue,
+  IssueReaction,
+} from "./issue";
 export type {
   Agent,
   AgentStatus,
@@ -65,20 +73,55 @@ export type {
   IssueUsageSummary,
 } from "./agent";
 export { RUNTIME_PROFILE_PROTOCOL_FAMILIES } from "./agent";
-export type { Workspace, WorkspaceRepo, Member, MemberRole, User, MemberWithUser, Invitation } from "./workspace";
-export type { InboxItem, InboxSeverity, InboxItemType, InboxWorkspaceUnread } from "./inbox";
-export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferences, NotificationPreferenceResponse } from "./notification-preference";
-export type { Comment, CommentType, CommentAuthorType, CommentTriggerPreview, CommentTriggerPreviewAgent, CommentTriggerSource, Reaction } from "./comment";
-export type { Label, LabelResourceType, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse, ResourceLabelsResponse } from "./label";
 export type {
-  TimelineEntry,
-  AssigneeFrequencyEntry,
-} from "./activity";
+  Workspace,
+  WorkspaceRepo,
+  Member,
+  MemberRole,
+  User,
+  MemberWithUser,
+  Invitation,
+} from "./workspace";
+export type {
+  InboxItem,
+  InboxSeverity,
+  InboxItemType,
+  InboxWorkspaceUnread,
+} from "./inbox";
+export type {
+  NotificationGroupKey,
+  NotificationGroupValue,
+  NotificationPreferences,
+  NotificationPreferenceResponse,
+} from "./notification-preference";
+export type {
+  Comment,
+  CommentType,
+  CommentAuthorType,
+  CommentTriggerPreview,
+  CommentTriggerPreviewAgent,
+  CommentTriggerSource,
+  Reaction,
+} from "./comment";
+export type {
+  Label,
+  LabelResourceType,
+  CreateLabelRequest,
+  UpdateLabelRequest,
+  ListLabelsResponse,
+  IssueLabelsResponse,
+  ResourceLabelsResponse,
+} from "./label";
+export type { TimelineEntry, AssigneeFrequencyEntry } from "./activity";
 export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";
 export type * from "./api";
 export type { Attachment } from "./attachment";
-export { attachmentDownloadPath, attachmentIdFromDownloadURL, contentReferencesAttachment } from "./attachment-url";
+export {
+  attachmentDownloadPath,
+  attachmentIdFromDownloadURL,
+  contentReferencesAttachment,
+} from "./attachment-url";
 export type {
   ChatSession,
   ChatLastMessage,
@@ -112,7 +155,12 @@ export type {
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
 } from "./project";
-export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
+export type {
+  PinnedItem,
+  PinnedItemType,
+  CreatePinRequest,
+  ReorderPinsRequest,
+} from "./pin";
 export type {
   GitHubInstallation,
   GitHubMergeableState,
@@ -126,10 +174,19 @@ export type {
   CreateGitLabProjectRequest,
   CreateGitLabProjectResponse,
   GitLabConfigResponse,
+  GitLabJobTraceResponse,
+  GitLabMergeRequestDetailsResponse,
   GitLabMergeRequest,
   GitLabMergeRequestState,
+  GitLabApprovalRule,
+  GitLabMRApproval,
+  GitLabMRDiscussion,
+  GitLabMRNote,
+  GitLabPipelineJob,
   GitLabPipelineStatus,
+  GitLabProjectRefreshResponse,
   GitLabProjectBinding,
+  GitLabUserRef,
   ListGitLabMergeRequestsResponse,
 } from "./gitlab";
 export type {

@@ -33,15 +33,20 @@ var newGitLabClient = func(cfg gitlab.Config) (gitLabAPI, error) {
 }
 
 type GitLabProjectBindingResponse struct {
-	ID                string  `json:"id"`
-	WorkspaceID       string  `json:"workspace_id"`
-	GitLabProjectID   int64   `json:"gitlab_project_id"`
-	PathWithNamespace string  `json:"path_with_namespace"`
-	WebURL            string  `json:"web_url"`
-	HookID            *int64  `json:"hook_id,omitempty"`
-	HookEnabled       bool    `json:"hook_enabled"`
-	LastSyncError     *string `json:"last_sync_error,omitempty"`
-	CreatedAt         string  `json:"created_at"`
+	ID                  string  `json:"id"`
+	WorkspaceID         string  `json:"workspace_id"`
+	GitLabProjectID     int64   `json:"gitlab_project_id"`
+	PathWithNamespace   string  `json:"path_with_namespace"`
+	WebURL              string  `json:"web_url"`
+	HookID              *int64  `json:"hook_id,omitempty"`
+	HookEnabled         bool    `json:"hook_enabled"`
+	LastSyncError       *string `json:"last_sync_error,omitempty"`
+	LastRefreshAt       *string `json:"last_refresh_at,omitempty"`
+	LastRefreshError    *string `json:"last_refresh_error,omitempty"`
+	LastEventAt         *string `json:"last_event_at,omitempty"`
+	LastEventType       *string `json:"last_event_type,omitempty"`
+	RefreshInProgressAt *string `json:"refresh_in_progress_at,omitempty"`
+	CreatedAt           string  `json:"created_at"`
 }
 
 type GitLabConfigResponse struct {
@@ -53,30 +58,35 @@ type GitLabConfigResponse struct {
 }
 
 type GitLabMergeRequestResponse struct {
-	ID                  string  `json:"id"`
-	WorkspaceID         string  `json:"workspace_id"`
-	ProjectPath         string  `json:"project_path"`
-	GitLabProjectID     int64   `json:"gitlab_project_id"`
-	IID                 int32   `json:"iid"`
-	Title               string  `json:"title"`
-	State               string  `json:"state"`
-	WebURL              string  `json:"web_url"`
-	SourceBranch        *string `json:"source_branch"`
-	TargetBranch        *string `json:"target_branch"`
-	AuthorUsername      *string `json:"author_username"`
-	AuthorAvatarURL     *string `json:"author_avatar_url"`
-	SHA                 string  `json:"sha"`
-	DetailedMergeStatus *string `json:"detailed_merge_status"`
-	HasConflicts        *bool   `json:"has_conflicts"`
-	PipelineStatus      *string `json:"pipeline_status"`
-	PipelineURL         *string `json:"pipeline_url"`
-	Additions           int32   `json:"additions"`
-	Deletions           int32   `json:"deletions"`
-	ChangedFiles        int32   `json:"changed_files"`
-	MergedAt            *string `json:"merged_at"`
-	ClosedAt            *string `json:"closed_at"`
-	MRCreatedAt         string  `json:"mr_created_at"`
-	MRUpdatedAt         string  `json:"mr_updated_at"`
+	ID                  string          `json:"id"`
+	WorkspaceID         string          `json:"workspace_id"`
+	ProjectPath         string          `json:"project_path"`
+	GitLabProjectID     int64           `json:"gitlab_project_id"`
+	IID                 int32           `json:"iid"`
+	Title               string          `json:"title"`
+	State               string          `json:"state"`
+	WebURL              string          `json:"web_url"`
+	SourceBranch        *string         `json:"source_branch"`
+	TargetBranch        *string         `json:"target_branch"`
+	AuthorUsername      *string         `json:"author_username"`
+	AuthorAvatarURL     *string         `json:"author_avatar_url"`
+	SHA                 string          `json:"sha"`
+	DetailedMergeStatus *string         `json:"detailed_merge_status"`
+	HasConflicts        *bool           `json:"has_conflicts"`
+	PipelineStatus      *string         `json:"pipeline_status"`
+	PipelineURL         *string         `json:"pipeline_url"`
+	Additions           int32           `json:"additions"`
+	Deletions           int32           `json:"deletions"`
+	ChangedFiles        int32           `json:"changed_files"`
+	Reviewers           json.RawMessage `json:"reviewers,omitempty"`
+	Assignees           json.RawMessage `json:"assignees,omitempty"`
+	Labels              json.RawMessage `json:"labels,omitempty"`
+	LastRefreshedAt     *string         `json:"last_refreshed_at,omitempty"`
+	LastRefreshError    *string         `json:"last_refresh_error,omitempty"`
+	MergedAt            *string         `json:"merged_at"`
+	ClosedAt            *string         `json:"closed_at"`
+	MRCreatedAt         string          `json:"mr_created_at"`
+	MRUpdatedAt         string          `json:"mr_updated_at"`
 }
 
 type createGitLabProjectRequest struct {
@@ -85,15 +95,20 @@ type createGitLabProjectRequest struct {
 
 func gitLabProjectBindingToResponse(row db.GitlabProjectBinding) GitLabProjectBindingResponse {
 	return GitLabProjectBindingResponse{
-		ID:                uuidToString(row.ID),
-		WorkspaceID:       uuidToString(row.WorkspaceID),
-		GitLabProjectID:   row.GitlabProjectID,
-		PathWithNamespace: row.PathWithNamespace,
-		WebURL:            row.WebUrl,
-		HookID:            int64PtrFromPg(row.HookID),
-		HookEnabled:       row.HookEnabled,
-		LastSyncError:     redactedTextPtr(row.LastSyncError),
-		CreatedAt:         timestampToString(row.CreatedAt),
+		ID:                  uuidToString(row.ID),
+		WorkspaceID:         uuidToString(row.WorkspaceID),
+		GitLabProjectID:     row.GitlabProjectID,
+		PathWithNamespace:   row.PathWithNamespace,
+		WebURL:              row.WebUrl,
+		HookID:              int64PtrFromPg(row.HookID),
+		HookEnabled:         row.HookEnabled,
+		LastSyncError:       redactedTextPtr(row.LastSyncError),
+		LastRefreshAt:       timestampToPtr(row.LastRefreshAt),
+		LastRefreshError:    redactedTextPtr(row.LastRefreshError),
+		LastEventAt:         timestampToPtr(row.LastEventAt),
+		LastEventType:       textToPtr(row.LastEventType),
+		RefreshInProgressAt: timestampToPtr(row.RefreshInProgressAt),
+		CreatedAt:           timestampToString(row.CreatedAt),
 	}
 }
 
@@ -445,6 +460,18 @@ func (h *Handler) HandleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
+	case "Job Hook":
+		if !h.handleGitLabJobEvent(r.Context(), cfg, body) {
+			writeError(w, http.StatusBadRequest, "invalid job payload")
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	case "Note Hook":
+		if !h.handleGitLabNoteEvent(r.Context(), cfg, body) {
+			writeError(w, http.StatusBadRequest, "invalid note payload")
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -508,6 +535,11 @@ func (h *Handler) handleGitLabMergeRequestEvent(ctx context.Context, cfg gitlab.
 	}
 
 	for _, binding := range bindings {
+		_ = h.Queries.MarkGitLabProjectBindingEvent(ctx, db.MarkGitLabProjectBindingEventParams{
+			ID:            binding.ID,
+			WorkspaceID:   binding.WorkspaceID,
+			LastEventType: strToText("merge_request"),
+		})
 		attrs := p.ObjectAttributes
 		state := deriveGitLabMRState(attrs.State, attrs.Draft)
 		webURL := attrs.URL
@@ -592,6 +624,7 @@ func (h *Handler) handleGitLabMergeRequestEvent(ctx context.Context, cfg gitlab.
 				}
 			}
 		}
+		h.refreshGitLabMergeRequestFromWebhook(ctx, cfg, mr)
 		h.publish(protocol.EventGitLabMergeRequestUpdated, uuidToString(binding.WorkspaceID), "system", "", map[string]any{
 			"merge_request_id": uuidToString(mr.ID),
 			"linked_issue_ids": linkedIssueIDs,
@@ -629,6 +662,11 @@ func (h *Handler) handleGitLabPipelineEvent(ctx context.Context, cfg gitlab.Conf
 		return true
 	}
 	for _, binding := range bindings {
+		_ = h.Queries.MarkGitLabProjectBindingEvent(ctx, db.MarkGitLabProjectBindingEventParams{
+			ID:            binding.ID,
+			WorkspaceID:   binding.WorkspaceID,
+			LastEventType: strToText("pipeline"),
+		})
 		mrs, err := h.Queries.ListGitLabMergeRequestsByProjectBindingSHA(ctx, db.ListGitLabMergeRequestsByProjectBindingSHAParams{
 			WorkspaceID:      binding.WorkspaceID,
 			ProjectBindingID: binding.ID,
@@ -677,6 +715,211 @@ func (h *Handler) handleGitLabPipelineEvent(ctx context.Context, cfg gitlab.Conf
 	return true
 }
 
+type gitLabJobWebhookPayload struct {
+	ObjectKind          string                            `json:"object_kind"`
+	ProjectID           int64                             `json:"project_id"`
+	PipelineID          int64                             `json:"pipeline_id"`
+	BuildID             int64                             `json:"build_id"`
+	BuildName           string                            `json:"build_name"`
+	BuildStage          string                            `json:"build_stage"`
+	BuildStatus         string                            `json:"build_status"`
+	BuildRef            string                            `json:"build_ref"`
+	BuildSHA            string                            `json:"build_sha"`
+	BuildWebURL         string                            `json:"build_web_url"`
+	BuildStartedAt      string                            `json:"build_started_at"`
+	BuildFinishedAt     string                            `json:"build_finished_at"`
+	BuildDuration       *float64                          `json:"build_duration"`
+	BuildQueuedDuration *float64                          `json:"build_queued_duration"`
+	BuildFailureReason  string                            `json:"build_failure_reason"`
+	BuildAllowFailure   bool                              `json:"build_allow_failure"`
+	ArtifactsFile       *gitLabWebhookArtifactFilePayload `json:"artifacts_file"`
+	ArtifactsExpireAt   string                            `json:"artifacts_expire_at"`
+	Project             struct {
+		ID int64 `json:"id"`
+	} `json:"project"`
+}
+
+type gitLabWebhookArtifactFilePayload struct {
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+}
+
+func (h *Handler) handleGitLabJobEvent(ctx context.Context, cfg gitlab.Config, body []byte) bool {
+	var p gitLabJobWebhookPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return false
+	}
+	projectID := p.ProjectID
+	if projectID == 0 {
+		projectID = p.Project.ID
+	}
+	if projectID == 0 || p.BuildID == 0 || p.BuildSHA == "" {
+		return false
+	}
+	bindings, err := h.Queries.ListGitLabProjectBindingsByHostAndProjectID(ctx, db.ListGitLabProjectBindingsByHostAndProjectIDParams{
+		Host:            cfg.Host,
+		GitlabProjectID: projectID,
+	})
+	if err != nil {
+		slog.Warn("gitlab: lookup project bindings for job failed", "err", err, "project_id", projectID)
+		return true
+	}
+	for _, binding := range bindings {
+		_ = h.Queries.MarkGitLabProjectBindingEvent(ctx, db.MarkGitLabProjectBindingEventParams{
+			ID:            binding.ID,
+			WorkspaceID:   binding.WorkspaceID,
+			LastEventType: strToText("job"),
+		})
+		mrs, err := h.Queries.ListGitLabMergeRequestsByProjectBindingSHA(ctx, db.ListGitLabMergeRequestsByProjectBindingSHAParams{
+			WorkspaceID:      binding.WorkspaceID,
+			ProjectBindingID: binding.ID,
+			Sha:              p.BuildSHA,
+		})
+		if err != nil {
+			slog.Warn("gitlab: lookup merge requests for job failed", "err", err, "workspace_id", uuidToString(binding.WorkspaceID), "sha", p.BuildSHA)
+			continue
+		}
+		linkedIssueSet := map[string]struct{}{}
+		for _, mr := range mrs {
+			if p.PipelineID != 0 {
+				if err := h.Queries.UpsertGitLabMRPipeline(ctx, db.UpsertGitLabMRPipelineParams{
+					MergeRequestID:    mr.ID,
+					PipelineID:        p.PipelineID,
+					Sha:               p.BuildSHA,
+					Status:            normalizeGitLabPipelineStatus(p.BuildStatus),
+					PipelineUpdatedAt: parseGitLabTimeRequired(firstNonEmpty(p.BuildFinishedAt, p.BuildStartedAt)),
+					Ref:               strToText(p.BuildRef),
+					WebUrl:            pgtype.Text{},
+				}); err != nil {
+					slog.Warn("gitlab: upsert job pipeline failed", "err", err, "mr_id", uuidToString(mr.ID), "pipeline_id", p.PipelineID)
+				}
+			}
+			if _, err := h.Queries.UpsertGitLabPipelineJob(ctx, gitLabPipelineJobParams(mr, p.PipelineID, gitlab.Job{
+				ID:                p.BuildID,
+				Name:              p.BuildName,
+				Stage:             p.BuildStage,
+				Status:            p.BuildStatus,
+				Ref:               p.BuildRef,
+				SHA:               p.BuildSHA,
+				WebURL:            p.BuildWebURL,
+				StartedAt:         p.BuildStartedAt,
+				FinishedAt:        p.BuildFinishedAt,
+				Duration:          p.BuildDuration,
+				QueuedDuration:    p.BuildQueuedDuration,
+				FailureReason:     p.BuildFailureReason,
+				AllowFailure:      p.BuildAllowFailure,
+				ArtifactsFile:     gitLabWebhookArtifactFile(p.ArtifactsFile),
+				ArtifactsExpireAt: p.ArtifactsExpireAt,
+			})); err != nil {
+				slog.Warn("gitlab: upsert pipeline job failed", "err", err, "mr_id", uuidToString(mr.ID), "job_id", p.BuildID)
+				continue
+			}
+			issueIDs, err := h.Queries.ListIssueIDsForGitLabMergeRequest(ctx, db.ListIssueIDsForGitLabMergeRequestParams{
+				WorkspaceID:    binding.WorkspaceID,
+				MergeRequestID: mr.ID,
+			})
+			if err != nil {
+				slog.Warn("gitlab: list linked issues for job failed", "err", err, "mr_id", uuidToString(mr.ID))
+				continue
+			}
+			for _, id := range issueIDs {
+				linkedIssueSet[uuidToString(id)] = struct{}{}
+			}
+		}
+		if len(mrs) > 0 {
+			h.publish(protocol.EventGitLabMergeRequestUpdated, uuidToString(binding.WorkspaceID), "system", "", map[string]any{
+				"linked_issue_ids": stringSetKeys(linkedIssueSet),
+			})
+		}
+	}
+	return true
+}
+
+type gitLabNoteWebhookPayload struct {
+	ObjectKind string `json:"object_kind"`
+	Project    struct {
+		ID int64 `json:"id"`
+	} `json:"project"`
+	MergeRequest struct {
+		IID int32 `json:"iid"`
+	} `json:"merge_request"`
+	ObjectAttributes struct {
+		NoteableType string `json:"noteable_type"`
+		NoteableIID  int32  `json:"noteable_iid"`
+	} `json:"object_attributes"`
+}
+
+func (h *Handler) handleGitLabNoteEvent(ctx context.Context, cfg gitlab.Config, body []byte) bool {
+	var p gitLabNoteWebhookPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return false
+	}
+	if !strings.EqualFold(p.ObjectAttributes.NoteableType, "MergeRequest") {
+		return true
+	}
+	iid := p.MergeRequest.IID
+	if iid == 0 {
+		iid = p.ObjectAttributes.NoteableIID
+	}
+	if p.Project.ID == 0 || iid == 0 {
+		return false
+	}
+	api, err := newGitLabClient(cfg)
+	if err != nil {
+		slog.Warn("gitlab: create client for note refresh failed", "err", err)
+		return true
+	}
+	detailAPI, err := detailGitLabAPI(api)
+	if err != nil {
+		slog.Warn("gitlab: detail client for note refresh unavailable", "err", err)
+		return true
+	}
+	bindings, err := h.Queries.ListGitLabProjectBindingsByHostAndProjectID(ctx, db.ListGitLabProjectBindingsByHostAndProjectIDParams{
+		Host:            cfg.Host,
+		GitlabProjectID: p.Project.ID,
+	})
+	if err != nil {
+		slog.Warn("gitlab: lookup project bindings for note failed", "err", err, "project_id", p.Project.ID)
+		return true
+	}
+	for _, binding := range bindings {
+		_ = h.Queries.MarkGitLabProjectBindingEvent(ctx, db.MarkGitLabProjectBindingEventParams{
+			ID:            binding.ID,
+			WorkspaceID:   binding.WorkspaceID,
+			LastEventType: strToText("note"),
+		})
+		mr, err := h.Queries.GetGitLabMergeRequestByBinding(ctx, db.GetGitLabMergeRequestByBindingParams{
+			WorkspaceID:      binding.WorkspaceID,
+			ProjectBindingID: binding.ID,
+			MrIid:            iid,
+		})
+		if err != nil {
+			continue
+		}
+		if _, err := h.refreshGitLabDiscussions(ctx, detailAPI, mr); err != nil {
+			h.markGitLabMergeRequestRefreshError(ctx, mr, err)
+			slog.Warn("gitlab: note discussion refresh failed", "err", err, "mr_id", uuidToString(mr.ID))
+			continue
+		}
+		issueIDs, err := h.Queries.ListIssueIDsForGitLabMergeRequest(ctx, db.ListIssueIDsForGitLabMergeRequestParams{
+			WorkspaceID:    binding.WorkspaceID,
+			MergeRequestID: mr.ID,
+		})
+		if err != nil {
+			continue
+		}
+		linkedIssueIDs := make([]string, 0, len(issueIDs))
+		for _, id := range issueIDs {
+			linkedIssueIDs = append(linkedIssueIDs, uuidToString(id))
+		}
+		h.publish(protocol.EventGitLabMergeRequestUpdated, uuidToString(binding.WorkspaceID), "system", "", map[string]any{
+			"merge_request_id": uuidToString(mr.ID),
+			"linked_issue_ids": linkedIssueIDs,
+		})
+	}
+	return true
+}
+
 func (h *Handler) ListGitLabMergeRequestsForIssue(w http.ResponseWriter, r *http.Request) {
 	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
 	if !ok {
@@ -719,6 +962,11 @@ func gitLabMergeRequestRowToResponse(row db.ListGitLabMergeRequestsByIssueRow) G
 		Additions:           row.Additions,
 		Deletions:           row.Deletions,
 		ChangedFiles:        row.ChangedFiles,
+		Reviewers:           jsonArrayOrEmpty(row.Reviewers),
+		Assignees:           jsonArrayOrEmpty(row.Assignees),
+		Labels:              jsonArrayOrEmpty(row.Labels),
+		LastRefreshedAt:     timestampToPtr(row.LastRefreshedAt),
+		LastRefreshError:    redactedTextPtr(row.LastRefreshError),
 		MergedAt:            timestampToPtr(row.MergedAt),
 		ClosedAt:            timestampToPtr(row.ClosedAt),
 		MRCreatedAt:         timestampToString(row.MrCreatedAt),
@@ -771,4 +1019,28 @@ func parseGitLabTimeRequired(s string) pgtype.Timestamptz {
 		return pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
 	}
 	return t
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func stringSetKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	return out
+}
+
+func gitLabWebhookArtifactFile(file *gitLabWebhookArtifactFilePayload) *gitlab.JobArtifactFile {
+	if file == nil || file.Filename == "" {
+		return nil
+	}
+	return &gitlab.JobArtifactFile{Filename: file.Filename, Size: file.Size}
 }

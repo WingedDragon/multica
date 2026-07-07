@@ -12,6 +12,7 @@ import enSettings from "../../locales/en/settings.json";
 const mockGetGitLabConfig = vi.hoisted(() => vi.fn());
 const mockCreateGitLabProject = vi.hoisted(() => vi.fn());
 const mockDeleteGitLabProject = vi.hoisted(() => vi.fn());
+const mockRefreshGitLabProject = vi.hoisted(() => vi.fn());
 const mockToastSuccess = vi.hoisted(() => vi.fn());
 const mockToastError = vi.hoisted(() => vi.fn());
 const mockNavPush = vi.hoisted(() => vi.fn());
@@ -25,6 +26,7 @@ vi.mock("@multica/core/api", () => ({
     getGitLabConfig: mockGetGitLabConfig,
     createGitLabProject: mockCreateGitLabProject,
     deleteGitLabProject: mockDeleteGitLabProject,
+    refreshGitLabProject: mockRefreshGitLabProject,
   },
 }));
 
@@ -222,5 +224,39 @@ describe("GitLabTab", () => {
       queryKey: gitlabKeys.config("workspace-1"),
     });
     expect(mockToastSuccess).toHaveBeenCalledWith("GitLab project removed");
+  });
+
+  it("renders project diagnostics and refreshes a project", async () => {
+    const user = userEvent.setup();
+    const { invalidateSpy } = renderGitLabTab({
+      ...baseConfig,
+      projects: [
+        project({
+          last_event_at: "2026-07-01T01:00:00Z",
+          last_event_type: "merge_request",
+          last_refresh_at: "2026-07-01T01:10:00Z",
+          last_refresh_error: "gitlab token lacks required project permission",
+        }),
+      ],
+    });
+    mockRefreshGitLabProject.mockResolvedValue({
+      updated_mrs: 1,
+      updated_jobs: 2,
+      updated_discussions: 3,
+    });
+
+    expect(await screen.findByText(/Last event: merge_request/)).toBeTruthy();
+    expect(screen.getByText(/Last refresh: 2026-07-01T01:10:00Z/)).toBeTruthy();
+    expect(screen.getByText(/gitlab token lacks required project permission/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Refresh project" }));
+
+    await waitFor(() => {
+      expect(mockRefreshGitLabProject).toHaveBeenCalledWith("workspace-1", "binding-1");
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: gitlabKeys.config("workspace-1"),
+    });
+    expect(mockToastSuccess).toHaveBeenCalledWith("GitLab project refreshed");
   });
 });

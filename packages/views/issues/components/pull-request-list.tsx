@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
+  ChevronRight,
   CircleDashed,
   GitMerge,
   GitPullRequest,
   GitPullRequestArrow,
   GitPullRequestClosed,
   GitPullRequestDraft,
+  RefreshCw,
   TriangleAlert,
   XCircle,
 } from "lucide-react";
@@ -21,15 +23,22 @@ import {
   type PullRequestStatusKind,
   type PullRequestProgressSegment,
 } from "@multica/core/github";
-import { issueGitLabMergeRequestsOptions } from "@multica/core/gitlab";
+import {
+  gitlabKeys,
+  gitlabMergeRequestDetailsOptions,
+  issueGitLabMergeRequestsOptions,
+} from "@multica/core/gitlab";
+import { api } from "@multica/core/api";
 import type {
   GitHubPullRequest,
   GitHubPullRequestChecksConclusion,
   GitLabMergeRequest,
   GitLabPipelineStatus,
 } from "@multica/core/types";
+import { Button } from "@multica/ui/components/ui/button";
 import { cn } from "@multica/ui/lib/utils";
 import { useT } from "../../i18n";
+import { GitLabMergeRequestDetails } from "./gitlab-merge-request-details";
 
 type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 
@@ -142,12 +151,14 @@ export function PullRequestList({
   return (
     <div className="space-y-1">
       {expandedHead.map((row) => (
-        <ProviderPullRequestRow key={`${row.provider}:${row.item.id}`} row={row} />
+        <ProviderPullRequestRow key={`${row.provider}:${row.item.id}`} issueId={issueId} row={row} />
       ))}
       {useCollapse ? (
         <div className="space-y-1">
           {expanded
-            ? collapsedTail.map((row) => <ProviderPullRequestRow key={`${row.provider}:${row.item.id}`} row={row} />)
+            ? collapsedTail.map((row) => (
+                <ProviderPullRequestRow key={`${row.provider}:${row.item.id}`} issueId={issueId} row={row} />
+              ))
             : null}
           <button
             type="button"
@@ -164,11 +175,11 @@ export function PullRequestList({
   );
 }
 
-function ProviderPullRequestRow({ row }: { row: PullRequestRowEntry }) {
+function ProviderPullRequestRow({ issueId, row }: { issueId: string; row: PullRequestRowEntry }) {
   return row.provider === "github" ? (
     <PullRequestRow pr={row.item} />
   ) : (
-    <GitLabMergeRequestRow mr={row.item} />
+    <GitLabMergeRequestRow issueId={issueId} mr={row.item} />
   );
 }
 
@@ -275,8 +286,10 @@ function PullRequestRowDetails({
   );
 }
 
-function GitLabMergeRequestRow({ mr }: { mr: GitLabMergeRequest }) {
+function GitLabMergeRequestRow({ issueId, mr }: { issueId: string; mr: GitLabMergeRequest }) {
   const { t } = useT("issues");
+  const qc = useQueryClient();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const cfg = STATE_ICON[mr.state] ?? { icon: GitPullRequest, className: "" };
   const StateIcon = cfg.icon;
   const counts = getGitLabPipelineCounts(mr.pipeline_status);
@@ -291,13 +304,23 @@ function GitLabMergeRequestRow({ mr }: { mr: GitLabMergeRequest }) {
   const draftPrefix = mr.state === "draft";
   const stateLabel = getStateLabel(mr.state, t);
   const branchLabel = getGitLabBranchLabel(mr);
+  const detailsQuery = useQuery({
+    ...gitlabMergeRequestDetailsOptions(issueId, mr.id),
+    enabled: detailsOpen && !!issueId && !!mr.id,
+  });
+  const refresh = useMutation({
+    mutationFn: () => api.refreshGitLabMergeRequest(issueId, mr.id),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: gitlabKeys.mergeRequests(issueId) }),
+        qc.invalidateQueries({ queryKey: gitlabKeys.mergeRequestDetails(issueId, mr.id) }),
+      ]);
+    },
+  });
 
   return (
-    <a
+    <div
       data-testid="pull-request-row"
-      href={mr.web_url}
-      target="_blank"
-      rel="noreferrer noopener"
       className={cn(
         "flex items-start gap-2 rounded-md px-2 py-1.5 -mx-2 hover:bg-accent/50 transition-colors group",
         draftPrefix ? "opacity-80" : null,
@@ -305,9 +328,14 @@ function GitLabMergeRequestRow({ mr }: { mr: GitLabMergeRequest }) {
     >
       <StateIcon className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", cfg.className)} />
       <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium leading-snug truncate group-hover:text-foreground">
+        <a
+          href={mr.web_url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="block text-xs font-medium leading-snug truncate group-hover:text-foreground"
+        >
           {mr.title}
-        </p>
+        </a>
         <p className="text-[11px] text-muted-foreground truncate">
           {t(($) => $.detail.merge_request_provider_gitlab)} · {mr.project_path}!{mr.iid}
           {branchLabel ? ` · ${branchLabel}` : null} · {stateLabel}
@@ -320,11 +348,43 @@ function GitLabMergeRequestRow({ mr }: { mr: GitLabMergeRequest }) {
           statusText={
             draftPrefix
               ? t(($) => $.detail.pull_request_card_draft_prefix, { status: statusText })
-              : statusText
+            : statusText
           }
         />
+        <div className="mt-1 flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 px-1.5 text-[11px]"
+            onClick={() => setDetailsOpen((open) => !open)}
+          >
+            <ChevronRight className={cn("h-3 w-3 transition-transform", detailsOpen && "rotate-90")} />
+            {t(($) => $.detail.gitlab_details)}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            aria-label={t(($) => $.detail.gitlab_refresh)}
+            disabled={refresh.isPending}
+            onClick={() => refresh.mutate()}
+          >
+            <RefreshCw className={cn("h-3 w-3", refresh.isPending && "animate-spin")} />
+          </Button>
+        </div>
+        {detailsOpen ? (
+          detailsQuery.isLoading ? (
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              {t(($) => $.detail.gitlab_loading_details)}
+            </p>
+          ) : detailsQuery.data ? (
+            <GitLabMergeRequestDetails issueId={issueId} details={detailsQuery.data} />
+          ) : null
+        ) : null}
       </div>
-    </a>
+    </div>
   );
 }
 

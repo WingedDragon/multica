@@ -372,6 +372,10 @@
     "hook_enabled": "Webhook 登録済み",
     "hook_manual_required": "手動 webhook 設定が必要です",
     "manual_secret_hint": "GitLab webhook secret には、デプロイで設定された GITLAB_WEBHOOK_SECRET を使用してください。secret はここには表示されません。",
+    "last_event": "最終イベント: {{type}} at {{time}}",
+    "last_refresh": "最終更新: {{time}}",
+    "refresh_in_progress": "更新開始: {{time}}",
+    "refresh_project": "プロジェクトを更新",
     "remove_project": "プロジェクトを削除",
     "remove_confirm_title": "GitLab プロジェクトを削除しますか？",
     "remove_confirm_description": "{{project}} の Merge Request と pipeline 状態の同期を停止します。既存のミラーデータは保持されます。",
@@ -381,7 +385,9 @@
     "toast_project_added": "GitLab プロジェクトを追加しました",
     "toast_project_add_failed": "GitLab プロジェクトを追加できませんでした",
     "toast_project_deleted": "GitLab プロジェクトを削除しました",
-    "toast_project_delete_failed": "GitLab プロジェクトを削除できませんでした"
+    "toast_project_delete_failed": "GitLab プロジェクトを削除できませんでした",
+    "toast_project_refreshed": "GitLab プロジェクトを更新しました",
+    "toast_project_refresh_failed": "GitLab プロジェクトを更新できませんでした"
   },
   "lark": {
     "section_title": "Lark",

@@ -379,6 +379,10 @@
     "hook_enabled": "Webhook 已注册",
     "hook_manual_required": "需要手动配置 webhook",
     "manual_secret_hint": "请使用部署中配置的 GITLAB_WEBHOOK_SECRET 作为 GitLab webhook secret。这里不会显示 secret。",
+    "last_event": "最近事件：{{type}}，{{time}}",
+    "last_refresh": "最近刷新：{{time}}",
+    "refresh_in_progress": "刷新开始于：{{time}}",
+    "refresh_project": "刷新项目",
     "remove_project": "移除项目",
     "remove_confirm_title": "移除 GitLab 项目？",
     "remove_confirm_description": "Multica 将停止同步 {{project}} 的 Merge Request 和 pipeline 状态。已有镜像数据会保留。",
@@ -388,7 +392,9 @@
     "toast_project_added": "已添加 GitLab 项目",
     "toast_project_add_failed": "添加 GitLab 项目失败",
     "toast_project_deleted": "已移除 GitLab 项目",
-    "toast_project_delete_failed": "移除 GitLab 项目失败"
+    "toast_project_delete_failed": "移除 GitLab 项目失败",
+    "toast_project_refreshed": "GitLab 项目已刷新",
+    "toast_project_refresh_failed": "刷新 GitLab 项目失败"
   },
   "lark": {
     "section_title": "飞书",

@@ -674,7 +674,7 @@ export function useRealtimeSync(
         if (wsId) qc.invalidateQueries({ queryKey: gitlabKeys.config(wsId) });
       },
       gitlab_merge_request: () => {
-        qc.invalidateQueries({ queryKey: ["gitlab", "merge-requests"] });
+        qc.invalidateQueries({ queryKey: ["gitlab"] });
       },
       lark_installation: () => {
         const wsId = getCurrentWsId();

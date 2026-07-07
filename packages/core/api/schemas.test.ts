@@ -13,11 +13,13 @@ import {
   EMPTY_CREATE_FEEDBACK_RESPONSE,
   EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
   EMPTY_GITLAB_CONFIG_RESPONSE,
+  EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
   EMPTY_INBOX_UNREAD_SUMMARY,
   EMPTY_SEARCH_PROJECTS_RESPONSE,
   EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
   EMPTY_USER,
   GitLabConfigResponseSchema,
+  GitLabMergeRequestDetailsResponseSchema,
   InboxUnreadSummarySchema,
   IssueTriggerPreviewSchema,
   ListGitLabMergeRequestsResponseSchema,
@@ -64,7 +66,11 @@ describe("IssueSchema (via ListIssuesResponseSchema)", () => {
       issues: [
         {
           ...baseIssue,
-          metadata: { pipeline_status: "waiting", pr_number: 3, is_blocked: true },
+          metadata: {
+            pipeline_status: "waiting",
+            pr_number: 3,
+            is_blocked: true,
+          },
         },
       ],
       total: 1,
@@ -118,14 +124,29 @@ describe("IssueTriggerPreviewSchema", () => {
   it("parses a well-formed response", () => {
     const parsed = IssueTriggerPreviewSchema.parse({
       triggers: [
-        { issue_id: "i1", agent_id: "a1", source: "assign", handoff_supported: true },
-        { issue_id: "i2", agent_id: "a2", source: "status", handoff_supported: false },
+        {
+          issue_id: "i1",
+          agent_id: "a1",
+          source: "assign",
+          handoff_supported: true,
+        },
+        {
+          issue_id: "i2",
+          agent_id: "a2",
+          source: "status",
+          handoff_supported: false,
+        },
       ],
       total_count: 2,
     });
     expect(parsed.total_count).toBe(2);
     expect(parsed.triggers).toHaveLength(2);
-    expect(parsed.triggers[0]).toMatchObject({ issue_id: "i1", agent_id: "a1", source: "assign", handoff_supported: true });
+    expect(parsed.triggers[0]).toMatchObject({
+      issue_id: "i1",
+      agent_id: "a1",
+      source: "assign",
+      handoff_supported: true,
+    });
   });
 
   it("defaults missing top-level fields (empty / older backend)", () => {
@@ -135,7 +156,10 @@ describe("IssueTriggerPreviewSchema", () => {
   });
 
   it("defaults missing optional item fields, keeping required issue_id", () => {
-    const parsed = IssueTriggerPreviewSchema.parse({ triggers: [{ issue_id: "i1" }], total_count: 1 });
+    const parsed = IssueTriggerPreviewSchema.parse({
+      triggers: [{ issue_id: "i1" }],
+      total_count: 1,
+    });
     expect(parsed.triggers[0]).toEqual({
       issue_id: "i1",
       agent_id: "",
@@ -175,8 +199,22 @@ describe("IssueTriggerPreviewSchema", () => {
   });
 
   it("parseWithFallback returns the fallback for null / non-object bodies", () => {
-    expect(parseWithFallback(null, IssueTriggerPreviewSchema, PREVIEW_FALLBACK, PREVIEW_ENDPOINT)).toEqual(PREVIEW_FALLBACK);
-    expect(parseWithFallback("oops", IssueTriggerPreviewSchema, PREVIEW_FALLBACK, PREVIEW_ENDPOINT)).toEqual(PREVIEW_FALLBACK);
+    expect(
+      parseWithFallback(
+        null,
+        IssueTriggerPreviewSchema,
+        PREVIEW_FALLBACK,
+        PREVIEW_ENDPOINT,
+      ),
+    ).toEqual(PREVIEW_FALLBACK);
+    expect(
+      parseWithFallback(
+        "oops",
+        IssueTriggerPreviewSchema,
+        PREVIEW_FALLBACK,
+        PREVIEW_ENDPOINT,
+      ),
+    ).toEqual(PREVIEW_FALLBACK);
   });
 });
 
@@ -319,7 +357,11 @@ describe("CreateFeedbackResponseSchema", () => {
 
   it("parses a well-formed response and preserves extra fields", () => {
     const parsed = parseWithFallback(
-      { id: "feedback-1", created_at: "2026-06-26T00:00:00Z", future_field: true },
+      {
+        id: "feedback-1",
+        created_at: "2026-06-26T00:00:00Z",
+        future_field: true,
+      },
       CreateFeedbackResponseSchema,
       EMPTY_CREATE_FEEDBACK_RESPONSE,
       ENDPOINT,
@@ -341,7 +383,12 @@ describe("CreateFeedbackResponseSchema", () => {
       ),
     ).toBe(EMPTY_CREATE_FEEDBACK_RESPONSE);
     expect(
-      parseWithFallback(null, CreateFeedbackResponseSchema, EMPTY_CREATE_FEEDBACK_RESPONSE, ENDPOINT),
+      parseWithFallback(
+        null,
+        CreateFeedbackResponseSchema,
+        EMPTY_CREATE_FEEDBACK_RESPONSE,
+        ENDPOINT,
+      ),
     ).toBe(EMPTY_CREATE_FEEDBACK_RESPONSE);
   });
 });
@@ -453,6 +500,108 @@ describe("GitLab API schemas", () => {
 
     expect(parsed).toEqual(EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE);
   });
+
+  it("accepts merge request detail responses with future fields", () => {
+    const parsed = GitLabMergeRequestDetailsResponseSchema.parse({
+      merge_request: {
+        id: "mr-1",
+        workspace_id: "workspace-1",
+        project_path: "team/project",
+        gitlab_project_id: 42,
+        iid: 7,
+        title: "Add GitLab integration",
+        state: "open",
+        web_url: "https://gitlab.example.com/team/project/-/merge_requests/7",
+        source_branch: "feature",
+        target_branch: "main",
+        author_username: "ada",
+        author_avatar_url: null,
+        sha: "abc123",
+        detailed_merge_status: "checking",
+        has_conflicts: false,
+        pipeline_status: "skipped",
+        pipeline_url: null,
+        additions: 10,
+        deletions: 2,
+        changed_files: 3,
+        reviewers: [{ username: "reviewer" }],
+        assignees: [],
+        labels: ["backend"],
+        merged_at: null,
+        closed_at: null,
+        mr_created_at: "2026-07-01T00:00:00Z",
+        mr_updated_at: "2026-07-01T00:00:00Z",
+      },
+      approval: {
+        approved: false,
+        approvals_required: 2,
+        approvals_left: 1,
+        approved_by: [{ user: { username: "grace", name: "Grace Hopper" } }],
+        rules: [
+          {
+            name: "Maintainers",
+            approved: false,
+            approvals_required: 2,
+            approved_by: [{ username: "grace", name: "Grace Hopper" }],
+          },
+        ],
+        fetched_at: "2026-07-01T00:00:00Z",
+      },
+      jobs: [
+        {
+          id: "job-1",
+          pipeline_id: 77,
+          job_id: 9001,
+          name: "test",
+          status: "failed",
+          trace_summary: "assert failed",
+          trace_truncated: false,
+          artifacts_file_name: "artifacts.zip",
+          artifacts_file_size: 128,
+        },
+      ],
+      discussions: [
+        {
+          id: "discussion-1",
+          gitlab_discussion_id: "abc",
+          individual_note: false,
+          resolved: false,
+          notes: [
+            {
+              id: "note-1",
+              gitlab_note_id: 501,
+              body: "Please fix",
+              system: false,
+            },
+          ],
+        },
+      ],
+      future_field: true,
+    });
+
+    expect(parsed.merge_request.labels).toEqual(["backend"]);
+    expect(parsed.approval?.approved_by[0]?.username).toBe("grace");
+    expect(parsed.approval?.approved_by[0]?.name).toBe("Grace Hopper");
+    expect(parsed.approval?.rules[0]).toMatchObject({
+      name: "Maintainers",
+      approved: false,
+      approvals_required: 2,
+      approved_by: [{ username: "grace", name: "Grace Hopper" }],
+    });
+    expect(parsed.jobs[0]?.artifacts_file_name).toBe("artifacts.zip");
+    expect(parsed.discussions[0]?.notes[0]?.body).toBe("Please fix");
+  });
+
+  it("falls back for malformed merge request detail responses", () => {
+    const parsed = parseWithFallback(
+      { merge_request: { id: "mr-1", iid: "7" }, jobs: "nope" },
+      GitLabMergeRequestDetailsResponseSchema,
+      EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
+      { endpoint: "GET /api/issues/:id/gitlab/merge-requests/:mrId/details" },
+    );
+
+    expect(parsed).toEqual(EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE);
+  });
 });
 
 // The duplicate-issue branch in create-issue.tsx feeds ApiError.body
@@ -480,17 +629,23 @@ describe("DuplicateIssueErrorBodySchema", () => {
       hint: "Try a different title",
       issue: { ...valid.issue, workspace_id: "ws-1", status: "todo" },
     };
-    expect(DuplicateIssueErrorBodySchema.safeParse(forwardCompat).success).toBe(true);
+    expect(DuplicateIssueErrorBodySchema.safeParse(forwardCompat).success).toBe(
+      true,
+    );
   });
 
   it("rejects a renamed code (so renames degrade to the generic toast)", () => {
     const renamed = { ...valid, code: "duplicate_issue" };
-    expect(DuplicateIssueErrorBodySchema.safeParse(renamed).success).toBe(false);
+    expect(DuplicateIssueErrorBodySchema.safeParse(renamed).success).toBe(
+      false,
+    );
   });
 
   it("rejects a missing issue object", () => {
     const { issue: _omit, ...without } = valid;
-    expect(DuplicateIssueErrorBodySchema.safeParse(without).success).toBe(false);
+    expect(DuplicateIssueErrorBodySchema.safeParse(without).success).toBe(
+      false,
+    );
   });
 
   it("rejects a non-string issue.id", () => {
@@ -609,7 +764,7 @@ describe("dashboard + runtime usage schema drift", () => {
     expect(parsed[0]?.cache_write_tokens).toBe(0);
   });
 
-  it("coerces a missing date key to \"\" so the rest of the series survives", () => {
+  it('coerces a missing date key to "" so the rest of the series survives', () => {
     const parsed = DashboardUsageDailyListSchema.parse([
       { model: "claude-opus-4-7", input_tokens: 5 },
     ]);
@@ -617,7 +772,7 @@ describe("dashboard + runtime usage schema drift", () => {
     expect(parsed[0]?.date).toBe("");
   });
 
-  it("coerces a missing agent_id key to \"\" for the agent-runtime panel", () => {
+  it('coerces a missing agent_id key to "" for the agent-runtime panel', () => {
     const parsed = DashboardAgentRunTimeListSchema.parse([
       { total_seconds: 42, task_count: 3, failed_count: 0 },
     ]);
@@ -625,7 +780,7 @@ describe("dashboard + runtime usage schema drift", () => {
     expect(parsed[0]?.agent_id).toBe("");
   });
 
-  it("coerces a missing agent_id key to \"\" for the usage-by-agent panel", () => {
+  it('coerces a missing agent_id key to "" for the usage-by-agent panel', () => {
     const parsed = DashboardUsageByAgentListSchema.parse([
       { model: "claude-opus-4-7", input_tokens: 7 },
     ]);
@@ -633,24 +788,36 @@ describe("dashboard + runtime usage schema drift", () => {
   });
 
   it("coerces missing fields on every runtime usage schema", () => {
-    expect(RuntimeUsageListSchema.parse([{ date: "2026-05-19" }])[0]?.input_tokens).toBe(0);
-    expect(RuntimeHourlyActivityListSchema.parse([{ hour: 9 }])[0]?.count).toBe(0);
-    expect(RuntimeUsageByAgentListSchema.parse([{ model: "x" }])[0]?.agent_id).toBe("");
-    expect(RuntimeUsageByHourListSchema.parse([{ hour: 9 }])[0]?.model).toBe("");
+    expect(
+      RuntimeUsageListSchema.parse([{ date: "2026-05-19" }])[0]?.input_tokens,
+    ).toBe(0);
+    expect(RuntimeHourlyActivityListSchema.parse([{ hour: 9 }])[0]?.count).toBe(
+      0,
+    );
+    expect(
+      RuntimeUsageByAgentListSchema.parse([{ model: "x" }])[0]?.agent_id,
+    ).toBe("");
+    expect(RuntimeUsageByHourListSchema.parse([{ hour: 9 }])[0]?.model).toBe(
+      "",
+    );
   });
 
-  it("defaults a missing provider to \"\" so an older server's rows still price by bare model", () => {
+  it('defaults a missing provider to "" so an older server\'s rows still price by bare model', () => {
     // provider was added for cross-provider model disambiguation; a server
     // predating it omits the field. The schema must fill "" (→ bare-model
     // pricing lookup) rather than drop the row.
     expect(
-      DashboardUsageDailyListSchema.parse([{ date: "2026-05-19", model: "claude-opus-4-7" }])[0]
+      DashboardUsageDailyListSchema.parse([
+        { date: "2026-05-19", model: "claude-opus-4-7" },
+      ])[0]?.provider,
+    ).toBe("");
+    expect(
+      DashboardUsageByAgentListSchema.parse([{ model: "claude-opus-4-7" }])[0]
         ?.provider,
     ).toBe("");
     expect(
-      DashboardUsageByAgentListSchema.parse([{ model: "claude-opus-4-7" }])[0]?.provider,
+      RuntimeUsageByAgentListSchema.parse([{ model: "x" }])[0]?.provider,
     ).toBe("");
-    expect(RuntimeUsageByAgentListSchema.parse([{ model: "x" }])[0]?.provider).toBe("");
   });
 
   it("rejects a non-array body so parseWithFallback can return its fallback", () => {
@@ -700,7 +867,9 @@ describe("AppConfigSchema cdn_signed drift", () => {
   });
 
   it("defaults malformed feature_flags to an empty object", () => {
-    const parsed = AppConfigSchema.parse({ feature_flags: ["not", "an", "object"] });
+    const parsed = AppConfigSchema.parse({
+      feature_flags: ["not", "an", "object"],
+    });
     expect(parsed.feature_flags).toEqual({});
   });
 
@@ -731,10 +900,20 @@ describe("InboxUnreadSummarySchema", () => {
 
   it("returns the empty fallback (dot hidden) for a non-array body", () => {
     expect(
-      parseWithFallback({ rows: [] }, InboxUnreadSummarySchema, EMPTY_INBOX_UNREAD_SUMMARY, ENDPOINT),
+      parseWithFallback(
+        { rows: [] },
+        InboxUnreadSummarySchema,
+        EMPTY_INBOX_UNREAD_SUMMARY,
+        ENDPOINT,
+      ),
     ).toBe(EMPTY_INBOX_UNREAD_SUMMARY);
     expect(
-      parseWithFallback(null, InboxUnreadSummarySchema, EMPTY_INBOX_UNREAD_SUMMARY, ENDPOINT),
+      parseWithFallback(
+        null,
+        InboxUnreadSummarySchema,
+        EMPTY_INBOX_UNREAD_SUMMARY,
+        ENDPOINT,
+      ),
     ).toBe(EMPTY_INBOX_UNREAD_SUMMARY);
   });
 

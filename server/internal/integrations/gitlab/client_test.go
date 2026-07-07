@@ -133,3 +133,133 @@ func TestClientIgnoresProcessProxyEnvWithoutConfiguredProxy(t *testing.T) {
 		t.Fatalf("project = %+v", project)
 	}
 }
+
+func TestListPipelineJobsFollowsPagination(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.String())
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "", "1":
+			w.Header().Set("X-Next-Page", "2")
+			_, _ = w.Write([]byte(`[{"id":11,"name":"test","status":"failed","stage":"test","web_url":"https://gitlab/jobs/11"}]`))
+		case "2":
+			_, _ = w.Write([]byte(`[{"id":12,"name":"lint","status":"success","stage":"test","web_url":"https://gitlab/jobs/12"}]`))
+		default:
+			t.Fatalf("unexpected page %q", r.URL.Query().Get("page"))
+		}
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	jobs, err := c.ListPipelineJobs(context.Background(), 42, 77)
+	if err != nil {
+		t.Fatalf("ListPipelineJobs: %v", err)
+	}
+	if len(jobs) != 2 || jobs[0].ID != 11 || jobs[1].ID != 12 {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	if len(paths) != 2 || !strings.Contains(paths[1], "page=2") {
+		t.Fatalf("paths = %+v", paths)
+	}
+}
+
+func TestGetJobTraceTruncatesFromTail(t *testing.T) {
+	body := strings.Repeat("a", 20) + "FAILED\nsecret-token"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	trace, err := c.GetJobTrace(context.Background(), 42, 9, 12)
+	if err != nil {
+		t.Fatalf("GetJobTrace: %v", err)
+	}
+	if !trace.Truncated || !strings.Contains(trace.Text, "secret-token") || len(trace.Text) > 12 {
+		t.Fatalf("trace = %+v", trace)
+	}
+}
+
+func TestGetMergeRequestChangesParsesStats(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"changes_count":"2",
+			"changes":[
+				{"old_path":"a.go","new_path":"a.go","diff":"@@ -1 +1,2 @@\n-a\n+b\n+c\n"},
+				{"old_path":"b.go","new_path":"b.go","diff":"@@ -1 +0,0 @@\n-z\n"}
+			]
+		}`))
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	changes, err := c.GetMergeRequestChanges(context.Background(), 42, 7)
+	if err != nil {
+		t.Fatalf("GetMergeRequestChanges: %v", err)
+	}
+	if changes.ChangedFiles() != 2 || changes.Additions() != 2 || changes.Deletions() != 2 {
+		t.Fatalf("stats = files %d add %d del %d", changes.ChangedFiles(), changes.Additions(), changes.Deletions())
+	}
+}
+
+func TestGetMergeRequestApprovalStateCombinesApprovalsAndRules(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v4/projects/42/merge_requests/7/approvals":
+			_, _ = w.Write([]byte(`{
+				"approved": true,
+				"approvals_required": 2,
+				"approvals_left": 0,
+				"approved_by": [{"user":{"id":1,"username":"grace","name":"Grace"}}]
+			}`))
+		case "/api/v4/projects/42/merge_requests/7/approval_state":
+			_, _ = w.Write([]byte(`{
+				"rules": [{
+					"id": 10,
+					"name": "Maintainers",
+					"approved": true,
+					"approvals_required": 2,
+					"approved_by": [{"id":1,"username":"grace","name":"Grace"}]
+				}]
+			}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	approval, err := c.GetMergeRequestApprovalState(context.Background(), 42, 7)
+	if err != nil {
+		t.Fatalf("GetMergeRequestApprovalState: %v", err)
+	}
+	if len(paths) != 2 || paths[0] != "/api/v4/projects/42/merge_requests/7/approvals" || paths[1] != "/api/v4/projects/42/merge_requests/7/approval_state" {
+		t.Fatalf("paths = %+v", paths)
+	}
+	if !approval.Approved || approval.ApprovalsRequired == nil || *approval.ApprovalsRequired != 2 || approval.ApprovalsLeft == nil || *approval.ApprovalsLeft != 0 {
+		t.Fatalf("approval summary = %+v", approval)
+	}
+	if len(approval.ApprovedBy) != 1 || approval.ApprovedBy[0].User.Username != "grace" {
+		t.Fatalf("approved_by = %+v", approval.ApprovedBy)
+	}
+	if len(approval.Rules) != 1 || approval.Rules[0].Name != "Maintainers" || len(approval.Rules[0].ApprovedBy) != 1 {
+		t.Fatalf("rules = %+v", approval.Rules)
+	}
+}

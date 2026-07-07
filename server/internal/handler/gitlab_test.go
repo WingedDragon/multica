@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,7 +45,7 @@ func TestGitLabWebhookIgnoresUnsupportedEvent(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab", bytes.NewReader([]byte(`{}`)))
 	req.Header.Set("X-Gitlab-Token", "secret")
-	req.Header.Set("X-Gitlab-Event", "Job Hook")
+	req.Header.Set("X-Gitlab-Event", "Push Hook")
 
 	testHandler.HandleGitLabWebhook(rec, req)
 	if rec.Code != http.StatusNoContent {
@@ -110,13 +111,106 @@ func (f *fakeGitLabAPI) DeleteProjectHook(context.Context, int64, int64) error {
 	return f.deleteErr
 }
 
+var gitLabClientOverrideForTest bool
+
+type fakeGitLabDetailAPI struct {
+	fakeGitLabAPI
+	mr             gitlab.MergeRequest
+	mrErr          error
+	changes        gitlab.MergeRequestChanges
+	changesErr     error
+	approval       gitlab.ApprovalState
+	approvalErr    error
+	discussions    []gitlab.Discussion
+	discussionsErr error
+	pipelines      []gitlab.Pipeline
+	pipelinesErr   error
+	jobs           []gitlab.Job
+	jobsErr        error
+	trace          gitlab.JobTrace
+	traceErr       error
+	artifactsResp  *http.Response
+	artifactsErr   error
+}
+
+func (f *fakeGitLabDetailAPI) GetMergeRequest(context.Context, int64, int32) (gitlab.MergeRequest, error) {
+	if f.mrErr != nil {
+		return gitlab.MergeRequest{}, f.mrErr
+	}
+	return f.mr, nil
+}
+
+func (f *fakeGitLabDetailAPI) GetMergeRequestChanges(context.Context, int64, int32) (gitlab.MergeRequestChanges, error) {
+	if f.changesErr != nil {
+		return gitlab.MergeRequestChanges{}, f.changesErr
+	}
+	return f.changes, nil
+}
+
+func (f *fakeGitLabDetailAPI) GetMergeRequestApprovalState(context.Context, int64, int32) (gitlab.ApprovalState, error) {
+	if f.approvalErr != nil {
+		return gitlab.ApprovalState{}, f.approvalErr
+	}
+	return f.approval, nil
+}
+
+func (f *fakeGitLabDetailAPI) ListMergeRequestDiscussions(context.Context, int64, int32) ([]gitlab.Discussion, error) {
+	if f.discussionsErr != nil {
+		return nil, f.discussionsErr
+	}
+	return f.discussions, nil
+}
+
+func (f *fakeGitLabDetailAPI) ListProjectPipelines(context.Context, int64, gitlab.PipelineFilters) ([]gitlab.Pipeline, error) {
+	if f.pipelinesErr != nil {
+		return nil, f.pipelinesErr
+	}
+	return f.pipelines, nil
+}
+
+func (f *fakeGitLabDetailAPI) GetPipeline(context.Context, int64, int64) (gitlab.Pipeline, error) {
+	if len(f.pipelines) == 0 {
+		return gitlab.Pipeline{}, errors.New("not found")
+	}
+	return f.pipelines[0], nil
+}
+
+func (f *fakeGitLabDetailAPI) ListPipelineJobs(context.Context, int64, int64) ([]gitlab.Job, error) {
+	if f.jobsErr != nil {
+		return nil, f.jobsErr
+	}
+	return f.jobs, nil
+}
+
+func (f *fakeGitLabDetailAPI) GetJobTrace(context.Context, int64, int64, int) (gitlab.JobTrace, error) {
+	if f.traceErr != nil {
+		return gitlab.JobTrace{}, f.traceErr
+	}
+	return f.trace, nil
+}
+
+func (f *fakeGitLabDetailAPI) DownloadJobArtifacts(context.Context, int64, int64) (*http.Response, error) {
+	if f.artifactsErr != nil {
+		return nil, f.artifactsErr
+	}
+	if f.artifactsResp != nil {
+		return f.artifactsResp, nil
+	}
+	return nil, errors.New("not used")
+}
+
 func installFakeGitLabClient(t *testing.T, fake *fakeGitLabAPI) {
 	t.Helper()
 	prev := newGitLabClient
+	prevOverride := gitLabClientOverrideForTest
+	gitLabClientOverrideForTest = true
 	newGitLabClient = func(gitlab.Config) (gitLabAPI, error) {
 		return fake, nil
 	}
-	t.Cleanup(func() { newGitLabClient = prev })
+	t.Cleanup(func() {
+		newGitLabClient = prev
+		gitLabClientOverrideForTest = prevOverride
+	})
 }
 
 func withPublicURLForGitLabTest(t *testing.T, publicURL string) {
@@ -245,6 +339,18 @@ func fireGitLabMRWebhook(t *testing.T, projectID int64, iid int32, title, descri
 	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
 	t.Setenv("GITLAB_TOKEN", "token")
 	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	if !gitLabClientOverrideForTest {
+		prev := newGitLabClient
+		prevOverride := gitLabClientOverrideForTest
+		gitLabClientOverrideForTest = true
+		newGitLabClient = func(gitlab.Config) (gitLabAPI, error) {
+			return &fakeGitLabDetailAPI{mrErr: errors.New("test refresh disabled")}, nil
+		}
+		t.Cleanup(func() {
+			newGitLabClient = prev
+			gitLabClientOverrideForTest = prevOverride
+		})
+	}
 	attrs := map[string]any{
 		"iid":                   iid,
 		"title":                 title,
@@ -292,6 +398,20 @@ func fireGitLabMRWebhook(t *testing.T, projectID int64, iid int32, title, descri
 	}
 }
 
+func installFakeGitLabDetailClient(t *testing.T, fake *fakeGitLabDetailAPI) {
+	t.Helper()
+	prev := newGitLabClient
+	prevOverride := gitLabClientOverrideForTest
+	gitLabClientOverrideForTest = true
+	newGitLabClient = func(gitlab.Config) (gitLabAPI, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() {
+		newGitLabClient = prev
+		gitLabClientOverrideForTest = prevOverride
+	})
+}
+
 func fireGitLabPipelineWebhook(t *testing.T, projectID, pipelineID int64, sha, status string) {
 	t.Helper()
 	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
@@ -317,6 +437,662 @@ func fireGitLabPipelineWebhook(t *testing.T, projectID, pipelineID int64, sha, s
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("Pipeline webhook: expected 202, got %d (%s)", rec.Code, rec.Body.String())
 	}
+}
+
+func fireGitLabJobWebhook(t *testing.T, projectID, pipelineID, jobID int64, sha, status string) {
+	t.Helper()
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	raw, _ := json.Marshal(map[string]any{
+		"object_kind":           "build",
+		"project_id":            projectID,
+		"build_id":              jobID,
+		"build_name":            "test",
+		"build_stage":           "test",
+		"build_status":          status,
+		"build_ref":             "main",
+		"build_sha":             sha,
+		"build_web_url":         fmt.Sprintf("https://code.mlamp.cn/group/project-%d/-/jobs/%d", projectID, jobID),
+		"pipeline_id":           pipelineID,
+		"build_allow_failure":   false,
+		"build_failure_reason":  "script_failure",
+		"build_started_at":      "2026-04-29T00:00:00Z",
+		"build_finished_at":     "2026-04-29T00:01:00Z",
+		"build_duration":        60.5,
+		"build_queued_duration": 2.5,
+		"repository":            map[string]any{"homepage": fmt.Sprintf("https://code.mlamp.cn/group/project-%d", projectID)},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab", bytes.NewReader(raw))
+	req.Header.Set("X-Gitlab-Token", "secret")
+	req.Header.Set("X-Gitlab-Event", "Job Hook")
+	testHandler.HandleGitLabWebhook(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("Job webhook: expected 202, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func seedGitLabMRForIssue(t *testing.T, issue IssueResponse, projectID int64, iid int32, sha string) db.GitlabMergeRequest {
+	t.Helper()
+	binding := seedGitLabProjectBinding(t, issue.WorkspaceID, projectID)
+	mr, err := testHandler.Queries.UpsertGitLabMergeRequest(context.Background(), db.UpsertGitLabMergeRequestParams{
+		WorkspaceID:         parseUUID(issue.WorkspaceID),
+		ProjectBindingID:    binding.ID,
+		GitlabProjectID:     projectID,
+		MrIid:               iid,
+		Title:               fmt.Sprintf("GitLab MR !%d", iid),
+		State:               "open",
+		WebUrl:              fmt.Sprintf("https://code.mlamp.cn/%s/-/merge_requests/%d", binding.PathWithNamespace, iid),
+		Sha:                 sha,
+		Additions:           3,
+		Deletions:           1,
+		ChangedFiles:        2,
+		MrCreatedAt:         parseGitLabTimeRequired("2026-04-28T00:00:00Z"),
+		MrUpdatedAt:         parseGitLabTimeRequired("2026-04-29T00:00:00Z"),
+		Description:         strToText("MR details test"),
+		SourceBranch:        strToText("feature/gitlab-details"),
+		TargetBranch:        strToText("main"),
+		AuthorUsername:      strToText("ada"),
+		AuthorAvatarUrl:     strToText("https://code.mlamp.cn/avatar.png"),
+		DetailedMergeStatus: strToText("mergeable"),
+		HasConflicts:        pgtype.Bool{Bool: false, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGitLabMergeRequest: %v", err)
+	}
+	if err := testHandler.Queries.LinkIssueToGitLabMergeRequest(context.Background(), db.LinkIssueToGitLabMergeRequestParams{
+		WorkspaceID:         parseUUID(issue.WorkspaceID),
+		IssueID:             parseUUID(issue.ID),
+		MergeRequestID:      mr.ID,
+		CloseIntent:         false,
+		LinkedByType:        strToText("system"),
+		PreserveCloseIntent: false,
+	}); err != nil {
+		t.Fatalf("LinkIssueToGitLabMergeRequest: %v", err)
+	}
+	return mr
+}
+
+func TestGetGitLabMergeRequestDetailsReturnsCachedContext(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	const projectID int64 = 99101
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab details", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 7, "abc123")
+
+	if _, err := testHandler.Queries.UpsertGitLabMRApprovalState(context.Background(), db.UpsertGitLabMRApprovalStateParams{
+		MergeRequestID:    mr.ID,
+		WorkspaceID:       mr.WorkspaceID,
+		Approved:          false,
+		ApprovalsRequired: pgtype.Int4{Int32: 2, Valid: true},
+		ApprovalsLeft:     pgtype.Int4{Int32: 1, Valid: true},
+		ApprovedBy:        []byte(`[{"username":"grace"}]`),
+		Rules:             []byte(`[{"name":"Maintainers","approvals_required":2}]`),
+	}); err != nil {
+		t.Fatalf("UpsertGitLabMRApprovalState: %v", err)
+	}
+	discussion, err := testHandler.Queries.UpsertGitLabMRDiscussion(context.Background(), db.UpsertGitLabMRDiscussionParams{
+		WorkspaceID:        mr.WorkspaceID,
+		MergeRequestID:     mr.ID,
+		GitlabDiscussionID: "discussion-1",
+		IndividualNote:     false,
+		Resolved:           pgtype.Bool{Bool: false, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGitLabMRDiscussion: %v", err)
+	}
+	if _, err := testHandler.Queries.UpsertGitLabMRNote(context.Background(), db.UpsertGitLabMRNoteParams{
+		WorkspaceID:     mr.WorkspaceID,
+		DiscussionID:    discussion.ID,
+		MergeRequestID:  mr.ID,
+		GitlabNoteID:    501,
+		Body:            "Please fix this",
+		System:          false,
+		AuthorUsername:  strToText("grace"),
+		AuthorAvatarUrl: strToText("https://code.mlamp.cn/grace.png"),
+	}); err != nil {
+		t.Fatalf("UpsertGitLabMRNote: %v", err)
+	}
+	if _, err := testHandler.Queries.UpsertGitLabPipelineJob(context.Background(), db.UpsertGitLabPipelineJobParams{
+		WorkspaceID:       mr.WorkspaceID,
+		MergeRequestID:    mr.ID,
+		PipelineID:        77,
+		JobID:             9001,
+		Name:              "test",
+		Status:            "failed",
+		AllowFailure:      false,
+		Stage:             strToText("test"),
+		WebUrl:            strToText("https://code.mlamp.cn/jobs/9001"),
+		ArtifactsFileName: strToText("artifacts.zip"),
+		ArtifactsFileSize: pgtype.Int8{Int64: 128, Valid: true},
+	}); err != nil {
+		t.Fatalf("UpsertGitLabPipelineJob: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := newRequest(http.MethodGet, "/api/issues/"+issue.ID+"/gitlab/merge-requests/"+uuidToString(mr.ID)+"/details", nil)
+	req = withURLParams(req, "id", issue.ID, "mrId", uuidToString(mr.ID))
+	testHandler.GetGitLabMergeRequestDetails(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out["merge_request"].(map[string]any)["title"] != "GitLab MR !7" {
+		t.Fatalf("merge_request = %+v", out["merge_request"])
+	}
+	if len(out["jobs"].([]any)) != 1 || out["jobs"].([]any)[0].(map[string]any)["artifacts_file_name"] != "artifacts.zip" {
+		t.Fatalf("jobs = %+v", out["jobs"])
+	}
+	if len(out["discussions"].([]any)) != 1 {
+		t.Fatalf("discussions = %+v", out["discussions"])
+	}
+}
+
+func TestGetGitLabMergeRequestDetailsRequiresIssueLink(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	const projectID int64 = 99102
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab details allowed", "in_progress")
+	other := createGitLabTestIssue(t, "gitlab details denied", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 8, "def456")
+
+	rec := httptest.NewRecorder()
+	req := newRequest(http.MethodGet, "/api/issues/"+other.ID+"/gitlab/merge-requests/"+uuidToString(mr.ID)+"/details", nil)
+	req = withURLParams(req, "id", other.ID, "mrId", uuidToString(mr.ID))
+	testHandler.GetGitLabMergeRequestDetails(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRefreshGitLabMergeRequestForIssueUpdatesCachedContext(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	const projectID int64 = 99103
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab refresh", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 9, "oldsha")
+
+	fake := &fakeGitLabDetailAPI{
+		mr: gitlab.MergeRequest{
+			IID:                 9,
+			Title:               "Fresh GitLab title",
+			Description:         "fresh description",
+			State:               "opened",
+			WebURL:              "https://code.mlamp.cn/group/project-99103/-/merge_requests/9",
+			SourceBranch:        "feature/fresh",
+			TargetBranch:        "main",
+			SHA:                 "newsha",
+			DetailedMergeStatus: "not_approved",
+			CreatedAt:           "2026-04-28T00:00:00Z",
+			UpdatedAt:           "2026-04-30T00:00:00Z",
+			Reviewers:           []gitlab.UserRef{{Username: "reviewer"}},
+			Assignees:           []gitlab.UserRef{{Username: "assignee"}},
+			Labels:              []string{"backend"},
+		},
+		changes: gitlab.MergeRequestChanges{
+			Changes: []gitlab.MergeRequestChange{{
+				OldPath: "a.go",
+				NewPath: "a.go",
+				Diff:    "@@ -1 +1,2 @@\n-a\n+b\n+c\n",
+			}},
+		},
+		approval: gitlab.ApprovalState{
+			Approved:      false,
+			ApprovalsLeft: int32Ptr(1),
+			ApprovedBy:    []gitlab.ApprovalEntry{{User: gitlab.UserRef{Username: "grace"}}},
+			Rules:         []gitlab.ApprovalRule{{Name: "Maintainers", ApprovalsRequired: 2}},
+		},
+		discussions: []gitlab.Discussion{{
+			ID: "discussion-refresh",
+			Notes: []gitlab.Note{{
+				ID:     601,
+				Body:   "Needs approval",
+				Author: gitlab.UserRef{Username: "grace"},
+			}},
+		}},
+		pipelines: []gitlab.Pipeline{{
+			ID:        88,
+			SHA:       "newsha",
+			Ref:       "feature/fresh",
+			Status:    "failed",
+			WebURL:    "https://code.mlamp.cn/pipelines/88",
+			UpdatedAt: "2026-04-30T00:01:00Z",
+		}},
+		jobs: []gitlab.Job{{
+			ID:     9002,
+			Name:   "test",
+			Stage:  "test",
+			Status: "failed",
+			WebURL: "https://code.mlamp.cn/jobs/9002",
+			ArtifactsFile: &gitlab.JobArtifactFile{
+				Filename: "artifacts.zip",
+				Size:     256,
+			},
+		}},
+		trace: gitlab.JobTrace{Text: "assert failed", Truncated: false},
+	}
+	installFakeGitLabDetailClient(t, fake)
+
+	rec := httptest.NewRecorder()
+	req := newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/gitlab/merge-requests/"+uuidToString(mr.ID)+"/refresh", nil)
+	req = withURLParams(req, "id", issue.ID, "mrId", uuidToString(mr.ID))
+	testHandler.RefreshGitLabMergeRequestForIssue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var out GitLabMergeRequestDetailsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.MergeRequest.Title != "Fresh GitLab title" || out.MergeRequest.Additions != 2 || out.MergeRequest.Deletions != 1 {
+		t.Fatalf("merge request = %+v", out.MergeRequest)
+	}
+	if out.Approval == nil || out.Approval.ApprovalsLeft == nil || *out.Approval.ApprovalsLeft != 1 {
+		t.Fatalf("approval = %+v", out.Approval)
+	}
+	if len(out.Jobs) != 1 || out.Jobs[0].TraceSummary == nil || *out.Jobs[0].TraceSummary != "assert failed" {
+		t.Fatalf("jobs = %+v", out.Jobs)
+	}
+	if len(out.Discussions) != 1 || len(out.Discussions[0].Notes) != 1 {
+		t.Fatalf("discussions = %+v", out.Discussions)
+	}
+}
+
+func TestRefreshGitLabMergeRequestForIssueRecordsPartialErrors(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	const projectID int64 = 99113
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab partial refresh", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 19, "oldsha")
+
+	installFakeGitLabDetailClient(t, &fakeGitLabDetailAPI{
+		mr: gitlab.MergeRequest{
+			IID:       19,
+			Title:     "Partial refresh title",
+			State:     "opened",
+			WebURL:    "https://code.mlamp.cn/group/project-99113/-/merge_requests/19",
+			SHA:       "newsha",
+			CreatedAt: "2026-04-28T00:00:00Z",
+			UpdatedAt: "2026-04-30T00:00:00Z",
+		},
+		approvalErr: errors.New("approval refresh failed with token: secret-token"),
+	})
+
+	rec := httptest.NewRecorder()
+	req := newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/gitlab/merge-requests/"+uuidToString(mr.ID)+"/refresh", nil)
+	req = withURLParams(req, "id", issue.ID, "mrId", uuidToString(mr.ID))
+	testHandler.RefreshGitLabMergeRequestForIssue(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var out GitLabMergeRequestDetailsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.MergeRequest.LastRefreshError == nil || !strings.Contains(*out.MergeRequest.LastRefreshError, "approval refresh failed") {
+		t.Fatalf("last_refresh_error = %+v", out.MergeRequest.LastRefreshError)
+	}
+	if strings.Contains(*out.MergeRequest.LastRefreshError, "secret-token") {
+		t.Fatalf("last_refresh_error leaked secret: %s", *out.MergeRequest.LastRefreshError)
+	}
+}
+
+func TestRefreshGitLabProjectBindingRefreshesKnownMergeRequests(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	const projectID int64 = 99114
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab project refresh", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 20, "oldsha")
+
+	installFakeGitLabDetailClient(t, &fakeGitLabDetailAPI{
+		mr: gitlab.MergeRequest{
+			IID:       20,
+			Title:     "Project refresh title",
+			State:     "opened",
+			WebURL:    "https://code.mlamp.cn/group/project-99114/-/merge_requests/20",
+			SHA:       "newsha",
+			CreatedAt: "2026-04-28T00:00:00Z",
+			UpdatedAt: "2026-04-30T00:00:00Z",
+		},
+		changes: gitlab.MergeRequestChanges{Changes: []gitlab.MergeRequestChange{{
+			OldPath: "a.go",
+			NewPath: "a.go",
+			Diff:    "@@ -1 +1,2 @@\n-a\n+b\n+c\n",
+		}}},
+		discussions: []gitlab.Discussion{{ID: "project-refresh-discussion"}},
+		pipelines: []gitlab.Pipeline{{
+			ID:        99,
+			SHA:       "newsha",
+			Status:    "failed",
+			UpdatedAt: "2026-04-30T00:01:00Z",
+		}},
+		jobs:  []gitlab.Job{{ID: 9901, Name: "test", Status: "failed"}},
+		trace: gitlab.JobTrace{Text: "assert failed", Truncated: false},
+	})
+
+	rec := httptest.NewRecorder()
+	req := newRequest(http.MethodPost, "/api/workspaces/"+testWorkspaceID+"/gitlab/projects/"+uuidToString(mr.ProjectBindingID)+"/refresh", nil)
+	req = withURLParams(req, "id", testWorkspaceID, "bindingId", uuidToString(mr.ProjectBindingID))
+	testHandler.RefreshGitLabProjectBinding(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var summary gitLabRefreshSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.UpdatedMRs != 1 || summary.UpdatedJobs != 1 || summary.UpdatedDiscussions != 1 || len(summary.Errors) != 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	refreshed, err := testHandler.Queries.GetGitLabMergeRequestByBinding(context.Background(), db.GetGitLabMergeRequestByBindingParams{
+		WorkspaceID:      parseUUID(testWorkspaceID),
+		ProjectBindingID: mr.ProjectBindingID,
+		MrIid:            20,
+	})
+	if err != nil {
+		t.Fatalf("GetGitLabMergeRequestByBinding: %v", err)
+	}
+	if refreshed.Title != "Project refresh title" || !refreshed.LastRefreshedAt.Valid {
+		t.Fatalf("refreshed mr = %+v", refreshed)
+	}
+	binding, err := testHandler.Queries.GetGitLabProjectBinding(context.Background(), db.GetGitLabProjectBindingParams{
+		ID:          mr.ProjectBindingID,
+		WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("GetGitLabProjectBinding: %v", err)
+	}
+	if !binding.LastRefreshAt.Valid || binding.LastRefreshError.Valid || binding.RefreshInProgressAt.Valid {
+		t.Fatalf("binding diagnostics = last_refresh_at %+v error %+v in_progress %+v", binding.LastRefreshAt, binding.LastRefreshError, binding.RefreshInProgressAt)
+	}
+}
+
+func TestGitLabJobWebhookUpsertsPipelineJob(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	const projectID int64 = 99104
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab job hook", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 10, "jobsha")
+
+	fireGitLabJobWebhook(t, projectID, 101, 9003, "jobsha", "failed")
+
+	jobs, err := testHandler.Queries.ListGitLabPipelineJobsByMR(context.Background(), db.ListGitLabPipelineJobsByMRParams{
+		WorkspaceID:    parseUUID(testWorkspaceID),
+		MergeRequestID: mr.ID,
+	})
+	if err != nil {
+		t.Fatalf("ListGitLabPipelineJobsByMR: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].JobID != 9003 || jobs[0].Status != "failed" {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+}
+
+func TestGitLabNoteWebhookRecordsRefreshError(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	const projectID int64 = 99115
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab note hook diagnostics", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 21, "notesha")
+	installFakeGitLabDetailClient(t, &fakeGitLabDetailAPI{
+		discussionsErr: errors.New("discussion refresh failed with token: secret-token"),
+	})
+
+	raw, _ := json.Marshal(map[string]any{
+		"object_kind": "note",
+		"project": map[string]any{
+			"id": projectID,
+		},
+		"merge_request": map[string]any{
+			"iid": 21,
+		},
+		"object_attributes": map[string]any{
+			"noteable_type": "MergeRequest",
+			"noteable_iid":  21,
+		},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab", bytes.NewReader(raw))
+	req.Header.Set("X-Gitlab-Token", "secret")
+	req.Header.Set("X-Gitlab-Event", "Note Hook")
+	testHandler.HandleGitLabWebhook(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("Note webhook: expected 202, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	row, err := testHandler.Queries.GetGitLabMergeRequestByID(context.Background(), db.GetGitLabMergeRequestByIDParams{
+		ID:          mr.ID,
+		WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("GetGitLabMergeRequestByID: %v", err)
+	}
+	if !row.LastRefreshError.Valid || !strings.Contains(row.LastRefreshError.String, "discussion refresh failed") {
+		t.Fatalf("last_refresh_error = %+v", row.LastRefreshError)
+	}
+	if strings.Contains(row.LastRefreshError.String, "secret-token") {
+		t.Fatalf("last_refresh_error leaked secret: %s", row.LastRefreshError.String)
+	}
+}
+
+func TestGetGitLabJobTraceRequiresIssueLinkAndRedactsTrace(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	const projectID int64 = 99116
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab trace allowed", "in_progress")
+	other := createGitLabTestIssue(t, "gitlab trace denied", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 22, "tracesha")
+	job, err := testHandler.Queries.UpsertGitLabPipelineJob(context.Background(), db.UpsertGitLabPipelineJobParams{
+		WorkspaceID:    mr.WorkspaceID,
+		MergeRequestID: mr.ID,
+		PipelineID:     221,
+		JobID:          2201,
+		Name:           "test",
+		Status:         "failed",
+		AllowFailure:   false,
+	})
+	if err != nil {
+		t.Fatalf("UpsertGitLabPipelineJob: %v", err)
+	}
+	installFakeGitLabDetailClient(t, &fakeGitLabDetailAPI{
+		trace: gitlab.JobTrace{Text: "assert failed\ntoken: secret-token", Truncated: false},
+	})
+
+	denied := httptest.NewRecorder()
+	deniedReq := newRequest(http.MethodGet, "/api/issues/"+other.ID+"/gitlab/jobs/"+uuidToString(job.ID)+"/trace", nil)
+	deniedReq = withURLParams(deniedReq, "id", other.ID, "jobId", uuidToString(job.ID))
+	testHandler.GetGitLabJobTrace(denied, deniedReq)
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unlinked issue, got %d (%s)", denied.Code, denied.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	req := newRequest(http.MethodGet, "/api/issues/"+issue.ID+"/gitlab/jobs/"+uuidToString(job.ID)+"/trace", nil)
+	req = withURLParams(req, "id", issue.ID, "jobId", uuidToString(job.ID))
+	testHandler.GetGitLabJobTrace(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "secret-token") || !strings.Contains(rec.Body.String(), "assert failed") {
+		t.Fatalf("trace response was not redacted as expected: %s", rec.Body.String())
+	}
+}
+
+func TestOpenGitLabJobArtifactsStreamsArtifactWithoutToken(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://code.mlamp.cn")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "secret")
+	const projectID int64 = 99117
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	issue := createGitLabTestIssue(t, "gitlab artifact", "in_progress")
+	mr := seedGitLabMRForIssue(t, issue, projectID, 23, "artifactsha")
+	job, err := testHandler.Queries.UpsertGitLabPipelineJob(context.Background(), db.UpsertGitLabPipelineJobParams{
+		WorkspaceID:       mr.WorkspaceID,
+		MergeRequestID:    mr.ID,
+		PipelineID:        231,
+		JobID:             2301,
+		Name:              "test",
+		Status:            "success",
+		AllowFailure:      false,
+		ArtifactsFileName: strToText("artifacts.zip"),
+		ArtifactsFileSize: pgtype.Int8{Int64: 11, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("UpsertGitLabPipelineJob: %v", err)
+	}
+	installFakeGitLabDetailClient(t, &fakeGitLabDetailAPI{
+		artifactsResp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"application/zip"},
+			},
+			Body: io.NopCloser(strings.NewReader("artifact-bytes")),
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	req := newRequest(http.MethodGet, "/api/issues/"+issue.ID+"/gitlab/jobs/"+uuidToString(job.ID)+"/artifacts", nil)
+	req = withURLParams(req, "id", issue.ID, "jobId", uuidToString(job.ID))
+	testHandler.OpenGitLabJobArtifacts(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "artifact-bytes" {
+		t.Fatalf("artifact body = %q", rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, "artifacts.zip") {
+		t.Fatalf("Content-Disposition = %q", got)
+	}
+	for key, values := range rec.Header() {
+		if strings.Contains(strings.ToLower(key), "token") || strings.Contains(strings.Join(values, ","), "PRIVATE-TOKEN") {
+			t.Fatalf("artifact response leaked token header %s=%v", key, values)
+		}
+	}
+}
+
+func TestGitLabMRWebhookRefreshesCachedDetails(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	const projectID int64 = 99105
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	binding := seedGitLabProjectBinding(t, testWorkspaceID, projectID)
+	issue := createGitLabTestIssue(t, "gitlab webhook refresh", "in_progress")
+	fake := &fakeGitLabDetailAPI{
+		mr: gitlab.MergeRequest{
+			IID:                 11,
+			Title:               "Fresh webhook title",
+			State:               "opened",
+			WebURL:              "https://code.mlamp.cn/group/project-99105/-/merge_requests/11",
+			SourceBranch:        "feature/webhook-refresh",
+			TargetBranch:        "main",
+			SHA:                 "webhooksha",
+			DetailedMergeStatus: "mergeable",
+			CreatedAt:           "2026-04-28T00:00:00Z",
+			UpdatedAt:           "2026-04-30T00:00:00Z",
+		},
+		changes: gitlab.MergeRequestChanges{Changes: []gitlab.MergeRequestChange{{
+			OldPath: "a.go",
+			NewPath: "a.go",
+			Diff:    "@@ -1 +1,2 @@\n-a\n+b\n+c\n",
+		}}},
+	}
+	installFakeGitLabDetailClient(t, fake)
+
+	fireGitLabMRWebhook(t, projectID, 11, "Refs "+issue.Identifier, "", "feature/webhook-refresh", "opened", "open", "webhooksha")
+
+	row, err := testHandler.Queries.GetGitLabMergeRequestByBinding(context.Background(), db.GetGitLabMergeRequestByBindingParams{
+		WorkspaceID:      parseUUID(testWorkspaceID),
+		ProjectBindingID: binding.ID,
+		MrIid:            11,
+	})
+	if err != nil {
+		t.Fatalf("GetGitLabMergeRequestByBinding: %v", err)
+	}
+	if row.Title != "Fresh webhook title" || row.Additions != 2 || row.Deletions != 1 || row.ChangedFiles != 1 || !row.LastRefreshedAt.Valid {
+		t.Fatalf("refreshed row = %+v", row)
+	}
+}
+
+func TestGitLabMRWebhookRecordsRefreshErrorWithoutDroppingRow(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	const projectID int64 = 99106
+	cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID)
+	t.Cleanup(func() { cleanupGitLabProjectRows(context.Background(), testWorkspaceID, projectID) })
+	binding := seedGitLabProjectBinding(t, testWorkspaceID, projectID)
+	issue := createGitLabTestIssue(t, "gitlab webhook refresh error", "in_progress")
+	installFakeGitLabDetailClient(t, &fakeGitLabDetailAPI{mrErr: errors.New("gitlab unavailable")})
+
+	fireGitLabMRWebhook(t, projectID, 12, "Refs "+issue.Identifier, "", "feature/webhook-refresh-error", "opened", "open", "errorsha")
+
+	row, err := testHandler.Queries.GetGitLabMergeRequestByBinding(context.Background(), db.GetGitLabMergeRequestByBindingParams{
+		WorkspaceID:      parseUUID(testWorkspaceID),
+		ProjectBindingID: binding.ID,
+		MrIid:            12,
+	})
+	if err != nil {
+		t.Fatalf("GetGitLabMergeRequestByBinding: %v", err)
+	}
+	if row.Title != "Refs "+issue.Identifier {
+		t.Fatalf("webhook-derived row was not preserved: %+v", row)
+	}
+	if !row.LastRefreshError.Valid || !strings.Contains(row.LastRefreshError.String, "gitlab unavailable") {
+		t.Fatalf("last_refresh_error = %+v", row.LastRefreshError)
+	}
+}
+
+func int32Ptr(v int32) *int32 {
+	return &v
 }
 
 func createGitLabProjectBindingRequest(t *testing.T, workspaceID, project string) *http.Request {

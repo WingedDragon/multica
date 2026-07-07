@@ -10,6 +10,8 @@ import type {
   GitLabApprovalRule,
   GitLabJobTraceResponse,
   GitLabMergeRequestDetailsResponse,
+  GitLabMRDiscussion,
+  GitLabMRNote,
   GitLabUserRef,
 } from "@multica/core/types";
 import { useT } from "../../i18n";
@@ -56,9 +58,15 @@ export function GitLabMergeRequestDetails({
   const canMerge = details.merge_request.state === "open";
   const failedJobs = details.jobs.filter((job) => job.status === "failed");
   const jobs = failedJobs.length > 0 ? failedJobs : details.jobs;
-  const unresolved = details.discussions.filter(
-    (discussion) => discussion.resolved !== true,
-  );
+  const unresolved = details.discussions
+    .map((discussion) => ({
+      ...discussion,
+      notes: unresolvedNotesForDiscussion(discussion),
+    }))
+    .filter(
+      (discussion) =>
+        discussion.resolved !== true && discussion.notes.length > 0,
+    );
   const approval = details.approval;
   const approvedBy =
     approval?.approved_by
@@ -250,4 +258,15 @@ function hasVisibleApprovalRule(rule: GitLabApprovalRule): boolean {
       typeof rule.approvals_required === "number" ||
       (rule.approved_by && rule.approved_by.length > 0),
   );
+}
+
+function unresolvedNotesForDiscussion(
+  discussion: GitLabMRDiscussion,
+): GitLabMRNote[] {
+  return discussion.notes.filter((note) => {
+    if (note.system || note.resolved === true) {
+      return false;
+    }
+    return discussion.resolved === false || note.resolvable === true;
+  });
 }

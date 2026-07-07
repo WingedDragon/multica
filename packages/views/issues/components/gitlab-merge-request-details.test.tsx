@@ -178,6 +178,64 @@ describe("GitLabMergeRequestDetails", () => {
     expect(await screen.findByText("fresh trace failure")).toBeInTheDocument();
   });
 
+  it("hides GitLab system notes from unresolved discussions", () => {
+    setApiInstance(new ApiClient("https://api.example.test"));
+    const details = makeDetails();
+    details.discussions = [
+      {
+        id: "system-1",
+        gitlab_discussion_id: "system-1",
+        resolved: null,
+        individual_note: true,
+        notes: [
+          {
+            id: "system-note-1",
+            gitlab_note_id: 10,
+            body: "mentioned in commit abc123",
+            system: true,
+          },
+          {
+            id: "system-note-2",
+            gitlab_note_id: 11,
+            body: "approved this merge request",
+            system: true,
+          },
+        ],
+      },
+      {
+        id: "review-1",
+        gitlab_discussion_id: "review-1",
+        resolved: false,
+        individual_note: false,
+        notes: [
+          {
+            id: "review-note-1",
+            gitlab_note_id: 12,
+            body: "Please fix the failing assertion",
+            system: false,
+            resolvable: true,
+            resolved: false,
+          },
+        ],
+      },
+    ];
+
+    render(<GitLabMergeRequestDetails issueId="issue-1" details={details} />, {
+      wrapper: TestWrapper,
+    });
+
+    expect(screen.getByText("Unresolved discussions")).toBeInTheDocument();
+    expect(
+      screen.getByText("Please fix the failing assertion"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("mentioned in commit abc123"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("approved this merge request"),
+    ).not.toBeInTheDocument();
+  });
+
   it("merges an open merge request from the details panel", async () => {
     const user = userEvent.setup();
     setApiInstance(new ApiClient("https://api.example.test"));

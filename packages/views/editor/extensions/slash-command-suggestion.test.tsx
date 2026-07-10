@@ -88,11 +88,10 @@ function fakeQc(data: {
 
 function items(qc: QueryClient, query = ""): SlashCommandItem[] {
   const config = createSlashCommandSuggestion(qc);
-  // Rebase note: keep this helper aligned with Tiptap's typed items args;
-  // async cancellation is tested by mention-suggestion, not slash commands.
   return config.items!({
     query,
     editor: {} as never,
+    signal: new AbortController().signal,
   }) as SlashCommandItem[];
 }
 

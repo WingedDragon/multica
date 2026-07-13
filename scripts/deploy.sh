@@ -103,9 +103,9 @@ EOF
 
 echo ""
 echo "==> [4/6] Build frontend..."
-WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-3072}"
-WEB_BUILD_MEMORY_MAX="${MULTICA_WEB_BUILD_MEMORY_MAX:-5G}"
-WEB_BUILD_SWAP_MAX="${MULTICA_WEB_BUILD_SWAP_MAX:-512M}"
+WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-2560}"
+WEB_BUILD_MEMORY_MAX="${MULTICA_WEB_BUILD_MEMORY_MAX:-4G}"
+WEB_BUILD_SWAP_MAX="${MULTICA_WEB_BUILD_SWAP_MAX:-256M}"
 build_node_options="${NODE_OPTIONS:-}"
 build_node_options="${build_node_options:+$build_node_options }--max-old-space-size=${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB}"
 echo "    Node heap limit: ${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB} MB"
@@ -113,6 +113,9 @@ echo "    cgroup MemoryMax: ${WEB_BUILD_MEMORY_MAX}, MemorySwapMax: ${WEB_BUILD_
 sudo systemd-run --wait --pipe --collect \
   -p "MemoryMax=${WEB_BUILD_MEMORY_MAX}" \
   -p "MemorySwapMax=${WEB_BUILD_SWAP_MAX}" \
+  -p "CPUQuota=100%" \
+  -p "Nice=10" \
+  -p "IOWeight=50" \
   --uid="$(id -u)" \
   --gid="$(id -g)" \
   --working-directory="$REPO_ROOT" \

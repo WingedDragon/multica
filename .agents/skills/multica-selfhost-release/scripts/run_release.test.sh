@@ -96,10 +96,11 @@ MULTICA_SKIP_INSTALL=1 \
 "$SCRIPT_DIR/run_release.sh" >/dev/null
 
 grep -q 'go build .* ./cmd/multica' "$LOG"
-grep -q 'brew list --formula multica' "$LOG"
-grep -q 'brew uninstall multica' "$LOG"
+test "$(grep -Fc 'brew list --formula multica' "$LOG")" -eq 2
+test "$(grep -Fc 'brew uninstall multica' "$LOG")" -eq 2
 grep -q "install -m 0755 $REPO/server/bin/multica $HOME_DIR/.local/bin/multica" "$LOG"
-grep -q 'ssh my-mini .*brew uninstall multica' "$LOG"
-grep -q "scp $REPO/server/bin/multica my-mini:~/.local/bin/multica" "$LOG"
+grep -Fq 'ssh -o RequestTTY=no my-mini zsh -lc' "$LOG"
+grep -Fq "scp -o RequestTTY=no $REPO/server/bin/multica my-mini:~/.local/bin/multica.upload." "$LOG"
+grep -q 'mv.*multica.upload.*multica.*version' "$LOG"
 
 test -x "$HOME_DIR/.local/bin/multica"

@@ -1,7 +1,7 @@
 -- name: ListWorkspaces :many
 SELECT w.id, w.name, w.slug, w.description, w.settings,
        w.created_at, w.updated_at, w.context, w.repos,
-       w.issue_prefix, w.issue_counter, w.avatar_url
+       w.issue_prefix, w.issue_counter, w.avatar_url, w.attribution_fail_closed
 FROM member m
 JOIN workspace w ON w.id = m.workspace_id
 WHERE m.user_id = $1
@@ -32,6 +32,12 @@ WHERE id = $1;
 -- name: GetWorkspaceBySlug :one
 SELECT * FROM workspace
 WHERE slug = $1;
+
+-- name: GetWorkspaceAttributionFailClosed :one
+-- Lean read of the fail-closed attribution policy for the enqueue hot path
+-- (MUL-4302 §3.5), avoiding a full workspace-row fetch.
+SELECT attribution_fail_closed FROM workspace
+WHERE id = $1;
 
 -- name: CreateWorkspace :one
 INSERT INTO workspace (name, slug, description, context, issue_prefix)
@@ -85,10 +91,11 @@ SELECT id FROM workspace WHERE id = $1 FOR UPDATE;
 SELECT id FROM workspace WHERE id = $1 FOR KEY SHARE;
 
 -- name: DeleteWorkspace :exec
--- The channel_* tables (MUL-3515 §4) and resource-label junctions carry NO FK to
--- workspace, so — unlike the CASCADE-backed tables the DELETE below sweeps —
--- they are not cleaned up implicitly. Remove their workspace-owned rows here so
--- they commit or roll back atomically with the workspace row.
+-- The channel_* tables (MUL-3515 §4), resource-label junctions, and custom issue
+-- property definitions carry NO FK to workspace, so — unlike the CASCADE-backed
+-- tables the DELETE below sweeps — they are not cleaned up implicitly. Remove
+-- their workspace-owned rows here so they commit or roll back atomically with
+-- the workspace row.
 WITH ws_installations AS (
     SELECT id FROM channel_installation WHERE workspace_id = $1
 ),
@@ -145,6 +152,9 @@ cleared_binding_tokens AS (
 ),
 cleared_installations AS (
     DELETE FROM channel_installation WHERE workspace_id = $1
+),
+cleared_issue_properties AS (
+    DELETE FROM issue_property WHERE workspace_id = $1
 ),
 deleted_pending_check_suites AS (
     DELETE FROM github_pending_check_suite WHERE workspace_id = $1

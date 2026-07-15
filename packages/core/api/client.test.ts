@@ -44,6 +44,70 @@ describe("ApiClient label response schemas", () => {
   });
 });
 
+describe("ApiClient notification preferences", () => {
+  it("sends atomic preference updates with PATCH", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          workspace_id: "workspace-1",
+          preferences: {
+            status_changes: "muted",
+            comments: "muted",
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await expect(
+      client.updateNotificationPreferences(
+        { comments: "muted" },
+        "workspace-one",
+      ),
+    ).resolves.toEqual({
+      workspace_id: "workspace-1",
+      preferences: {
+        status_changes: "muted",
+        comments: "muted",
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://api.example.test/api/notification-preferences",
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        method: "PATCH",
+        headers: expect.objectContaining({
+          "X-Workspace-Slug": "workspace-one",
+        }),
+        body: JSON.stringify({ preferences: { comments: "muted" } }),
+      }),
+    );
+  });
+
+  it("falls back safely when a preference response is malformed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ workspace_id: "workspace-1", preferences: [] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    const client = new ApiClient("https://api.example.test");
+    await expect(client.getNotificationPreferences()).resolves.toEqual({
+      workspace_id: "",
+      preferences: {},
+    });
+  });
+});
+
 describe("ApiClient", () => {
   it("preserves HTTP status on failed requests", async () => {
     vi.stubGlobal(
@@ -722,6 +786,55 @@ describe("ApiClient", () => {
         content: "restore me",
         restore_to_input: true,
       });
+    });
+
+    it("parses task attribution when the backend enriches it", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({
+            ...taskResponse,
+            attribution: {
+              source: "direct_human",
+              precise: true,
+              initiator: { id: "user-1", name: "Ada", avatar_url: "https://x/a.png" },
+              originator: { id: "user-1", name: "Ada" },
+              evidence: { kind: "comment", ref_id: "comment-1" },
+            },
+          }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      const client = new ApiClient("https://api.example.test");
+      const result = await client.cancelTaskById("task-1");
+
+      expect(result.attribution).toEqual({
+        source: "direct_human",
+        precise: true,
+        initiator: { id: "user-1", name: "Ada", avatar_url: "https://x/a.png" },
+        originator: { id: "user-1", name: "Ada" },
+        evidence: { kind: "comment", ref_id: "comment-1" },
+      });
+    });
+
+    it("leaves attribution absent on servers that predate it", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify(taskResponse), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      const client = new ApiClient("https://api.example.test");
+      const result = await client.cancelTaskById("task-1");
+
+      expect(result.attribution).toBeUndefined();
     });
 
     // The server only defers the empty-transcript judgment — and so only

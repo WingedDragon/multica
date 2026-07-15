@@ -437,7 +437,10 @@ func (c *BusinessSamplerCollector) runQuery(
 	name string,
 	body func(ctx context.Context, tx pgx.Tx) error,
 ) {
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout+50*time.Millisecond)
+	// Leave enough time for transaction setup and for pgx to receive the
+	// server's SQLSTATE 57014 response. A 50ms cushion lets the client-side
+	// deadline win on Docker-backed Postgres before statement_timeout surfaces.
+	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout+500*time.Millisecond)
 	defer cancel()
 
 	start := c.now()

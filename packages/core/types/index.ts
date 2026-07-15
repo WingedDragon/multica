@@ -16,6 +16,9 @@ export type {
   AgentInvocationTarget,
   AgentInvocationTargetInput,
   AgentTask,
+  TaskAttribution,
+  AttributionUser,
+  TaskEvidence,
   AgentActivityBucket,
   AgentRunCount,
   TaskFailureReason,
@@ -101,6 +104,8 @@ export type {
   CommentTriggerPreview,
   CommentTriggerPreviewAgent,
   CommentTriggerSource,
+  CommentTriggerOutcome,
+  CommentTriggerStatus,
   Reaction,
 } from "./comment";
 export type {
@@ -112,6 +117,19 @@ export type {
   IssueLabelsResponse,
   ResourceLabelsResponse,
 } from "./label";
+export type {
+  IssueProperty,
+  IssuePropertyType,
+  IssuePropertyOption,
+  IssuePropertyConfig,
+  IssuePropertyValue,
+  IssuePropertyValues,
+  CreatePropertyRequest,
+  UpdatePropertyRequest,
+  ListPropertiesResponse,
+  IssuePropertiesResponse,
+} from "./property";
+export { ISSUE_PROPERTY_TYPES, isKnownPropertyType } from "./property";
 export type { TimelineEntry, AssigneeFrequencyEntry } from "./activity";
 export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";

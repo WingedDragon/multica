@@ -17,12 +17,14 @@ import {
   EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
   EMPTY_GITLAB_CONFIG_RESPONSE,
   EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
+  EMPTY_INBOX_ITEMS,
   EMPTY_INBOX_UNREAD_SUMMARY,
   EMPTY_SEARCH_PROJECTS_RESPONSE,
   EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
   EMPTY_USER,
   GitLabConfigResponseSchema,
   GitLabMergeRequestDetailsResponseSchema,
+  InboxItemListSchema,
   InboxUnreadSummarySchema,
   IssueTriggerPreviewSchema,
   ListGitLabMergeRequestsResponseSchema,
@@ -120,7 +122,12 @@ describe("IssueSchema (via ListIssuesResponseSchema)", () => {
       issues: [
         {
           ...baseIssue,
-          properties: { "def-1": "opt-a", "def-2": ["opt-x", "opt-y"], "def-3": 3.5, "def-4": true },
+          properties: {
+            "def-1": "opt-a",
+            "def-2": ["opt-x", "opt-y"],
+            "def-3": 3.5,
+            "def-4": true,
+          },
         },
       ],
       total: 1,
@@ -135,7 +142,10 @@ describe("IssueSchema (via ListIssuesResponseSchema)", () => {
   });
 
   it("defaults properties to {} when the server omits it (older backend)", () => {
-    const parsed = ListIssuesResponseSchema.parse({ issues: [baseIssue], total: 1 });
+    const parsed = ListIssuesResponseSchema.parse({
+      issues: [baseIssue],
+      total: 1,
+    });
     expect(parsed.issues[0]?.properties).toEqual({});
   });
 
@@ -176,7 +186,10 @@ describe("IssuePropertySchema (via ListPropertiesResponseSchema)", () => {
   };
 
   it("parses a full definition", () => {
-    const parsed = ListPropertiesResponseSchema.parse({ properties: [baseProperty], total: 1 });
+    const parsed = ListPropertiesResponseSchema.parse({
+      properties: [baseProperty],
+      total: 1,
+    });
     expect(parsed.properties[0]?.config.options?.[0]?.name).toBe("Critical");
     expect(parsed.properties[0]?.icon).toBe("flag");
   });
@@ -197,13 +210,19 @@ describe("IssuePropertySchema (via ListPropertiesResponseSchema)", () => {
 
   it("defaults config when the server sends none", () => {
     const { config: _omit, ...withoutConfig } = baseProperty;
-    const parsed = ListPropertiesResponseSchema.parse({ properties: [withoutConfig], total: 1 });
+    const parsed = ListPropertiesResponseSchema.parse({
+      properties: [withoutConfig],
+      total: 1,
+    });
     expect(parsed.properties[0]?.config).toEqual({});
   });
 
   it("defaults icon for an older server response", () => {
     const { icon: _omit, ...withoutIcon } = baseProperty;
-    const parsed = ListPropertiesResponseSchema.parse({ properties: [withoutIcon], total: 1 });
+    const parsed = ListPropertiesResponseSchema.parse({
+      properties: [withoutIcon],
+      total: 1,
+    });
     expect(parsed.properties[0]?.icon).toBe("");
   });
 });
@@ -970,7 +989,9 @@ describe("AppConfigSchema cdn_signed drift", () => {
   });
 
   it("parses server_version and leaves it undefined when the server omits it", () => {
-    expect(AppConfigSchema.parse({ server_version: "1.2.3" }).server_version).toBe("1.2.3");
+    expect(
+      AppConfigSchema.parse({ server_version: "1.2.3" }).server_version,
+    ).toBe("1.2.3");
     expect(AppConfigSchema.parse({}).server_version).toBeUndefined();
   });
 });
@@ -1025,6 +1046,107 @@ describe("InboxUnreadSummarySchema", () => {
   });
 });
 
+describe("InboxItemListSchema", () => {
+  const ENDPOINT = { endpoint: "GET /api/inbox/archived" };
+
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    id: "inbox-1",
+    workspace_id: "ws-1",
+    recipient_type: "member",
+    recipient_id: "member-1",
+    type: "new_comment",
+    severity: "info",
+    issue_id: "issue-1",
+    title: "Issue title",
+    body: null,
+    read: false,
+    archived: true,
+    created_at: "2026-06-15T08:00:00Z",
+    ...overrides,
+  });
+
+  it("parses a well-formed archived list and tolerates extra fields", () => {
+    const parsed = parseWithFallback(
+      [
+        row({
+          issue_status: "in_progress",
+          details: { comment_id: "c-1" },
+          future_field: 1,
+        }),
+      ],
+      InboxItemListSchema,
+      EMPTY_INBOX_ITEMS,
+      ENDPOINT,
+    );
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({ id: "inbox-1", archived: true });
+  });
+
+  it("keeps a notification type this client doesn't know yet", () => {
+    // Enums stay lenient on purpose: a backend that ships a new inbox type
+    // must not blank the whole archived list on older clients.
+    const parsed = parseWithFallback(
+      [row({ type: "some_future_type", severity: "future_severity" })],
+      InboxItemListSchema,
+      EMPTY_INBOX_ITEMS,
+      ENDPOINT,
+    );
+    expect(parsed).toHaveLength(1);
+  });
+
+  it("accepts rows that omit the nullable optional fields", () => {
+    const { body, issue_id, ...withoutOptionals } = row();
+    void body;
+    void issue_id;
+    expect(
+      parseWithFallback(
+        [withoutOptionals],
+        InboxItemListSchema,
+        EMPTY_INBOX_ITEMS,
+        ENDPOINT,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("returns the empty fallback for a non-array body", () => {
+    expect(
+      parseWithFallback(
+        { items: [] },
+        InboxItemListSchema,
+        EMPTY_INBOX_ITEMS,
+        ENDPOINT,
+      ),
+    ).toBe(EMPTY_INBOX_ITEMS);
+    expect(
+      parseWithFallback(null, InboxItemListSchema, EMPTY_INBOX_ITEMS, ENDPOINT),
+    ).toBe(EMPTY_INBOX_ITEMS);
+  });
+
+  it("returns the empty fallback when a row is missing a required field", () => {
+    const { id, ...withoutId } = row();
+    void id;
+    expect(
+      parseWithFallback(
+        [withoutId],
+        InboxItemListSchema,
+        EMPTY_INBOX_ITEMS,
+        ENDPOINT,
+      ),
+    ).toBe(EMPTY_INBOX_ITEMS);
+  });
+
+  it("returns the empty fallback when `archived` is wrong-typed", () => {
+    expect(
+      parseWithFallback(
+        [row({ archived: "yes" })],
+        InboxItemListSchema,
+        EMPTY_INBOX_ITEMS,
+        ENDPOINT,
+      ),
+    ).toBe(EMPTY_INBOX_ITEMS);
+  });
+});
+
 describe("SearchProjectsResponseSchema date drift", () => {
   const ENDPOINT = { endpoint: "GET /api/projects/search" };
 
@@ -1048,7 +1170,12 @@ describe("SearchProjectsResponseSchema date drift", () => {
 
   it("parses start_date / due_date when the backend returns them", () => {
     const parsed = parseWithFallback(
-      { projects: [{ ...baseProject, start_date: "2026-03-01", due_date: "2026-03-31" }], total: 1 },
+      {
+        projects: [
+          { ...baseProject, start_date: "2026-03-01", due_date: "2026-03-31" },
+        ],
+        total: 1,
+      },
       SearchProjectsResponseSchema,
       EMPTY_SEARCH_PROJECTS_RESPONSE,
       ENDPOINT,
@@ -1096,7 +1223,13 @@ describe("AutopilotRunSchema", () => {
 
   it("preserves a blocked run's status and reason_code", () => {
     const parsed = parseWithFallback(
-      { ...baseRun, status: "skipped", failure_reason: "you are not allowed to trigger this autopilot's assignee agent", reason_code: "invocation_not_allowed" },
+      {
+        ...baseRun,
+        status: "skipped",
+        failure_reason:
+          "you are not allowed to trigger this autopilot's assignee agent",
+        reason_code: "invocation_not_allowed",
+      },
       AutopilotRunSchema,
       FALLBACK_AUTOPILOT_RUN,
       ENDPOINT,
@@ -1106,13 +1239,23 @@ describe("AutopilotRunSchema", () => {
   });
 
   it("tolerates an older server omitting reason_code", () => {
-    const parsed = parseWithFallback(baseRun, AutopilotRunSchema, FALLBACK_AUTOPILOT_RUN, ENDPOINT);
+    const parsed = parseWithFallback(
+      baseRun,
+      AutopilotRunSchema,
+      FALLBACK_AUTOPILOT_RUN,
+      ENDPOINT,
+    );
     expect(parsed.status).toBe("issue_created");
     expect(parsed.reason_code).toBeUndefined();
   });
 
   it("degrades a malformed response to a non-success fallback (never a false success)", () => {
-    const parsed = parseWithFallback("not-an-object", AutopilotRunSchema, FALLBACK_AUTOPILOT_RUN, ENDPOINT);
+    const parsed = parseWithFallback(
+      "not-an-object",
+      AutopilotRunSchema,
+      FALLBACK_AUTOPILOT_RUN,
+      ENDPOINT,
+    );
     expect(parsed).toBe(FALLBACK_AUTOPILOT_RUN);
     expect(parsed.status).toBe("failed");
   });
@@ -1125,12 +1268,22 @@ describe("CommentTriggerPreviewSchema.blocked", () => {
     const parsed = CommentTriggerPreviewSchema.parse({
       agents: [{ id: "a1", source: "mention_agent", reason: "" }],
       blocked: [
-        { target_type: "squad", target_id: "s1", status: "blocked", reason_code: "invocation_not_allowed" },
+        {
+          target_type: "squad",
+          target_id: "s1",
+          status: "blocked",
+          reason_code: "invocation_not_allowed",
+        },
       ],
     });
     expect(parsed.agents).toHaveLength(1);
     expect(parsed.blocked).toEqual([
-      { target_type: "squad", target_id: "s1", status: "blocked", reason_code: "invocation_not_allowed" },
+      {
+        target_type: "squad",
+        target_id: "s1",
+        status: "blocked",
+        reason_code: "invocation_not_allowed",
+      },
     ]);
   });
 
@@ -1152,9 +1305,19 @@ describe("CommentTriggerPreviewSchema.blocked", () => {
     const parsed = CommentTriggerPreviewSchema.parse({
       agents: [],
       blocked: [
-        { target_type: "squad", target_id: "s1", status: "blocked", reason_code: "invocation_not_allowed" },
+        {
+          target_type: "squad",
+          target_id: "s1",
+          status: "blocked",
+          reason_code: "invocation_not_allowed",
+        },
         { status: "blocked" }, // missing target_id → dropped individually
-        { target_type: "agent", target_id: "a1", status: "blocked", reason_code: "runtime_offline" },
+        {
+          target_type: "agent",
+          target_id: "a1",
+          status: "blocked",
+          reason_code: "runtime_offline",
+        },
       ],
     });
     expect(parsed.blocked.map((b) => b.target_id)).toEqual(["s1", "a1"]);

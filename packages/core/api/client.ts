@@ -1,5 +1,6 @@
 import type {
   Issue,
+  IssuePriority,
   CreateIssueRequest,
   UpdateIssueRequest,
   GroupedIssuesResponse,
@@ -111,6 +112,7 @@ import type {
   CreateAutopilotTriggerRequest,
   UpdateAutopilotTriggerRequest,
   ListAutopilotsResponse,
+  CronPreviewResponse,
   GetAutopilotResponse,
   AutopilotCollaboratorsResponse,
   ListAutopilotRunsResponse,
@@ -212,7 +214,10 @@ import {
   EMPTY_LIST_AUTOPILOTS_RESPONSE,
   AutopilotRunSchema,
   FALLBACK_AUTOPILOT_RUN,
+  CronPreviewResponseSchema,
+  UNREADABLE_CRON_PREVIEW_RESPONSE,
   ListIssuesResponseSchema,
+  CreateIssueResponseSchema,
   ListWebhookDeliveriesResponseSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
@@ -250,6 +255,8 @@ import {
   EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
   InboxUnreadSummarySchema,
   EMPTY_INBOX_UNREAD_SUMMARY,
+  InboxItemListSchema,
+  EMPTY_INBOX_ITEMS,
   NotificationPreferenceResponseSchema,
   EMPTY_NOTIFICATION_PREFERENCE_RESPONSE,
   LabelSchema,
@@ -681,16 +688,34 @@ export class ApiClient {
   }
 
   async createIssue(data: CreateIssueRequest): Promise<Issue> {
-    return this.fetch("/api/issues", {
+    // Parse through a schema (not a raw cast): the create modal keys its
+    // label-attach compatibility fallback off `labels` being absent vs a
+    // validated Label[], so an unvalidated wrong shape must not slip through.
+    // Unlike list endpoints, a create that returns an unusable body is a
+    // FAILED mutation, not a safe-empty read: fall back to null and reject so
+    // the modal keeps the draft and shows a failure toast instead of a blank
+    // "created" card pointing at an empty issue id. parseWithFallback already
+    // logged the schema issues + raw payload; the empty message lets the modal
+    // render its localized "failed to create" toast.
+    const raw = await this.fetch<unknown>("/api/issues", {
       method: "POST",
       body: JSON.stringify(data),
     });
+    const issue = parseWithFallback<Issue | null>(raw, CreateIssueResponseSchema, null, {
+      endpoint: "POST /api/issues",
+    });
+    if (!issue) {
+      throw new Error();
+    }
+    return issue;
   }
 
   async quickCreateIssue(data: {
     agent_id?: string;
     squad_id?: string;
     prompt: string;
+    priority?: IssuePriority;
+    due_date?: string;
     project_id?: string | null;
     parent_issue_id?: string | null;
     attachment_ids?: string[];
@@ -1602,6 +1627,20 @@ export class ApiClient {
     return this.fetch(`/api/inbox/${id}/archive`, { method: "POST" });
   }
 
+  // Archived notifications, backing the inbox's "Archived" sub-view. Capped
+  // server-side (no pagination in v1). Schema-guarded so a contract drift
+  // renders an empty archive instead of taking the inbox down with it.
+  async listArchivedInbox(): Promise<InboxItem[]> {
+    const raw = await this.fetch<unknown>("/api/inbox/archived");
+    return parseWithFallback(raw, InboxItemListSchema, EMPTY_INBOX_ITEMS, {
+      endpoint: "GET /api/inbox/archived",
+    });
+  }
+
+  async unarchiveInbox(id: string): Promise<InboxItem> {
+    return this.fetch(`/api/inbox/${id}/unarchive`, { method: "POST" });
+  }
+
   async getUnreadInboxCount(): Promise<{ count: number }> {
     return this.fetch("/api/inbox/unread-count");
   }
@@ -2509,6 +2548,19 @@ export class ApiClient {
 
   async deleteAutopilotTrigger(autopilotId: string, triggerId: string): Promise<void> {
     await this.fetch(`/api/autopilots/${autopilotId}/triggers/${triggerId}`, { method: "DELETE" });
+  }
+
+  async cronPreview(params: { expr: string; tz: string }): Promise<CronPreviewResponse> {
+    const search = new URLSearchParams();
+    search.set("expr", params.expr);
+    search.set("tz", params.tz);
+    const raw = await this.fetch<unknown>(`/api/autopilots/cron-preview?${search}`);
+    return parseWithFallback(
+      raw,
+      CronPreviewResponseSchema,
+      UNREADABLE_CRON_PREVIEW_RESPONSE,
+      { endpoint: "GET /api/autopilots/cron-preview" },
+    );
   }
 
   async rotateAutopilotTriggerWebhookToken(

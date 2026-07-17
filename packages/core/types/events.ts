@@ -34,6 +34,7 @@ export type WSEventType =
   | "inbox:new"
   | "inbox:read"
   | "inbox:archived"
+  | "inbox:unarchived"
   | "inbox:batch-read"
   | "inbox:batch-archived"
   | "workspace:updated"
@@ -166,6 +167,12 @@ export interface InboxReadPayload {
 
 export interface InboxArchivedPayload {
   item_id: string;
+  recipient_id: string;
+}
+
+export interface InboxUnarchivedPayload {
+  item_id: string;
+  issue_id: string | null;
   recipient_id: string;
 }
 
@@ -490,6 +497,7 @@ export interface WSEventPayloadMap {
   "inbox:new": InboxNewPayload;
   "inbox:read": InboxReadPayload;
   "inbox:archived": InboxArchivedPayload;
+  "inbox:unarchived": InboxUnarchivedPayload;
   "inbox:batch-read": InboxBatchReadPayload;
   "inbox:batch-archived": InboxBatchArchivedPayload;
   "workspace:updated": WorkspaceUpdatedPayload;

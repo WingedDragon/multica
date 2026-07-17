@@ -11,6 +11,7 @@ SKIP_DEPLOY="${MULTICA_SKIP_DEPLOY:-0}"
 SKIP_PACKAGE="${MULTICA_SKIP_PACKAGE:-0}"
 SKIP_INSTALL="${MULTICA_SKIP_INSTALL:-0}"
 SKIP_CLI_INSTALL="${MULTICA_SKIP_CLI_INSTALL:-0}"
+UPSTREAM_SYNC_STRATEGY="${MULTICA_UPSTREAM_SYNC_STRATEGY:-auto}"
 
 CLI_BIN="$REPO/server/bin/multica"
 
@@ -59,6 +60,68 @@ fi
   run_my_mini_zsh "chmod 0755 \"\$HOME/$remote_tmp\" && mv \"\$HOME/$remote_tmp\" \"\$HOME/.local/bin/multica\" && \"\$HOME/.local/bin/multica\" version"
 }
 
+sync_upstream() {
+  local branch="$1"
+  local requested="$UPSTREAM_SYNC_STRATEGY"
+  local effective="$requested"
+  local remote_published=0
+  local remote_ahead=0
+  local remote_lookup_status=0
+
+  case "$requested" in
+    auto|merge|rebase) ;;
+    *)
+      echo "Invalid MULTICA_UPSTREAM_SYNC_STRATEGY=$requested; expected auto, merge, or rebase." >&2
+      exit 2
+      ;;
+  esac
+
+  git fetch upstream main --tags
+
+  if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    remote_published=1
+    git fetch origin "$branch"
+    remote_ahead="$(git rev-list --count "HEAD..origin/$branch")"
+    if [ "$remote_ahead" -gt 0 ]; then
+      echo "origin/$branch contains $remote_ahead commit(s) not present locally; integrate them before release." >&2
+      exit 2
+    fi
+  else
+    remote_lookup_status=$?
+    if [ "$remote_lookup_status" -ne 2 ]; then
+      echo "Unable to determine whether origin/$branch exists (git ls-remote exit $remote_lookup_status); aborting before history changes." >&2
+      exit 2
+    fi
+  fi
+
+  if git merge-base --is-ancestor upstream/main HEAD; then
+    effective="none"
+  elif [ "$requested" = "auto" ]; then
+    if [ "$remote_published" = "1" ]; then
+      effective="merge"
+    else
+      effective="rebase"
+    fi
+  fi
+
+  echo "==> Upstream sync: $effective (requested: $requested, published: $remote_published)"
+  case "$effective" in
+    none) ;;
+    merge)
+      git merge --no-ff upstream/main -m "chore: merge upstream/main"
+      ;;
+    rebase)
+      git rebase upstream/main
+      ;;
+  esac
+
+  if [ "$effective" = "rebase" ] && [ "$remote_published" = "1" ]; then
+    git push --force-with-lease origin "$branch"
+  else
+    git push origin "$branch"
+  fi
+}
+
 cd "$REPO"
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
@@ -74,9 +137,7 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 echo "==> Local branch: $branch"
-git fetch upstream main
-git rebase upstream/main
-git push --force-with-lease origin "$branch"
+sync_upstream "$branch"
 
 if [ "$SKIP_CLI_INSTALL" != "1" ]; then
   build_cli
@@ -103,7 +164,8 @@ if [ -n "$(git status --porcelain)" ]; then
   git restore apps/web/next-env.d.ts
 fi
 if ! git merge --ff-only "$REMOTE_NAME/$BRANCH"; then
-  git reset --hard "$REMOTE_NAME/$BRANCH"
+  echo "Remote checkout cannot fast-forward; refusing to reset or discard commits automatically." >&2
+  exit 5
 fi
 ./scripts/deploy.sh
 git status --short --branch

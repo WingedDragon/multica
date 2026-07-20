@@ -14,9 +14,9 @@ require_line() {
   fi
 }
 
-require_line 'MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-2560'
-require_line 'MULTICA_WEB_BUILD_MEMORY_MAX:-4G'
-require_line 'MULTICA_WEB_BUILD_SWAP_MAX:-256M'
+require_line 'MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-3072'
+require_line 'MULTICA_WEB_BUILD_MEMORY_MAX:-5G'
+require_line 'MULTICA_WEB_BUILD_SWAP_MAX:-512M'
 require_line '-p "CPUQuota=100%"'
 require_line '-p "Nice=10"'
 require_line '-p "IOWeight=50"'

@@ -49,30 +49,29 @@ The script's `auto` mode uses published state as a conservative mechanical proxy
 - If a rebase intentionally rewrites published history, the deployment checkout may no longer fast-forward. The script must stop rather than reset automatically; inspect the remote commits and only perform a manual reset after separately confirming the rewrite and target SHA.
 - Never use a force push after merge. Never use plain `--force`; a published rebase requires `--force-with-lease`.
 
-## TODO: Diagnose Selfhost Build Host Pressure
+## Resolved Incident: Selfhost Build Host Pressure (2026-07-20)
 
-This TODO is active after the 2026-07-20 `dj` incident. Do not silently skip it on the next invocation of this skill.
+The original outage was host-wide memory pressure, not proof that a build limit was absent. A cgroup `MemoryMax` only caps the build; it does not reserve memory for SSH, the reverse proxy, or unrelated resident services. The original `MemoryMax=5G` plus `MemorySwapMax=512M` budget was too large for a 7.5 GiB host already running OpenClaw, LiteLLM, Open Design, Hermes, and other services. Reclaim pressure made SSH and public HTTPS unresponsive before the user force-restarted `dj`, so that boot contains no conclusive kernel OOM record.
 
-Observed facts:
+The protected retries established the safe operating boundary:
 
-- `dj` has about 7.5 GiB RAM and 1.9 GiB swap, with several non-Multica services consuming memory.
-- The frontend build completed webpack compilation and became unresponsive during `Running TypeScript` while using `MemoryMax=5G` and `MemorySwapMax=512M`.
-- New SSH connections timed out during banner exchange and public HTTPS timed out. The user then force-restarted `dj` at about 14:34 CST.
-- The previous boot recorded the build unit start but no OOM kill for this attempt, so the exact build cgroup peak and final pressure source remain unknown. Do not report a specific OOM cause without new evidence.
-- The interrupted in-place build left `.next` without `BUILD_ID`, `routes-manifest.json`, or `prerender-manifest.json`, causing the frontend service to restart and return HTTP 502 after reboot.
-- A protected retry with `MemoryHigh=2560M`, `MemoryMax=3G`, and `MemorySwapMax=256M` kept SSH responsive but stalled in webpack compilation: `memory.peak` reached about 2.6 GiB, swap reached 256 MiB, `high` exceeded 180000, full memory pressure exceeded 80%, and the Node wait channel was `mem_cgroup_handle_over_high`. It consumed only 61.8 seconds of CPU over 8 minutes 23 seconds, recorded no OOM, and was stopped. Evidence is in `/var/tmp/multica-selfhost-release/cgroup-20260720T064948Z.log` and the `multica-web-build.service` journal.
-- The next retry enables Next.js's official `experimental.webpackMemoryOptimizations` while keeping the host guard and cgroup budgets unchanged. Compare its cgroup log with the protected baseline before changing another variable.
+- The resource guard runs immediately before `systemd-run`, after dependency installation and migrations. During this release it refused two builds when post-install `MemAvailable` fell to 4396 MiB and 4484 MiB even though an earlier check had passed at 4718 MiB. Do not bypass this second check.
+- `openclaw-gateway.service` was a user-level enabled unit and therefore restarted with `dj`; it used roughly 0.75-0.94 GiB. The unused gateway and the system-level `claw-visual.service` were disabled and stopped. `fwupd.service` was also stopped for the release window after confirming that it had no active work.
+- With webpack memory optimizations enabled, a retry at `MemoryMax=3G` still reached exactly 3 GiB and was isolated by a memory-cgroup OOM at 15:15:43 CST. It ran for 5m43s and consumed 4m38s CPU without taking down the host. Evidence: `/var/tmp/multica-selfhost-release/cgroup-20260720T071000Z.log` and the kernel journal.
+- After stopping the already-unavailable Multica frontend and then the backend for the deployment window, `MemAvailable=5790 MiB` passed the `4G + 1536 MiB` guard. The build succeeded with `MemoryHigh=4G`, `MemoryMax=4G`, `MemorySwapMax=256M`, and a 2048 MiB Node heap. It compiled webpack in 118s, completed TypeScript in 69s, and finished in 3m50s with 3m45s CPU. The cgroup peak was exactly 4 GiB, swap peak was 256 MiB, `oom_kill` stayed zero, and the host remained responsive. Evidence: `/var/tmp/multica-selfhost-release/cgroup-20260720T071925Z.log`.
 
-On the next invocation, treat this as release work that must be diagnosed, handled, and recorded before closing the release:
+The default safe budget is therefore `MemoryHigh=4G`, `MemoryMax=4G`, `MemorySwapMax=256M`, and a 1536 MiB host reserve. If the preflight cannot cover 5632 MiB or existing swap use exceeds 256 MiB, do not start the build. First inspect resident RSS and stop only confirmed-unused services; Multica frontend/backend may be stopped for the deployment window and restarted after the backend build.
 
-1. Read `/var/tmp/multica-selfhost-release/preflight-*.log` and `cgroup-*.log`. Compare `MemAvailable`, configured `MemoryMax`, the host reserve, swap usage, top RSS processes, cgroup `memory.current` / `memory.peak` / `memory.swap.current`, and `memory.events`.
-2. Inspect the stable unit with `journalctl -u multica-web-build.service`, `systemctl show multica-web-build.service`, and, after a reboot, `journalctl -b -1 -u multica-web-build.service`.
-3. Inspect kernel evidence with `journalctl -k` or `journalctl -b -1 -k` for `oom`, `Killed process`, `memory cgroup`, `watchdog`, and hung tasks. Use `last -x` and the user's report to distinguish a forced reboot from a kernel-initiated reboot.
-4. Verify `.next` completeness and `systemctl is-active multica-backend multica-frontend` before calling the service healthy.
-5. If the resource preflight refuses the build, do not override it blindly. Identify which resident services or build phase consume the margin, choose a safe remediation, and record the evidence and result in this section.
-6. When the exact cause is proven, replace this TODO with the conclusion, measured peak, chosen safe budget, and a repeatable verification command.
+Repeatable verification:
 
-The deploy script now refuses to start the frontend build unless `MemAvailable` can cover `MemoryMax` plus a host reserve and existing swap usage is below its threshold. It uses the stable `multica-web-build.service` unit with `MemoryHigh`, `MemoryMax`, `MemorySwapMax`, and `OOMPolicy=kill`, and samples cgroup counters into `/var/tmp/multica-selfhost-release/cgroup-*.log` throughout the build so later diagnostics survive an SSH disconnect or reboot.
+```bash
+ssh my-mini 'ssh dj "cd /home/ubuntu/apps/multica && ./scripts/check-build-resources.sh"'
+ssh my-mini 'ssh dj "tail -n 30 /var/tmp/multica-selfhost-release/cgroup-*.log; systemctl is-active multica-backend multica-frontend"'
+ssh my-mini 'ssh dj "test -s /home/ubuntu/apps/multica/apps/web/.next/BUILD_ID && test -s /home/ubuntu/apps/multica/apps/web/.next/routes-manifest.json && test -s /home/ubuntu/apps/multica/apps/web/.next/prerender-manifest.json"'
+curl --noproxy '*' --max-time 20 -I https://multica.zxyh.club/
+```
+
+The deploy script refuses to start the frontend build unless `MemAvailable` can cover `MemoryMax` plus the host reserve and existing swap usage is below its threshold. It uses the stable `multica-web-build.service` unit with `MemoryHigh`, `MemoryMax`, `MemorySwapMax`, and `OOMPolicy=kill`, and samples cgroup counters into `/var/tmp/multica-selfhost-release/cgroup-*.log` throughout the build so diagnostics survive an SSH disconnect or reboot.
 
 ## Standard Workflow
 
@@ -180,8 +179,8 @@ MULTICA_REMOTE_HOST=dj
 MULTICA_REMOTE_DIR=/home/ubuntu/apps/multica
 MULTICA_REMOTE_NAME=wingeddragon
 MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=2048
-MULTICA_WEB_BUILD_MEMORY_HIGH=2560M
-MULTICA_WEB_BUILD_MEMORY_MAX=3G
+MULTICA_WEB_BUILD_MEMORY_HIGH=4G
+MULTICA_WEB_BUILD_MEMORY_MAX=4G
 MULTICA_WEB_BUILD_SWAP_MAX=256M
 MULTICA_WEB_BUILD_HOST_RESERVE_MB=1536
 MULTICA_WEB_BUILD_MAX_SWAP_USED_MB=256

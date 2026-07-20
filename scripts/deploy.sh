@@ -103,16 +103,48 @@ EOF
 
 echo ""
 echo "==> [4/6] Build frontend..."
-WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-3072}"
-WEB_BUILD_MEMORY_MAX="${MULTICA_WEB_BUILD_MEMORY_MAX:-5G}"
-WEB_BUILD_SWAP_MAX="${MULTICA_WEB_BUILD_SWAP_MAX:-512M}"
+WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-2048}"
+WEB_BUILD_MEMORY_HIGH="${MULTICA_WEB_BUILD_MEMORY_HIGH:-2560M}"
+WEB_BUILD_MEMORY_MAX="${MULTICA_WEB_BUILD_MEMORY_MAX:-3G}"
+WEB_BUILD_SWAP_MAX="${MULTICA_WEB_BUILD_SWAP_MAX:-256M}"
+WEB_BUILD_HOST_RESERVE_MB="${MULTICA_WEB_BUILD_HOST_RESERVE_MB:-1536}"
+WEB_BUILD_MAX_SWAP_USED_MB="${MULTICA_WEB_BUILD_MAX_SWAP_USED_MB:-256}"
+WEB_BUILD_UNIT="${MULTICA_WEB_BUILD_UNIT:-multica-web-build}"
+BUILD_DIAGNOSTICS_DIR="${MULTICA_BUILD_DIAGNOSTICS_DIR:-/var/tmp/multica-selfhost-release}"
+RESOURCE_CHECK_SCRIPT="$REPO_ROOT/scripts/check-build-resources.sh"
+BUILD_DIAGNOSTICS_SCRIPT="$REPO_ROOT/scripts/run-build-with-diagnostics.sh"
 build_node_options="${NODE_OPTIONS:-}"
 build_node_options="${build_node_options:+$build_node_options }--max-old-space-size=${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB}"
 echo "    Node heap limit: ${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB} MB"
-echo "    cgroup MemoryMax: ${WEB_BUILD_MEMORY_MAX}, MemorySwapMax: ${WEB_BUILD_SWAP_MAX}"
+echo "    cgroup MemoryHigh: ${WEB_BUILD_MEMORY_HIGH}, MemoryMax: ${WEB_BUILD_MEMORY_MAX}, MemorySwapMax: ${WEB_BUILD_SWAP_MAX}"
+
+mkdir -p "$BUILD_DIAGNOSTICS_DIR"
+build_diagnostics_file="$BUILD_DIAGNOSTICS_DIR/preflight-$(date -u '+%Y%m%dT%H%M%SZ').log"
+cgroup_diagnostics_file="${build_diagnostics_file/preflight-/cgroup-}"
+if ! {
+  date -u '+timestamp=%Y-%m-%dT%H:%M:%SZ'
+  uptime
+  free -h
+  swapon --show
+  ps -eo pid,rss,comm,args --sort=-rss | sed -n '1,15p'
+  MULTICA_WEB_BUILD_MEMORY_MAX="$WEB_BUILD_MEMORY_MAX" \
+    MULTICA_WEB_BUILD_HOST_RESERVE_MB="$WEB_BUILD_HOST_RESERVE_MB" \
+    MULTICA_WEB_BUILD_MAX_SWAP_USED_MB="$WEB_BUILD_MAX_SWAP_USED_MB" \
+    "$RESOURCE_CHECK_SCRIPT"
+} 2>&1 | tee "$build_diagnostics_file"; then
+  echo "ERROR: frontend build resource preflight failed. Diagnostics: $build_diagnostics_file" >&2
+  exit 3
+fi
+
+build_started_at="$(date '+%Y-%m-%d %H:%M:%S')"
+sudo systemctl reset-failed "$WEB_BUILD_UNIT.service" >/dev/null 2>&1 || true
+build_status=0
 sudo systemd-run --wait --pipe --collect \
+  --unit="$WEB_BUILD_UNIT" \
+  -p "MemoryHigh=${WEB_BUILD_MEMORY_HIGH}" \
   -p "MemoryMax=${WEB_BUILD_MEMORY_MAX}" \
   -p "MemorySwapMax=${WEB_BUILD_SWAP_MAX}" \
+  -p "OOMPolicy=kill" \
   -p "CPUQuota=100%" \
   -p "Nice=10" \
   -p "IOWeight=50" \
@@ -122,7 +154,27 @@ sudo systemd-run --wait --pipe --collect \
   --setenv="PATH=$PATH" \
   --setenv="NODE_ENV=${NODE_ENV:-production}" \
   --setenv="NODE_OPTIONS=$build_node_options" \
-  /usr/bin/env pnpm --filter @multica/web... build
+  "$BUILD_DIAGNOSTICS_SCRIPT" "$cgroup_diagnostics_file" \
+  /usr/bin/env pnpm --filter @multica/web... build || build_status=$?
+if [ "$build_status" -ne 0 ]; then
+  echo "ERROR: frontend build failed with exit $build_status"
+  echo "Build cgroup diagnostics: $cgroup_diagnostics_file"
+  tail -120 "$cgroup_diagnostics_file" || true
+  free -h || true
+  swapon --show || true
+  sudo journalctl -u "$WEB_BUILD_UNIT.service" --since "$build_started_at" --no-pager -n 200 || true
+  sudo journalctl -k --since "$build_started_at" --no-pager \
+    | grep -Ei 'oom|out of memory|killed process|memory cgroup|watchdog|hung task' \
+    | tail -80 || true
+  for file in apps/web/.next/BUILD_ID apps/web/.next/routes-manifest.json apps/web/.next/prerender-manifest.json; do
+    if [ -s "$file" ]; then
+      echo "    present: $file"
+    else
+      echo "    missing: $file"
+    fi
+  done
+  exit "$build_status"
+fi
 
 echo ""
 echo "==> [5/6] Build backend..."

@@ -49,6 +49,29 @@ The script's `auto` mode uses published state as a conservative mechanical proxy
 - If a rebase intentionally rewrites published history, the deployment checkout may no longer fast-forward. The script must stop rather than reset automatically; inspect the remote commits and only perform a manual reset after separately confirming the rewrite and target SHA.
 - Never use a force push after merge. Never use plain `--force`; a published rebase requires `--force-with-lease`.
 
+## TODO: Diagnose Selfhost Build Host Pressure
+
+This TODO is active after the 2026-07-20 `dj` incident. Do not silently skip it on the next invocation of this skill.
+
+Observed facts:
+
+- `dj` has about 7.5 GiB RAM and 1.9 GiB swap, with several non-Multica services consuming memory.
+- The frontend build completed webpack compilation and became unresponsive during `Running TypeScript` while using `MemoryMax=5G` and `MemorySwapMax=512M`.
+- New SSH connections timed out during banner exchange and public HTTPS timed out. The user then force-restarted `dj` at about 14:34 CST.
+- The previous boot recorded the build unit start but no OOM kill for this attempt, so the exact build cgroup peak and final pressure source remain unknown. Do not report a specific OOM cause without new evidence.
+- The interrupted in-place build left `.next` without `BUILD_ID`, `routes-manifest.json`, or `prerender-manifest.json`, causing the frontend service to restart and return HTTP 502 after reboot.
+
+On the next invocation, treat this as release work that must be diagnosed, handled, and recorded before closing the release:
+
+1. Read `/var/tmp/multica-selfhost-release/preflight-*.log` and `cgroup-*.log`. Compare `MemAvailable`, configured `MemoryMax`, the host reserve, swap usage, top RSS processes, cgroup `memory.current` / `memory.peak` / `memory.swap.current`, and `memory.events`.
+2. Inspect the stable unit with `journalctl -u multica-web-build.service`, `systemctl show multica-web-build.service`, and, after a reboot, `journalctl -b -1 -u multica-web-build.service`.
+3. Inspect kernel evidence with `journalctl -k` or `journalctl -b -1 -k` for `oom`, `Killed process`, `memory cgroup`, `watchdog`, and hung tasks. Use `last -x` and the user's report to distinguish a forced reboot from a kernel-initiated reboot.
+4. Verify `.next` completeness and `systemctl is-active multica-backend multica-frontend` before calling the service healthy.
+5. If the resource preflight refuses the build, do not override it blindly. Identify which resident services or build phase consume the margin, choose a safe remediation, and record the evidence and result in this section.
+6. When the exact cause is proven, replace this TODO with the conclusion, measured peak, chosen safe budget, and a repeatable verification command.
+
+The deploy script now refuses to start the frontend build unless `MemAvailable` can cover `MemoryMax` plus a host reserve and existing swap usage is below its threshold. It uses the stable `multica-web-build.service` unit with `MemoryHigh`, `MemoryMax`, `MemorySwapMax`, and `OOMPolicy=kill`, and samples cgroup counters into `/var/tmp/multica-selfhost-release/cgroup-*.log` throughout the build so later diagnostics survive an SSH disconnect or reboot.
+
 ## Standard Workflow
 
 Before running the full workflow:
@@ -154,6 +177,13 @@ MULTICA_REMOTE_JUMP=my-mini
 MULTICA_REMOTE_HOST=dj
 MULTICA_REMOTE_DIR=/home/ubuntu/apps/multica
 MULTICA_REMOTE_NAME=wingeddragon
+MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=2048
+MULTICA_WEB_BUILD_MEMORY_HIGH=2560M
+MULTICA_WEB_BUILD_MEMORY_MAX=3G
+MULTICA_WEB_BUILD_SWAP_MAX=256M
+MULTICA_WEB_BUILD_HOST_RESERVE_MB=1536
+MULTICA_WEB_BUILD_MAX_SWAP_USED_MB=256
+MULTICA_BUILD_DIAGNOSTICS_DIR=/var/tmp/multica-selfhost-release
 MULTICA_SKIP_DEPLOY=1
 MULTICA_SKIP_PACKAGE=1
 MULTICA_SKIP_INSTALL=1

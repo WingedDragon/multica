@@ -60,6 +60,8 @@ Observed facts:
 - New SSH connections timed out during banner exchange and public HTTPS timed out. The user then force-restarted `dj` at about 14:34 CST.
 - The previous boot recorded the build unit start but no OOM kill for this attempt, so the exact build cgroup peak and final pressure source remain unknown. Do not report a specific OOM cause without new evidence.
 - The interrupted in-place build left `.next` without `BUILD_ID`, `routes-manifest.json`, or `prerender-manifest.json`, causing the frontend service to restart and return HTTP 502 after reboot.
+- A protected retry with `MemoryHigh=2560M`, `MemoryMax=3G`, and `MemorySwapMax=256M` kept SSH responsive but stalled in webpack compilation: `memory.peak` reached about 2.6 GiB, swap reached 256 MiB, `high` exceeded 180000, full memory pressure exceeded 80%, and the Node wait channel was `mem_cgroup_handle_over_high`. It consumed only 61.8 seconds of CPU over 8 minutes 23 seconds, recorded no OOM, and was stopped. Evidence is in `/var/tmp/multica-selfhost-release/cgroup-20260720T064948Z.log` and the `multica-web-build.service` journal.
+- The next retry enables Next.js's official `experimental.webpackMemoryOptimizations` while keeping the host guard and cgroup budgets unchanged. Compare its cgroup log with the protected baseline before changing another variable.
 
 On the next invocation, treat this as release work that must be diagnosed, handled, and recorded before closing the release:
 

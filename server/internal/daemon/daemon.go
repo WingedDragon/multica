@@ -48,11 +48,23 @@ var ErrRepoNotConfigured = errors.New("repo is not configured for this workspace
 // stale-heartbeat sweep.
 var ErrNoRuntimesToRegister = errors.New("no agent runtimes could be registered")
 
+// errTaskPrepareTimeout distinguishes the daemon's dispatched -> running
+// startup deadline from provider execution timeouts. handleTask maps it to the
+// platform-side timeout failure reason so the server's existing retry path can
+// recover the task on a fresh attempt.
+var errTaskPrepareTimeout = errors.New("task preparation timed out")
+
 const (
 	taskSlotWaitTimeout      = 2 * time.Second
 	taskSlotCapacityBackoff  = 5 * time.Second
 	repoCheckoutModeEnv      = "MULTICA_REPO_CHECKOUT_MODE"
 	repoCheckoutModeIsolated = "isolated"
+	// defaultTaskPrepareTimeout is a hard liveness bound for everything after
+	// claim and before StartTask succeeds: runtime resolution, skill bundles,
+	// execution-environment setup, and the StartTask request itself. It is
+	// intentionally independent from AgentTimeout, which only governs the
+	// provider process after the task reaches running.
+	defaultTaskPrepareTimeout = 5 * time.Minute
 )
 
 func repoCheckoutModeFor(provider, goos string) string {
@@ -120,6 +132,16 @@ type terminalTaskReport struct {
 	sessionID     string
 	workDir       string
 	failureReason string
+}
+
+type executionEnvironmentCommand func() ([]string, error)
+
+func defaultExecutionEnvironmentCommand() ([]string, error) {
+	executable, err := resolveSelfExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve execution-environment helper: %w", err)
+	}
+	return []string{executable, execenv.PreparationHelperArg}, nil
 }
 
 var (
@@ -323,6 +345,13 @@ type Daemon struct {
 
 	runner             taskRunner    // executes agent tasks; set to d.runTask by New(), overridable in tests
 	cancelPollInterval time.Duration // how often handleTask polls for server-side cancellation; overridable in tests
+	// executionEnvironmentCommand resolves the killable helper used for
+	// Prepare/Reuse. New always sets it; nil keeps focused unit tests in-process.
+	executionEnvironmentCommand executionEnvironmentCommand
+	// taskPrepareTimeout is the dispatched -> running hard deadline. New sets
+	// the production default; zero-valued test daemons fall back to the same
+	// default in effectiveTaskPrepareTimeout.
+	taskPrepareTimeout time.Duration
 	// runUpdateFn executes the brew-or-download upgrade. Set to d.runUpdate by
 	// New() and overridable in tests so the auto-update poller can be exercised
 	// without touching the real network or the brew CLI.
@@ -365,12 +394,14 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 		reregisterNextAttempt:     make(map[string]time.Time),
 		reregisterLastCompletedAt: make(map[string]time.Time),
 		cancelPollInterval:        5 * time.Second,
+		taskPrepareTimeout:        defaultTaskPrepareTimeout,
 		reconcile:                 newReconcileBroadcaster(),
 		workspaceChanges:          newWorkspaceChangeSignal(),
 		wsRPC:                     newWSRPCClient(wsRPCResponseGrace),
 	}
 	d.activeEnvRootsCond = sync.NewCond(&d.activeEnvRootsMu)
 	d.activeCodexStoresCond = sync.NewCond(&d.activeCodexStoresMu)
+	d.executionEnvironmentCommand = defaultExecutionEnvironmentCommand
 	d.runner = taskRunnerFunc(d.runTask)
 	d.runUpdateFn = d.runUpdate
 	return d
@@ -3239,7 +3270,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 			kind:          terminalTaskReportFail,
 			taskID:        task.ID,
 			errorMessage:  err.Error(),
-			failureReason: taskfailure.Classify(err.Error()).String(),
+			failureReason: taskRunFailureReason(err),
 		}); failErr != nil {
 			taskLog.Error("fail task callback failed", "error", failErr)
 		}
@@ -3285,6 +3316,13 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 			}
 		}
 	}
+}
+
+func taskRunFailureReason(err error) string {
+	if errors.Is(err, errTaskPrepareTimeout) {
+		return taskfailure.ReasonTimeout.String()
+	}
+	return taskfailure.Classify(err.Error()).String()
 }
 
 // acquireLocalDirectoryLockIfNeeded inspects the task's project resources for
@@ -3579,6 +3617,7 @@ func gcMetaForTask(task Task) (execenv.GCMeta, bool) {
 var runtimeDisplayNameOverrides = map[string]string{
 	"traecli": "Trae",
 	"grok":    "Grok",
+	"qwen":    "Qwen Code",
 }
 
 // providerDisplayName returns the human-facing runtime name for a provider key.
@@ -3875,6 +3914,37 @@ func (d *Daemon) startTaskPrepareLeaseExtender(ctx context.Context, task Task, t
 	}
 }
 
+func (d *Daemon) prepareExecutionEnvironment(ctx context.Context, params execenv.PrepareParams) (*execenv.Environment, error) {
+	if d.executionEnvironmentCommand == nil {
+		// Focused runTask tests construct a zero-valued Daemon and keep setup
+		// in-process. Production Daemons created by New always use isolation.
+		return execenv.Prepare(params, d.logger)
+	}
+	command, err := d.executionEnvironmentCommand()
+	if err != nil {
+		return nil, err
+	}
+	return execenv.PrepareIsolated(ctx, command, params, d.logger)
+}
+
+func (d *Daemon) reuseExecutionEnvironment(ctx context.Context, params execenv.ReuseParams) (*execenv.Environment, error) {
+	if d.executionEnvironmentCommand == nil {
+		return execenv.Reuse(params, d.logger), nil
+	}
+	command, err := d.executionEnvironmentCommand()
+	if err != nil {
+		return nil, err
+	}
+	return execenv.ReuseIsolated(ctx, command, params, d.logger)
+}
+
+func (d *Daemon) effectiveTaskPrepareTimeout() time.Duration {
+	if d.taskPrepareTimeout > 0 {
+		return d.taskPrepareTimeout
+	}
+	return defaultTaskPrepareTimeout
+}
+
 func skillRefKey(source, id string) string {
 	return source + "\x00" + id
 }
@@ -3906,7 +3976,7 @@ func skillRefFromBundle(bundle SkillData) SkillRefData {
 	}
 }
 
-func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot int, taskLog *slog.Logger) (TaskResult, error) {
+func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot int, taskLog *slog.Logger) (taskResult TaskResult, returnErr error) {
 	// Refuse to spawn an agent without a workspace. An empty workspace_id
 	// here would make MULTICA_WORKSPACE_ID empty in the agent env, and the
 	// CLI would otherwise silently fall back to the user-global config — a
@@ -3915,6 +3985,21 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.WorkspaceID == "" {
 		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
 	}
+
+	prepareTimeout := d.effectiveTaskPrepareTimeout()
+	prepareCtx, cancelPrepare := context.WithTimeoutCause(ctx, prepareTimeout, errTaskPrepareTimeout)
+	prepareComplete := false
+	defer func() {
+		cancelPrepare()
+		if prepareComplete || returnErr == nil || !errors.Is(context.Cause(prepareCtx), errTaskPrepareTimeout) {
+			return
+		}
+		// Collapse every deadline shape (context deadline, HTTP cancellation,
+		// or the explicit waitForExecutionEnvironment cause) into one sentinel
+		// that handleTask can classify as a retryable platform timeout.
+		taskResult = TaskResult{}
+		returnErr = fmt.Errorf("%w after %s", errTaskPrepareTimeout, prepareTimeout)
+	}()
 
 	// task.Repos is the authoritative repo list for this task — when the
 	// claimed task belongs to a project with github_repo resources the server
@@ -3952,16 +4037,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		// upgrade deleted (MUL-4486). Only reached when no custom profile owns
 		// the launch, so a custom runtime's path is never second-guessed and a
 		// custom-only host pays no wasted re-resolution.
-		entry, resolvedVersion = d.resolveAgentEntry(ctx, provider, entry)
+		entry, resolvedVersion = d.resolveAgentEntry(prepareCtx, provider, entry)
 	}
 	if !ok {
 		return TaskResult{}, fmt.Errorf("no agent configured for provider %q", provider)
 	}
 
-	stopPrepareLease := d.startTaskPrepareLeaseExtender(ctx, task, taskLog)
+	stopPrepareLease := d.startTaskPrepareLeaseExtender(prepareCtx, task, taskLog)
 	defer stopPrepareLease()
 
-	if err := d.ensureTaskSkillBundles(ctx, &task); err != nil {
+	if err := d.ensureTaskSkillBundles(prepareCtx, &task); err != nil {
 		return TaskResult{}, err
 	}
 
@@ -4093,6 +4178,19 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		agentEnvOverrides = task.Agent.CustomEnv
 		agentCustomArgs = task.Agent.CustomArgs
 	}
+	// Effective Codex CLI args the task will launch with, normalized through the
+	// same agent.NormalizeCodexLaunchArgs pipeline buildCodexArgs uses (shell
+	// unquoting + blocked-flag filtering), preserving its ExtraArgs
+	// (profile-fixed + daemon defaults) vs CustomArgs (per-agent custom_args)
+	// split so the filtering matches launch exactly. Threaded into execenv so
+	// the Windows sandbox decision can honor a `-c windows.sandbox=...` override
+	// that never lands in config.toml — even when it arrives shell-quoted —
+	// instead of silently downgrading a user's isolation opt-in (MUL-4957).
+	var codexSandboxArgs []string
+	if provider == "codex" {
+		extraArgs := append(append([]string{}, profileFixedArgs...), defaultArgsForProvider(d.cfg, provider)...)
+		codexSandboxArgs = agent.NormalizeCodexLaunchArgs(extraArgs, agentCustomArgs, effectiveMcpConfig, d.logger)
+	}
 	// Hermes: resolve the overlay source home through one resolver contract —
 	// the selection parsed from custom_args (agent.ParseHermesProfileArgs) plus
 	// the agent's custom_env HERMES_HOME feed execenv.ResolveHermesProfile, which
@@ -4132,7 +4230,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 	}
 	if shouldReusePriorWorkdir(task, localAssignment, d.cfg.WorkspacesRoot) {
-		env = execenv.Reuse(execenv.ReuseParams{
+		var err error
+		env, err = d.reuseExecutionEnvironment(prepareCtx, execenv.ReuseParams{
 			WorkspacesRoot:        d.cfg.WorkspacesRoot,
 			Profile:               d.cfg.Profile,
 			WorkDir:               task.PriorWorkDir,
@@ -4146,8 +4245,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			HermesSourceHome:      hermesSourceHome,
 			HermesSourceMustExist: hermesSourceMustExist,
 			HermesEnv:             hermesEnv,
+			CodexCustomArgs:       codexSandboxArgs,
 			Task:                  taskCtx,
-		}, d.logger)
+		})
+		if err != nil {
+			return TaskResult{}, fmt.Errorf("reuse execution environment: %w", err)
+		}
 	}
 	if env == nil {
 		var err error
@@ -4166,12 +4269,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			HermesSourceHome:      hermesSourceHome,
 			HermesSourceMustExist: hermesSourceMustExist,
 			HermesEnv:             hermesEnv,
+			CodexCustomArgs:       codexSandboxArgs,
 			Task:                  taskCtx,
 		}
 		if localAssignment != nil {
 			prepParams.LocalWorkDir = localAssignment.AbsPath
 		}
-		env, err = execenv.Prepare(prepParams, d.logger)
+		env, err = d.prepareExecutionEnvironment(prepareCtx, prepParams)
 		if err != nil {
 			return TaskResult{}, fmt.Errorf("prepare execution environment: %w", err)
 		}
@@ -4203,11 +4307,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// taskfailure.Classify path records the failure with the same
 	// "start task failed: <…>" string and the same failure_reason
 	// taxonomy as before — see MUL-2946 for the classifier contract.
-	if err := d.client.StartTask(ctx, task.ID); err != nil {
+	if err := d.client.StartTask(prepareCtx, task.ID); err != nil {
 		stopPrepareLease()
 		return TaskResult{}, fmt.Errorf("start task failed: %w", err)
 	}
 	stopPrepareLease()
+	prepareComplete = true
+	cancelPrepare()
 	_ = d.client.ReportProgress(ctx, task.ID, fmt.Sprintf("Launching %s", provider), 1, 2)
 
 	reused := gateResumeToReusedWorkdir(&task, &taskCtx, env.WorkDir, taskLog)
@@ -4531,10 +4637,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		return TaskResult{}, err
 	}
 
-	// Fallback: if session resume failed before establishing a session, retry
-	// with a fresh session. We check SessionID == "" to distinguish a resume
-	// failure (no session established) from a failure during actual execution.
-	if result.Status == "failed" && task.PriorSessionID != "" && result.SessionID == "" {
+	if shouldRetryWithFreshSession(result, task.PriorSessionID, tools, provider) {
 		firstUsage := result.Usage
 		taskLog.Warn("session resume failed, retrying with fresh session", "error", result.Error)
 		execOpts.ResumeSessionID = ""
@@ -4726,6 +4829,103 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			Usage:         usageEntries,
 			FailureReason: failureReason,
 		}, nil
+	}
+}
+
+// shouldRetryWithFreshSession reports whether a failed run that requested
+// --resume should be retried once from a fresh session.
+//
+// Two independent questions have to both answer yes, and conflating them is
+// how this went wrong before:
+//
+//  1. Would a fresh session even fix this? Only if the resume itself was
+//     refused — the transcript is gone, or it belongs to another provider
+//     account. result.ResumeRejected is the backend's positive evidence of
+//     that, and where a backend can produce it, it is the whole answer.
+//     Answering by exclusion alone would invert the burden of proof: the
+//     failures a new session cures are a small enumerable set, while the
+//     ones it cannot are open-ended. A network drop, a 429, a quota trip or
+//     a provider 5xx has nothing to do with the session, so resetting it
+//     discards the one recoverable thing — the conversation pointer — and
+//     re-runs the task for nothing. provider_network in particular is
+//     documented resume-safe in internal/service/task.go (retryableReasons,
+//     MUL-4910): the platform's own retry is supposed to inherit the session
+//     and continue the truncated conversation.
+//
+//     Not every backend can answer, though, and a false ResumeRejected means
+//     different things depending on who produced it: "checked, not a
+//     rejection" from a capable backend, "could not tell" from one of the
+//     five in agent.ResumeRejectionUndetectable. That is why provider is a
+//     parameter — without it the compatibility branch below would silently
+//     apply to every backend, second-guessing capable ones by exclusion.
+//
+//  2. Is re-running safe? Only if the agent executed no tool. tools == 0 does
+//     not prove the run mutated nothing — it proves we observed no tool use,
+//     which is the strongest signal available here — but it is what stands
+//     between a retry and a duplicated side effect. Comment creation has no
+//     idempotency key and a duplicate re-fires its @mention triggers; the
+//     retry also reuses the same workdir, which is never reset between
+//     attempts, so a retry after real work re-plans on top of its own
+//     half-finished commits.
+func shouldRetryWithFreshSession(result agent.Result, priorSessionID string, tools int32, provider string) bool {
+	if result.Status != "failed" || priorSessionID == "" || tools > 0 {
+		return false
+	}
+	// Positive evidence: the backend proved the resume was refused.
+	if result.ResumeRejected {
+		return true
+	}
+	// Everything below is a bounded compatibility path for the backends that
+	// cannot answer question 1 at all. For every other backend a false
+	// ResumeRejected is a real answer — it checked and this was not a
+	// rejection — so the gate stops here rather than second-guessing it by
+	// exclusion.
+	if !agent.ResumeRejectionUndetectable(provider) {
+		return false
+	}
+	// antigravity, copilot, cursor, deveco and opencode scrape SessionID out
+	// of stream output and have no rejection string captured anywhere, so an
+	// empty SessionID is the only thing they can offer. It proves no session
+	// was established this run, which is exactly what the gate relied on for
+	// every backend before ResumeRejected existed; keeping it preserves their
+	// recovery instead of silently removing it.
+	//
+	// Inventing rejection phrases for these five would be the alternative,
+	// and it is worse: no real output has been captured for any of them, and
+	// a false positive discards a recoverable session pointer.
+	return result.SessionID == "" && freshSessionMayHelp(result.Error)
+}
+
+// freshSessionMayHelp reports whether restarting the conversation could
+// plausibly fix errText. It answers "is this failure about the session at
+// all?", so every reason with a defined non-session remedy — wait, back off,
+// top up, re-auth, fix the config, install the binary — is excluded. Those
+// keep the session pointer so the platform's own retry can resume the
+// truncated conversation.
+//
+// What is left through is deliberately narrow: unknown, process failure and
+// unparseable output. A real resume rejection from one of these backends most
+// likely surfaces as exactly that — a non-zero exit or output we cannot
+// parse — since none of them reports one explicitly. Context overflow is also
+// allowed through, as starting over genuinely can clear it.
+func freshSessionMayHelp(errText string) bool {
+	switch taskfailure.Classify(errText) {
+	case taskfailure.ReasonAgentProviderNetwork,
+		taskfailure.ReasonAgentProviderCapacityOrRateLimit,
+		taskfailure.ReasonAgentProviderQuotaLimit,
+		taskfailure.ReasonAgentProviderServerError,
+		taskfailure.ReasonAgentProviderAuthOrAccess,
+		taskfailure.ReasonAgentMissingConfig,
+		taskfailure.ReasonAgentModelNotFoundOrUnavailable,
+		taskfailure.ReasonAgentRuntimeMissingExecutable,
+		taskfailure.ReasonAgentRuntimeVersionUnsupported,
+		// Defensive: a timeout normally carries its own terminal status and
+		// never reaches this gate, but if one is ever classified out of a
+		// "failed" result, re-running the whole task is not the answer.
+		taskfailure.ReasonAgentTimeout:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -5546,6 +5746,8 @@ func defaultArgsForProvider(cfg Config, provider string) []string {
 		args = cfg.CodexArgs
 	case "codebuddy":
 		args = cfg.CodebuddyArgs
+	case "qwen":
+		args = cfg.QwenArgs
 	default:
 		return nil
 	}

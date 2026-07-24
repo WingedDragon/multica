@@ -3,6 +3,7 @@ import type {
   Agent,
   AgentTemplate,
   AgentTemplateSummary,
+  AgentBuilderRuntimeSwitch,
   AgentBuilderSession,
   Attachment,
   AutopilotRun,
@@ -32,6 +33,10 @@ import type {
   IssueProperty,
   ListPropertiesResponse,
   IssuePropertiesResponse,
+  IssueTableGroupDescriptor,
+  IssueTableFacetsResponse,
+  IssueTableGroupsResponse,
+  IssueTableRowsResponse,
   ListIssuesResponse,
   ListLabelsResponse,
   ListGitLabMergeRequestsResponse,
@@ -642,15 +647,124 @@ export const EMPTY_GROUPED_ISSUES_RESPONSE: GroupedIssuesResponse = {
   groups: [],
 };
 
-const SubscriberSchema = z
-  .object({
-    issue_id: z.string(),
-    user_type: z.string(),
-    user_id: z.string(),
-    reason: z.string(),
-    created_at: z.string(),
-  })
-  .loose();
+const IssueTableActorRefSchema = z.object({
+  // Server-driven enums stay open so installed desktop clients survive a
+  // backend that introduces another actor kind.
+  type: z.string(),
+  id: z.string(),
+}).loose();
+
+const IssueTableParentRefSchema = z.object({
+  id: z.string(),
+  number: z.number(),
+  identifier: z.string(),
+  title: z.string(),
+  status: z.string(),
+}).loose();
+
+const IssueTableGroupValueSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("status"),
+    status: z.string(),
+  }).loose(),
+  z.object({
+    kind: z.literal("assignee"),
+    actor: IssueTableActorRefSchema.nullable(),
+  }).loose(),
+  z.object({
+    kind: z.literal("project"),
+    project_id: z.string().nullable().optional().default(null),
+  }).loose(),
+  z.object({
+    kind: z.literal("parent"),
+    parent_id: z.string().nullable().optional().default(null),
+    parent: IssueTableParentRefSchema.nullable().optional().default(null),
+    value_state: z.enum(["value", "unavailable", "unset"]),
+  }).loose(),
+  z.object({
+    kind: z.literal("property"),
+    property_id: z.string(),
+    value: z.union([z.string(), z.boolean(), z.null()]).optional(),
+    value_state: z.enum(["value", "unavailable", "unset"]),
+  }).loose(),
+]);
+
+const IssueTableGroupDescriptorSchema: z.ZodType<IssueTableGroupDescriptor> = z.lazy(() => z.object({
+  key: z.string(),
+  value: IssueTableGroupValueSchema,
+  count: z.number(),
+  secondary_groups: z.array(IssueTableGroupDescriptorSchema).optional(),
+}).loose());
+
+export const IssueTableGroupsResponseSchema = z.object({
+  query_fingerprint: z.string(),
+  total: z.number(),
+  groups: z.array(IssueTableGroupDescriptorSchema).default([]),
+  next_cursor: z.string().nullable().default(null),
+}).loose();
+
+export const EMPTY_ISSUE_TABLE_GROUPS_RESPONSE: IssueTableGroupsResponse = {
+  query_fingerprint: "",
+  total: 0,
+  groups: [],
+  next_cursor: null,
+};
+
+const IssueTableRowSchema = z.object({
+  issue: IssueSchema,
+  direct_child_count: z.number().default(0),
+}).loose();
+
+export const IssueTableRowsResponseSchema = z.object({
+  query_fingerprint: z.string(),
+  group_key: z.string().nullable().default(null),
+  parent_id: z.string().nullable().default(null),
+  total: z.number(),
+  rows: z.array(IssueTableRowSchema).default([]),
+  branch_total: z.number(),
+  next_cursor: z.string().nullable().default(null),
+}).loose();
+
+export const EMPTY_ISSUE_TABLE_ROWS_RESPONSE: IssueTableRowsResponse = {
+  query_fingerprint: "",
+  group_key: null,
+  parent_id: null,
+  total: 0,
+  rows: [],
+  branch_total: 0,
+  next_cursor: null,
+};
+
+const IssueTableFacetValueSchema = z.object({
+  key: z.string(),
+  count: z.number(),
+}).loose();
+
+const IssueTableFacetSchema = z.object({
+  kind: z.enum(["status", "priority", "assignee", "creator", "project", "label", "property"]),
+  property_id: z.string().optional(),
+  values: z.array(IssueTableFacetValueSchema).default([]),
+}).loose();
+
+export const IssueTableFacetsResponseSchema = z.object({
+  query_fingerprint: z.string(),
+  total: z.number(),
+  facets: z.array(IssueTableFacetSchema).default([]),
+}).loose();
+
+export const EMPTY_ISSUE_TABLE_FACETS_RESPONSE: IssueTableFacetsResponse = {
+  query_fingerprint: "",
+  total: 0,
+  facets: [],
+};
+
+const SubscriberSchema = z.object({
+  issue_id: z.string(),
+  user_type: z.string(),
+  user_id: z.string(),
+  reason: z.string(),
+  created_at: z.string(),
+}).loose();
 
 export const SubscribersListSchema = z.array(SubscriberSchema);
 
@@ -709,33 +823,51 @@ export const EMPTY_CLOUD_RUNTIME_NODE: CloudRuntimeNode = {
 // only that row instead of dropping the whole array to the `[]` fallback.
 // ---------------------------------------------------------------------------
 
-const DashboardUsageDailySchema = z
-  .object({
-    date: z.string().default(""),
-    provider: z.string().default(""),
-    model: z.string().default(""),
-    input_tokens: z.number().default(0),
-    output_tokens: z.number().default(0),
-    cache_read_tokens: z.number().default(0),
-    cache_write_tokens: z.number().default(0),
-    task_count: z.number().default(0),
-  })
-  .loose();
+// Cost split carried by every usage row. `cost_usd_ticks` is what the provider
+// itself charged for the rows behind this aggregate (1e-10 USD); the
+// `uncosted_*` counts are the tokens from rows the provider did NOT price, and
+// so are the only ones the client should run through its rate table.
+//
+// The `uncosted_*` fields are deliberately `.optional()` rather than
+// `.default(0)`: a backend that predates them sends nothing, and defaulting
+// those rows to "0 tokens left to estimate" would silently zero their cost.
+// `undefined` means "this backend doesn't split", and the consumer falls back
+// to the full token counts — i.e. exactly the old behaviour. A real 0 from a
+// current backend means "everything here is already priced", which is a
+// different thing and must stay distinguishable.
+const CostSplitShape = {
+  cost_usd_ticks: z.number().optional(),
+  uncosted_input_tokens: z.number().optional(),
+  uncosted_output_tokens: z.number().optional(),
+  uncosted_cache_read_tokens: z.number().optional(),
+  uncosted_cache_write_tokens: z.number().optional(),
+};
+
+const DashboardUsageDailySchema = z.object({
+  date: z.string().default(""),
+  provider: z.string().default(""),
+  model: z.string().default(""),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
+  task_count: z.number().default(0),
+}).loose();
 
 export const DashboardUsageDailyListSchema = z.array(DashboardUsageDailySchema);
 
-const DashboardUsageByAgentSchema = z
-  .object({
-    agent_id: z.string().default(""),
-    provider: z.string().default(""),
-    model: z.string().default(""),
-    input_tokens: z.number().default(0),
-    output_tokens: z.number().default(0),
-    cache_read_tokens: z.number().default(0),
-    cache_write_tokens: z.number().default(0),
-    task_count: z.number().default(0),
-  })
-  .loose();
+const DashboardUsageByAgentSchema = z.object({
+  agent_id: z.string().default(""),
+  provider: z.string().default(""),
+  model: z.string().default(""),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
+  task_count: z.number().default(0),
+}).loose();
 
 export const DashboardUsageByAgentListSchema = z.array(
   DashboardUsageByAgentSchema,
@@ -774,18 +906,17 @@ export const DashboardRunTimeDailyListSchema = z.array(
 // unknown fields.
 // ---------------------------------------------------------------------------
 
-const RuntimeUsageSchema = z
-  .object({
-    runtime_id: z.string().default(""),
-    date: z.string().default(""),
-    provider: z.string().default(""),
-    model: z.string().default(""),
-    input_tokens: z.number().default(0),
-    output_tokens: z.number().default(0),
-    cache_read_tokens: z.number().default(0),
-    cache_write_tokens: z.number().default(0),
-  })
-  .loose();
+const RuntimeUsageSchema = z.object({
+  runtime_id: z.string().default(""),
+  date: z.string().default(""),
+  provider: z.string().default(""),
+  model: z.string().default(""),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
+}).loose();
 
 export const RuntimeUsageListSchema = z.array(RuntimeUsageSchema);
 
@@ -800,32 +931,30 @@ export const RuntimeHourlyActivityListSchema = z.array(
   RuntimeHourlyActivitySchema,
 );
 
-const RuntimeUsageByAgentSchema = z
-  .object({
-    agent_id: z.string().default(""),
-    provider: z.string().default(""),
-    model: z.string().default(""),
-    input_tokens: z.number().default(0),
-    output_tokens: z.number().default(0),
-    cache_read_tokens: z.number().default(0),
-    cache_write_tokens: z.number().default(0),
-    task_count: z.number().default(0),
-  })
-  .loose();
+const RuntimeUsageByAgentSchema = z.object({
+  agent_id: z.string().default(""),
+  provider: z.string().default(""),
+  model: z.string().default(""),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
+  task_count: z.number().default(0),
+}).loose();
 
 export const RuntimeUsageByAgentListSchema = z.array(RuntimeUsageByAgentSchema);
 
-const RuntimeUsageByHourSchema = z
-  .object({
-    hour: z.number().default(0),
-    model: z.string().default(""),
-    input_tokens: z.number().default(0),
-    output_tokens: z.number().default(0),
-    cache_read_tokens: z.number().default(0),
-    cache_write_tokens: z.number().default(0),
-    task_count: z.number().default(0),
-  })
-  .loose();
+const RuntimeUsageByHourSchema = z.object({
+  hour: z.number().default(0),
+  model: z.string().default(""),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
+  task_count: z.number().default(0),
+}).loose();
 
 export const RuntimeUsageByHourListSchema = z.array(RuntimeUsageByHourSchema);
 
@@ -1120,6 +1249,20 @@ export const EMPTY_AGENT_BUILDER_SESSION: AgentBuilderSession = {
   builder_agent_id: "",
   runtime_id: "",
 };
+
+export const AgentBuilderRuntimeSwitchSchema = z.object({
+  runtime_id: z.string(),
+}).loose();
+
+// This endpoint returns 2xx only after the carrier has been bound to the
+// runtime the caller asked for; anything else is a thrown error and no commit.
+// So the safe fallback for an unparseable SUCCESS body is the requested id, not
+// an empty one: the rebind did happen, and reporting "unknown" would leave the
+// picker showing a runtime that is no longer executing — the exact split this
+// endpoint exists to close.
+export const agentBuilderRuntimeSwitchFallback = (
+  requestedRuntimeID: string,
+): AgentBuilderRuntimeSwitch => ({ runtime_id: requestedRuntimeID });
 
 // Squad list responses carry lightweight membership previews used by hover
 // cards. The preview fields are additive API fields, so older backends default

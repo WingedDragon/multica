@@ -29,6 +29,9 @@ require_line '-p "OOMPolicy=kill"'
 require_line '-p "CPUQuota=100%"'
 require_line '-p "Nice=10"'
 require_line '-p "IOWeight=50"'
+require_line 'REMOTE_API_URL is required'
+require_line '"$PUBLIC_URL/auth/send-code"'
+require_line '"email is required"'
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

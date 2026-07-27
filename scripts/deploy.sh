@@ -44,7 +44,7 @@ setup_toolchain() {
     corepack enable
   fi
 
-  for cmd in git pnpm go make sudo; do
+  for cmd in curl git pnpm go make sudo; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       echo "ERROR: missing required command: $cmd" >&2
       echo "PATH=$PATH" >&2
@@ -57,6 +57,22 @@ setup_toolchain
 
 FRONTEND_SERVICE="multica-frontend"
 BACKEND_SERVICE="multica-backend"
+ENV_FILE="$REPO_ROOT/.env"
+
+remote_api_line="$(grep -E '^REMOTE_API_URL=' "$ENV_FILE" 2>/dev/null | tail -n 1 || true)"
+remote_api_url="${remote_api_line#*=}"
+remote_api_url="${remote_api_url%\"}"
+remote_api_url="${remote_api_url#\"}"
+remote_api_url="${remote_api_url%\'}"
+remote_api_url="${remote_api_url#\'}"
+case "$remote_api_url" in
+  http://*|https://*) ;;
+  *)
+    echo "ERROR: REMOTE_API_URL is required in $ENV_FILE for frontend auth/API proxying." >&2
+    echo "       Example: REMOTE_API_URL=http://127.0.0.1:8080" >&2
+    exit 2
+    ;;
+esac
 
 OLD_SHA="$(git rev-parse HEAD)"
 echo "==> Repo:       $REPO_ROOT"
@@ -198,6 +214,27 @@ sudo systemctl restart "$FRONTEND_SERVICE"
 
 sleep 2
 sudo systemctl --no-pager status "$BACKEND_SERVICE" "$FRONTEND_SERVICE" | sed 's/^/    /'
+
+auth_probe_body="$(mktemp)"
+auth_probe_status=0
+if ! auth_probe_status="$(curl --noproxy '*' --max-time 20 -sS \
+  -o "$auth_probe_body" \
+  -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -X POST "$PUBLIC_URL/auth/send-code" \
+  --data '{}')"; then
+  echo "ERROR: auth route smoke test failed to reach $PUBLIC_URL/auth/send-code" >&2
+  rm -f "$auth_probe_body"
+  exit 4
+fi
+if [ "$auth_probe_status" != "400" ] || ! grep -Fq '"email is required"' "$auth_probe_body"; then
+  echo "ERROR: auth route smoke test failed: expected backend validation response, got HTTP $auth_probe_status" >&2
+  sed -n '1,20p' "$auth_probe_body" >&2
+  rm -f "$auth_probe_body"
+  exit 4
+fi
+rm -f "$auth_probe_body"
+echo "    Auth route smoke: POST /auth/send-code -> HTTP 400 backend validation"
 
 echo ""
 echo "OK: deploy complete. Deployed $NEW_SHA"

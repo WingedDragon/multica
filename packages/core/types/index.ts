@@ -191,6 +191,9 @@ export type {
   GitHubMergeableState,
   GitHubPullRequest,
   GitHubPullRequestChecksConclusion,
+  GitHubPullRequestChecksRollup,
+  GitHubPullRequestMergeable,
+  GitHubPullRequestMergeStateStatus,
   GitHubPullRequestState,
   ListGitHubInstallationsResponse,
   GitHubConnectResponse,
@@ -214,6 +217,13 @@ export type {
   GitLabUserRef,
   ListGitLabMergeRequestsResponse,
 } from "./gitlab";
+export type {
+  VCSProvider,
+  VCSConnection,
+  ListVCSConnectionsResponse,
+  ConnectVCSRequest,
+  ConnectVCSResponse,
+} from "./vcs";
 export type {
   LarkInstallation,
   ListLarkInstallationsResponse,

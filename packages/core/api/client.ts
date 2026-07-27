@@ -142,6 +142,9 @@ import type {
   GitLabMergeRequestDetailsResponse,
   GitLabProjectRefreshResponse,
   ListGitLabMergeRequestsResponse,
+  ListVCSConnectionsResponse,
+  ConnectVCSRequest,
+  ConnectVCSResponse,
   ListLarkInstallationsResponse,
   BeginLarkInstallResponse,
   LarkInstallStatusResponse,
@@ -287,6 +290,8 @@ import {
   EMPTY_ISSUE_PROPERTY,
   EMPTY_LIST_PROPERTIES_RESPONSE,
   EMPTY_ISSUE_PROPERTIES_RESPONSE,
+  EMPTY_ISSUE_PULL_REQUESTS_RESPONSE,
+  IssuePullRequestsResponseSchema,
   ResourceLabelsResponseSchema,
   EMPTY_LABEL,
   EMPTY_LIST_LABELS_RESPONSE,
@@ -2822,7 +2827,44 @@ export class ApiClient {
   }
 
   async listIssuePullRequests(issueId: string): Promise<{ pull_requests: GitHubPullRequest[] }> {
-    return this.fetch(`/api/issues/${issueId}/pull-requests`);
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/pull-requests`);
+    return parseWithFallback(
+      raw,
+      IssuePullRequestsResponseSchema,
+      EMPTY_ISSUE_PULL_REQUESTS_RESPONSE,
+      { endpoint: "GET /api/issues/:id/pull-requests" },
+    );
+  }
+
+  // VCS integration (Forgejo / Gitea / GitLab)
+  async listVCSConnections(workspaceId: string): Promise<ListVCSConnectionsResponse> {
+    return this.fetch(`/api/workspaces/${workspaceId}/vcs/connections`);
+  }
+
+  async connectVCS(
+    workspaceId: string,
+    body: ConnectVCSRequest,
+  ): Promise<ConnectVCSResponse> {
+    return this.fetch(`/api/workspaces/${workspaceId}/vcs/connections`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async deleteVCSConnection(workspaceId: string, connectionId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/vcs/connections/${connectionId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async rotateVCSWebhook(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<ConnectVCSResponse> {
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/vcs/connections/${connectionId}/rotate-webhook`,
+      { method: "POST" },
+    );
   }
 
   // GitLab integration

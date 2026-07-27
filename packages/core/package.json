@@ -91,6 +91,8 @@
     "./github/queries": "./github/queries.ts",
     "./gitlab": "./gitlab/index.ts",
     "./gitlab/queries": "./gitlab/queries.ts",
+    "./vcs": "./vcs/index.ts",
+    "./vcs/queries": "./vcs/queries.ts",
     "./lark": "./lark/index.ts",
     "./lark/queries": "./lark/queries.ts",
     "./composio": "./composio/index.ts",

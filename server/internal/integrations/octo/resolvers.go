@@ -176,7 +176,13 @@ func (r *deduper) Release(ctx context.Context, installationID pgtype.UUID, messa
 	return err
 }
 
-type sessionBinder struct{ session *engine.ChatSession }
+type chatSession interface {
+	EnsureSession(ctx context.Context, in engine.EnsureSessionInput) (pgtype.UUID, error)
+	AppendUserMessage(ctx context.Context, in engine.AppendInput) (engine.AppendResult, error)
+	BindMediaRefs(ctx context.Context, in engine.BindMediaInput) error
+}
+
+type sessionBinder struct{ session chatSession }
 
 func (r *sessionBinder) EnsureSession(ctx context.Context, p engine.EnsureSessionParams) (pgtype.UUID, error) {
 	bindingKey, config := octoSessionRouting(p.Message)
@@ -193,14 +199,25 @@ func (r *sessionBinder) EnsureSession(ctx context.Context, p engine.EnsureSessio
 
 func (r *sessionBinder) AppendMessage(ctx context.Context, p engine.AppendParams) (engine.AppendResult, error) {
 	return r.session.AppendUserMessage(ctx, engine.AppendInput{
-		SessionID:      p.SessionID,
-		Sender:         p.Sender,
-		InstallationID: p.InstallationID,
-		Body:           p.Message.Text,
-		CommandText:    p.Message.Text,
-		MessageID:      p.Message.MessageID,
-		ThreadID:       p.Message.Source.ThreadID,
-		ClaimToken:     p.ClaimToken,
+		SessionID:           p.SessionID,
+		Sender:              p.Sender,
+		InstallationID:      p.InstallationID,
+		Body:                p.Message.Text,
+		CommandText:         p.Message.Text,
+		MessageID:           p.Message.MessageID,
+		ThreadID:            p.Message.Source.ThreadID,
+		ClaimToken:          p.ClaimToken,
+		MediaPendingSeconds: p.MediaPendingSeconds,
+	})
+}
+
+func (r *sessionBinder) BindMedia(ctx context.Context, p engine.BindMediaParams) error {
+	return r.session.BindMediaRefs(ctx, engine.BindMediaInput{
+		MessageID:   p.MessageID,
+		SessionID:   p.SessionID,
+		WorkspaceID: p.WorkspaceID,
+		Sender:      p.Sender,
+		MediaRefs:   p.MediaRefs,
 	})
 }
 

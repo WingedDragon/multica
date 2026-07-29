@@ -300,6 +300,9 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if e, ok := probe("MULTICA_PI_PATH", "pi", "MULTICA_PI_MODEL"); ok {
 		agents["pi"] = e
 	}
+	if e, ok := probe("MULTICA_OMP_PATH", "omp", "MULTICA_OMP_MODEL"); ok {
+		agents["omp"] = e
+	}
 	if e, ok := probe("MULTICA_CURSOR_PATH", "cursor-agent", "MULTICA_CURSOR_MODEL"); ok {
 		agents["cursor"] = e
 	}
@@ -349,7 +352,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		agents["qwen"] = e
 	}
 	if len(agents) == 0 && !overrides.AllowNoAgents {
-		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor-agent, kimi, kiro-cli, agy, qodercli, traecli, grok, or qwen and ensure it is on PATH")
+		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, omp, cursor-agent, kimi, kiro-cli, agy, qodercli, traecli, grok, or qwen and ensure it is on PATH")
 	}
 
 	claudeArgs, err := shellArgsFromEnv("MULTICA_CLAUDE_ARGS")
@@ -863,7 +866,7 @@ func isExecutableFile(path string) bool {
 // invocation, instead of paying the cost-per-miss.
 var defaultAgentCommandNames = []string{
 	"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
-	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "traecli", "grok", "qwen",
+	"pi", "omp", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "traecli", "grok", "qwen",
 }
 
 // codexDesktopAppBundlePaths returns candidate macOS app-bundle locations for

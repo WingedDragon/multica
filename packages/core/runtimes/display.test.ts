@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runtimeDisplayLabel, runtimeDisplayName } from "./display";
+import { providerDisplayName, runtimeDisplayLabel, runtimeDisplayName } from "./display";
 
 describe("runtimeDisplayName", () => {
   it("prefers a custom name when set", () => {
@@ -79,6 +79,17 @@ describe("runtimeDisplayLabel", () => {
         provider: "qwen",
       }),
     ).toBe("box (Qwen Code)");
+  });
+
+  it("uses OMP as the provider display name", () => {
+    expect(providerDisplayName("omp")).toBe("OMP");
+    expect(
+      runtimeDisplayLabel({
+        name: "OMP (host)",
+        custom_name: "box",
+        provider: "omp",
+      }),
+    ).toBe("box (OMP)");
   });
 
   it("first-letter-capitalizes non-overridden slugs, matching the daemon", () => {

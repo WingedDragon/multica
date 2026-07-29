@@ -1,11 +1,11 @@
 ---
 title: AI 코딩 도구 대조표
-description: Multica는 16개의 AI 코딩 도구를 지원합니다. 모두 동일한 인터페이스를 구현하지만, 기능 세부사항은 크게 다릅니다.
+description: Multica는 17개의 AI 코딩 도구를 지원합니다. 모두 동일한 인터페이스를 구현하지만, 기능 세부사항은 크게 다릅니다.
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Multica는 **16개의 AI 코딩 도구**를 기본 지원합니다. 이들은 모두 동일한 인터페이스(대기열 적재, 디스패치, 실행, 결과 반환)를 구현하므로, 같은 Multica 보드에서 어느 것이든 구동할 수 있습니다. **하지만 기능 세부사항은 크게 다릅니다**: 세션 재개가 실제로 동작하는지, MCP를 지원하는지, 스킬 파일이 어디에 위치하는지, 모델을 어떻게 선택하는지. 이 페이지가 전체 대조표입니다.
+Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 모두 동일한 인터페이스(대기열 적재, 디스패치, 실행, 결과 반환)를 구현하므로, 같은 Multica 보드에서 어느 것이든 구동할 수 있습니다. **하지만 기능 세부사항은 크게 다릅니다**: 세션 재개가 실제로 동작하는지, MCP를 지원하는지, 스킬 파일이 어디에 위치하는지, 모델을 어떻게 선택하는지. 이 페이지가 전체 대조표입니다.
 
 에이전트를 생성할 때 도구를 고르는 방법은 [에이전트 생성 및 구성](/agents-create)을 참고하세요.
 
@@ -26,6 +26,7 @@ Multica는 **16개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | **DevEco Code** | Huawei(화웨이) | ✅ | ❌ | `.deveco/skills/` | 동적 탐색(`deveco models`) |
 | **OpenClaw** | 오픈소스 | ✅ | ✅ | `.agent_context/skills/` (fallback) | 에이전트에 바인딩되어 작업마다 전환 불가 |
 | **Pi** | Inflection AI | ✅ (세션이 파일 경로) | ❌ | `.pi/skills/` | 동적 탐색 |
+| **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.pi/skills/` | 동적 탐색(`omp models --json`) |
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | 동적 탐색 |
 | **Trae CLI** | ByteDance | ✅ (ACP `session/load`) | ✅ | `.traecli/skills/` | 동적 탐색 |
 | **Grok** | xAI | ✅ (ACP `session/load`) | ✅ | `.grok/skills/` | 동적 탐색(ACP `session/new`) |
@@ -92,6 +93,12 @@ SST에서 제공하는 오픈소스입니다. 사용 가능한 모델과 모델 
 
 Inflection AI에서 제공하며, 미니멀합니다. **세션 재개 방식이 특이합니다** — 세션 ID가 문자열 ID가 아니라 디스크상의 파일 경로(`~/.pi/...`)입니다. 다른 도구에서는 재개 id가 CLI가 반환하는 문자열이지만, Pi에서는 재개 id가 세션 파일 그 자체입니다.
 
+### OMP
+
+[Oh My Pi](https://omp.sh)는 독립적인 코딩 에이전트이며, **Pi의 별칭이 아닙니다**. Multica는 `omp -p --mode json --session-dir <dir>`를 비대화형으로 실행하고 Pi 호환 JSON 이벤트 스트림을 읽습니다. 이벤트가 반환하는 문자열 session ID는 다음 작업에서 `--resume <id>`로 전달되어 세션을 재개합니다. 모델과 지원되는 thinking level은 `omp models --json`에서 동적으로 탐색되며, 선택된 model selector는 `--model`, thinking level은 `--thinking`으로 전달됩니다. 할당된 워크스페이스 스킬은 OMP의 네이티브 탐색을 위해 `.pi/skills/`에 기록됩니다.
+
+OMP를 활성화하려면 먼저 OMP를 설치하고 인증한 뒤 daemon의 `PATH`에서 `omp`를 찾을 수 있게 하거나, `MULTICA_OMP_PATH`에 절대 실행 경로를 설정하세요. daemon을 다시 시작하거나 새로 고쳐 런타임을 재탐색합니다. OMP selector를 `MULTICA_OMP_MODEL`로 설정하면 daemon 전체의 기본 모델이 되고, 개별 에이전트에서는 동적으로 발견된 selector를 선택할 수 있습니다. OMP는 현재 에이전트의 `mcp_config`를 무시합니다.
+
 ### Qoder
 
 Alibaba에서 제공합니다. 에이전트형 코딩 CLI입니다. stdio 위에서 ACP 프로토콜을 사용합니다(Hermes, Kimi, Kiro CLI와 전송 계층을 공유합니다). 세션 재개는 ACP `session/resume`를 통해 동작하고, MCP 구성은 ACP `mcpServers`로 전달되며, 모델 선택은 동적으로 탐색되고, 스킬은 네이티브 탐색을 위해 `.qoder/skills/`로 복사됩니다.
@@ -110,7 +117,7 @@ xAI의 Grok Build CLI(`grok`)입니다. Multica는 `grok --no-auto-update agent 
 
 ## MCP 구성: 도구별 지원
 
-**16개 도구 중 `mcp_config`를 실제로 소비하는 것은 12개입니다: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Trae CLI, Grok**. 나머지 4개(Antigravity, Copilot, DevEco Code, Pi)는 이 필드를 받아들이지만 **무시합니다** — 오류도, 경고도 없으며, 구성이 그저 효과를 내지 못합니다.
+**17개 도구 중 `mcp_config`를 실제로 소비하는 것은 12개입니다: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Trae CLI, Grok**. 나머지 5개(Antigravity, Copilot, DevEco Code, Pi, OMP)는 이 필드를 받아들이지만 **무시합니다** — 오류도, 경고도 없으며, 구성이 그저 효과를 내지 못합니다.
 
 각 도구의 연결 방식은 다릅니다: Claude Code와 CodeBuddy는 `--mcp-config`와 `--strict-mcp-config`로 받고, Codex는 데몬이 관리하는 `mcp_servers` 블록을 작업별 `$CODEX_HOME/config.toml`에 기록하며, Cursor는 `.cursor/mcp.json`과 작업별 `CURSOR_DATA_DIR` 아래의 프로젝트 approval을 기록합니다. Hermes/Kimi/Kiro CLI/Qoder/Trae CLI/Grok은 ACP `mcpServers`로 받습니다. OpenCode는 `OPENCODE_CONFIG_CONTENT` 환경 변수로 인라인 구성을 받고, OpenClaw는 Multica의 작업별 config wrapper를 통해 `mcp.servers`를 받습니다. OpenCode 경로는 프로젝트의 `opencode.json`을 다시 쓰지 않습니다.
 
@@ -134,6 +141,7 @@ xAI의 Grok Build CLI(`grok`)입니다. Multica는 `grok --no-auto-update agent 
 | OpenCode | `.opencode/skills/` | ✅ 기본 |
 | DevEco Code | `.deveco/skills/` | ✅ 기본 |
 | Pi | `.pi/skills/` | ✅ 기본 |
+| OMP | `.pi/skills/` | ✅ 기본 |
 | Qoder | `.qoder/skills/` | ✅ 기본 |
 | Trae CLI | `.traecli/skills/` | ✅ 기본 |
 | Grok | `.grok/skills/` | ✅ 기본 |
@@ -152,4 +160,4 @@ fallback 경로를 쓰는 도구가 실제로 이 디렉터리를 읽는지는 �
 - [에이전트 생성 및 구성](/agents-create) — 에이전트에 사용할 도구를 선택하세요
 - [작업](/tasks) — 작업 생명주기와 세션 재개 메커니즘
 - [데몬과 런타임](/daemon-runtimes) — 도구가 실행되는 곳과 Multica에 연결되는 방식
-- [에이전트 런타임 설치](/install-agent-runtime) — 지원되는 16개 도구 각각의 설치 및 인증
+- [에이전트 런타임 설치](/install-agent-runtime) — 지원되는 17개 도구 각각의 설치 및 인증

@@ -1,11 +1,11 @@
 ---
 title: AI coding tools matrix
-description: Multica supports 17 AI coding tools; they implement the same interface, but the capability details diverge significantly.
+description: Multica supports 18 AI coding tools; they implement the same interface, but the capability details diverge significantly.
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Multica ships with built-in support for **17 AI coding tools**. They all implement the same interface — queue, dispatch, execute, return results — so you can drive any of them from the same Multica board. **But the capability details diverge significantly**: whether session resumption actually works, whether MCP is supported, where skill files live, how models are selected. This page is the full matrix.
+Multica ships with built-in support for **18 AI coding tools**. They all implement the same interface — queue, dispatch, execute, return results — so you can drive any of them from the same Multica board. **But the capability details diverge significantly**: whether session resumption actually works, whether MCP is supported, where skill files live, how models are selected. This page is the full matrix.
 
 For guidance on picking a tool when creating an agent, see [Creating and configuring agents](/agents-create).
 
@@ -26,6 +26,7 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | **DevEco Code** | Huawei | ✅ | ❌ | `.deveco/skills/` | Dynamic discovery (`deveco models`) |
 | **OpenClaw** | Open source | ✅ | ✅ | `.agent_context/skills/` (fallback) | Bound to the agent, can't be switched per task |
 | **Pi** | Inflection AI | ✅ (session is a file path) | ❌ | `.pi/skills/` | Dynamic discovery |
+| **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.pi/skills/` | Dynamic discovery (`omp models --json`) |
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | Dynamic discovery |
 | **Qwen Code** | Alibaba | ✅ (`--resume <id>`) | ✅ | `.qwen/skills/` | Runtime default or manual `--model` |
 | **Trae** | ByteDance | ✅ (ACP `session/load`) | ✅ | `.traecli/skills/` | Dynamic discovery |
@@ -93,6 +94,12 @@ Open-source project, a CLI agent orchestrator. MCP config is materialized throug
 
 From Inflection AI, minimalist. **Session resumption is unusual** — the session ID is a file path on disk (`~/.pi/...`) rather than a string ID. In other tools, the resume id is a string returned by the CLI; in Pi, the resume id is the session file itself.
 
+### OMP
+
+[Oh My Pi](https://omp.sh) is a standalone coding agent, **not a Pi alias**. Multica launches it non-interactively as `omp -p --mode json --session-dir <dir>`, reads its Pi-compatible JSON event stream, and saves the emitted string session ID for `--resume <id>` on the next task. Models and their supported thinking levels are discovered from `omp models --json`; Multica sends the selected model selector with `--model` and the selected level with `--thinking`. Assigned workspace skills are written to `.pi/skills/` for OMP's native discovery.
+
+To enable OMP, install and authenticate it first, then make `omp` available on the daemon's `PATH` or set `MULTICA_OMP_PATH` to its absolute executable path. Restart or refresh the daemon so it detects the runtime. Set `MULTICA_OMP_MODEL` to an OMP selector to choose a daemon-wide default, or choose a discovered selector for an individual agent. OMP currently ignores an agent's `mcp_config`.
+
 ### Qoder
 
 From Alibaba. An agentic coding CLI. Uses the ACP protocol over stdio (shares a transport with Hermes, Kimi, and Kiro CLI). Session resumption works through ACP `session/resume`, MCP config is passed through ACP `mcpServers`, model selection is discovered dynamically, and skills are copied into `.qoder/skills/` for native discovery.
@@ -124,12 +131,12 @@ The session resumption mechanism is covered in [Tasks](/tasks#can-a-task-continu
 
 ## MCP configuration: provider-specific support
 
-**Of the 17 tools, thirteen consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Qwen Code, Trae, and Grok**. The other four (Antigravity, Copilot, DevEco Code, Pi) accept the field but **ignore it** — no error, no warning, the config just has no effect.
+**Of the 18 tools, thirteen consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Qwen Code, Trae, and Grok**. The other five (Antigravity, Copilot, DevEco Code, Pi, and OMP) accept the field but **ignore it** — no error, no warning, the config just has no effect.
 
 The runtime paths are provider-specific: Claude Code, CodeBuddy, and Qwen Code receive it through daemon-owned temporary JSON files passed with `--mcp-config` (mode `0600` on POSIX systems because MCP configs may embed API tokens); Claude Code and CodeBuddy additionally use `--strict-mcp-config`; Codex writes a daemon-managed `mcp_servers` block into the per-task `$CODEX_HOME/config.toml`; Cursor writes `.cursor/mcp.json` plus per-task project approvals under `CURSOR_DATA_DIR`; Hermes, Kimi, Kiro CLI, Qoder, Trae, and Grok receive ACP `mcpServers`; OpenCode receives inline config through `OPENCODE_CONFIG_CONTENT`; OpenClaw receives `mcp.servers` through Multica's per-task config wrapper. OpenCode's path does **not** rewrite the project's `opencode.json`.
 
 <Callout type="warning">
-If you set `mcp_config` in an agent configuration but pick a tool not marked ✅ in the MCP column, your MCP servers have no effect on Antigravity, Copilot, DevEco Code, or Pi.
+If you set `mcp_config` in an agent configuration but pick a tool not marked ✅ in the MCP column, your MCP servers have no effect on Antigravity, Copilot, DevEco Code, Pi, or OMP.
 </Callout>
 
 ## Where skill files go
@@ -148,6 +155,7 @@ Each tool uses **its own** skill discovery path. Before a task runs, the Multica
 | OpenCode | `.opencode/skills/` | ✅ Native |
 | DevEco Code | `.deveco/skills/` | ✅ Native |
 | Pi | `.pi/skills/` | ✅ Native |
+| OMP | `.pi/skills/` | ✅ Native |
 | Qoder | `.qoder/skills/` | ✅ Native |
 | Qwen Code | `.qwen/skills/` | ✅ Native |
 | Trae | `.traecli/skills/` | ✅ Native |
@@ -167,4 +175,4 @@ For creating and using skills, see [Skills](/skills).
 - [Creating and configuring agents](/agents-create) — pick a tool for your agent
 - [Tasks](/tasks) — task lifecycle and session-resumption mechanics
 - [Daemon and runtimes](/daemon-runtimes) — where the tools run and how they connect to Multica
-- [Install an agent runtime](/install-agent-runtime) — installation and authentication for each of the 17 supported tools
+- [Install an agent runtime](/install-agent-runtime) — installation and authentication for each of the 18 supported tools

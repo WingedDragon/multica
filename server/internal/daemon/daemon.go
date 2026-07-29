@@ -3874,6 +3874,7 @@ var runtimeDisplayNameOverrides = map[string]string{
 	"traecli": "Trae",
 	"grok":    "Grok",
 	"qwen":    "Qwen Code",
+	"omp":     "OMP",
 }
 
 // providerDisplayName returns the human-facing runtime name for a provider key.

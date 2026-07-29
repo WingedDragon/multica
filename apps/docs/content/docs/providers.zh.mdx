@@ -1,11 +1,11 @@
 ---
 title: AI 编程工具对照
-description: Multica 支持 16 款 AI 编程工具；它们实现同一套接口，但能力细节差异很大。
+description: Multica 支持 17 款 AI 编程工具；它们实现同一套接口，但能力细节差异很大。
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Multica 内置支持 **16 款 AI 编程工具**。它们都实现了同一套接口——排队、派发、执行、结果回传，所以你可以从 Multica 的同一个看板上指挥任意一款。**但它们在能力细节上差异很大**：会话恢复是否真用、是否支持 MCP、skill 文件该放在哪里、模型怎么选。这一页是完整对照。
+Multica 内置支持 **17 款 AI 编程工具**。它们都实现了同一套接口——排队、派发、执行、结果回传，所以你可以从 Multica 的同一个看板上指挥任意一款。**但它们在能力细节上差异很大**：会话恢复是否真用、是否支持 MCP、skill 文件该放在哪里、模型怎么选。这一页是完整对照。
 
 创建智能体时挑选工具的指引见 [创建和配置智能体](/agents-create)。
 
@@ -26,6 +26,7 @@ Multica 内置支持 **16 款 AI 编程工具**。它们都实现了同一套接
 | **DevEco Code** | 华为 | ✅ | ❌ | `.deveco/skills/` | 动态发现（`deveco models`）|
 | **OpenClaw** | 开源项目 | ✅ | ✅ | `.agent_context/skills/` （fallback）| 绑定在智能体上，不能在任务里切换 |
 | **Pi** | Inflection AI | ✅（session 为文件路径）| ❌ | `.pi/skills/` | 动态发现 |
+| **OMP** | Oh My Pi | ✅（`--resume <id>`）| ❌ | `.pi/skills/` | 动态发现（`omp models --json`）|
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | 动态发现 |
 | **Trae CLI** | ByteDance | ✅（ACP `session/load`）| ✅ | `.traecli/skills/` | 动态发现 |
 | **Grok** | xAI | ✅（ACP `session/load`）| ✅ | `.grok/skills/` | 动态发现（ACP `session/new`）|
@@ -92,6 +93,12 @@ SST 出品，开源。动态发现可用模型和模型 variant（扫 CLI 的配
 
 Inflection AI 出品，极简主义。**会话恢复机制特殊**——session ID 是磁盘上的文件路径（`~/.pi/...`），而不是字符串 ID。其他工具里，resume id 是 CLI 返回的字符串；Pi 里，resume id 就是会话文件本身。
 
+### OMP
+
+[Oh My Pi](https://omp.sh) 是一款独立的编程智能体，**不是 Pi 的别名**。Multica 以非交互方式执行 `omp -p --mode json --session-dir <目录>`，读取其兼容 Pi 的 JSON 事件流，并保存事件返回的字符串 session ID，以便下一次任务通过 `--resume <id>` 续接。模型及其支持的思考强度从 `omp models --json` 动态发现；选中的模型 selector 通过 `--model` 传入，思考强度通过 `--thinking` 传入。分配给工作区的 skill 写入 `.pi/skills/`，由 OMP 原生发现。
+
+启用 OMP 前，先完成 OMP 的安装与认证；然后让 daemon 的 `PATH` 能找到 `omp`，或将 `MULTICA_OMP_PATH` 设为其绝对可执行路径。重启或刷新 daemon，让它重新探测运行时。可设置 `MULTICA_OMP_MODEL` 为 OMP 的 selector 作为 daemon 全局默认模型，或为单个智能体选择动态发现的 selector。OMP 目前会忽略智能体的 `mcp_config`。
+
 ### Qoder
 
 Alibaba 出品。一款 agentic 编程 CLI。使用 ACP 协议（和 Hermes、Kimi、Kiro CLI 共享传输层）。会话恢复通过 ACP `session/resume` 工作，MCP 配置通过 ACP `mcpServers` 传入，模型为动态发现，skill 复制到 `.qoder/skills/` 做原生发现。
@@ -110,7 +117,7 @@ xAI 的 Grok Build CLI（`grok`）。Multica 通过 `grok --no-auto-update agent
 
 ## MCP 配置：按工具不同
 
-**16 款工具里有 12 款实际消费 `mcp_config`：Claude Code、CodeBuddy、Codex、Cursor、Hermes、Kimi、Kiro CLI、OpenCode、OpenClaw、Qoder、Trae CLI、Grok**。其他 4 款（Antigravity、Copilot、DevEco Code、Pi）会接收这个字段但**忽略**——不报错、不警告，只是配置不生效。
+**17 款工具里有 12 款实际消费 `mcp_config`：Claude Code、CodeBuddy、Codex、Cursor、Hermes、Kimi、Kiro CLI、OpenCode、OpenClaw、Qoder、Trae CLI、Grok**。其他 5 款（Antigravity、Copilot、DevEco Code、Pi、OMP）会接收这个字段但**忽略**——不报错、不警告，只是配置不生效。
 
 各工具的接入方式不同：Claude Code 和 CodeBuddy 通过 `--mcp-config` 加 `--strict-mcp-config` 接收；Codex 会把 daemon 管理的 `mcp_servers` block 写入单次任务的 `$CODEX_HOME/config.toml`；Cursor 会写入 `.cursor/mcp.json`，并把项目 approval 写到单次任务的 `CURSOR_DATA_DIR`；Hermes、Kimi、Kiro CLI、Qoder、Trae CLI、Grok 通过 ACP `mcpServers` 接收；OpenCode 通过 `OPENCODE_CONFIG_CONTENT` 环境变量内联接收；OpenClaw 通过 Multica 的单次任务配置 wrapper 接收 `mcp.servers`。OpenCode 这条路径**不会**改写项目里的 `opencode.json`。
 
@@ -134,6 +141,7 @@ xAI 的 Grok Build CLI（`grok`）。Multica 通过 `grok --no-auto-update agent
 | OpenCode | `.opencode/skills/` | ✅ 原生 |
 | DevEco Code | `.deveco/skills/` | ✅ 原生 |
 | Pi | `.pi/skills/` | ✅ 原生 |
+| OMP | `.pi/skills/` | ✅ 原生 |
 | Qoder | `.qoder/skills/` | ✅ 原生 |
 | Trae CLI | `.traecli/skills/` | ✅ 原生 |
 | Grok | `.grok/skills/` | ✅ 原生 |

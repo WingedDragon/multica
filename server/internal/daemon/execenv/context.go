@@ -127,6 +127,7 @@ func writeWorkspacesRootMarkerAtomic(path string, data []byte) error {
 // OpenCode:    skills → {workDir}/.opencode/skills/{name}/SKILL.md  (native discovery)
 // OpenClaw:    skills → {workDir}/skills/{name}/SKILL.md  (native discovery — paired with a per-task synthesized openclaw-config.json that pins agents.defaults.workspace to workDir; see openclaw_config.go)
 // Pi:          skills → {workDir}/.pi/skills/{name}/SKILL.md  (native discovery)
+// OMP:         skills → {workDir}/.omp/skills/{name}/SKILL.md  (native discovery)
 // Cursor:      skills → {workDir}/.cursor/skills/{name}/SKILL.md  (native discovery)
 // Kimi:        skills → {workDir}/.kimi/skills/{name}/SKILL.md  (native discovery)
 // Kiro:        skills → {workDir}/.kiro/skills/{name}/SKILL.md  (native discovery)
@@ -371,9 +372,12 @@ func skillsDirPath(workDir, provider string) string {
 		// MUL-2219 this used to fall back to .agent_context/skills/, which
 		// no openclaw scan path ever inspected.
 		return filepath.Join(workDir, "skills")
-	case "pi", "omp":
-		// Pi and OMP natively discover skills from .pi/skills/ in the workdir.
+	case "pi":
+		// Pi natively discovers skills from .pi/skills/ in the workdir.
 		return filepath.Join(workDir, ".pi", "skills")
+	case "omp":
+		// OMP natively discovers skills from .omp/skills/ in the workdir.
+		return filepath.Join(workDir, ".omp", "skills")
 	case "cursor":
 		// Cursor natively discovers skills from .cursor/skills/ in the workdir.
 		return filepath.Join(workDir, ".cursor", "skills")

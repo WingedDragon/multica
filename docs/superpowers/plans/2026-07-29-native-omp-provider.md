@@ -314,7 +314,7 @@
 
 - [ ] **Step 2: Update the four existing provider pages.**
 
-  Modify `apps/docs/content/docs/providers.mdx`, `providers.zh.mdx`, `providers.ja.mdx`, and `providers.ko.mdx`. Add OMP to each capability matrix and provider section with `omp models --json`, `MULTICA_OMP_PATH`, `MULTICA_OMP_MODEL`, `provider/model` selectors, `--session-dir` / `--resume <session-id>`, `.pi/skills/`, and headless JSON mode. Do not create a new `providers/` directory.
+  Modify `apps/docs/content/docs/providers.mdx`, `providers.zh.mdx`, `providers.ja.mdx`, and `providers.ko.mdx`. Add OMP to each capability matrix and provider section with `omp models --json`, `MULTICA_OMP_PATH`, `MULTICA_OMP_MODEL`, `provider/model` selectors, `--session-dir` / `--resume <session-id>`, `.omp/skills/`, and headless JSON mode. Do not create a new `providers/` directory.
 
 - [ ] **Step 3: Run the focused docs and display tests.**
 

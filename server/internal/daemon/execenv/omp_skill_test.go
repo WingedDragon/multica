@@ -10,7 +10,7 @@ import (
 func TestWriteContextFilesOMPNativeSkills(t *testing.T) {
 	workDir := t.TempDir()
 	fallback := skillsDirPath(workDir, "unknown-provider")
-	wantSkillsDir := filepath.Join(workDir, ".pi", "skills")
+	wantSkillsDir := filepath.Join(workDir, ".omp", "skills")
 	if got := skillsDirPath(workDir, "omp"); got != wantSkillsDir {
 		t.Fatalf("skillsDirPath(omp) = %q, want %q", got, wantSkillsDir)
 	}
@@ -36,6 +36,9 @@ func TestWriteContextFilesOMPNativeSkills(t *testing.T) {
 	if !strings.Contains(string(content), "Use the OMP native skill path.") {
 		t.Fatalf("OMP SKILL.md = %q, want skill content", content)
 	}
+	if _, err := os.Stat(filepath.Join(workDir, ".pi", "skills", "omp-helper", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("Pi skill file exists for OMP: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(fallback, "omp-helper", "SKILL.md")); !os.IsNotExist(err) {
 		t.Fatalf("fallback skill file exists for OMP: %v", err)
 	}
@@ -44,7 +47,7 @@ func TestWriteContextFilesOMPNativeSkills(t *testing.T) {
 func TestOMPSkillCleanupPreservesExistingContent(t *testing.T) {
 	workDir := t.TempDir()
 	envRoot := t.TempDir()
-	userSkill := filepath.Join(workDir, ".pi", "skills", "user-owned", "SKILL.md")
+	userSkill := filepath.Join(workDir, ".omp", "skills", "user-owned", "SKILL.md")
 	if err := os.MkdirAll(filepath.Dir(userSkill), 0o755); err != nil {
 		t.Fatalf("create user skill directory: %v", err)
 	}
@@ -67,7 +70,7 @@ func TestOMPSkillCleanupPreservesExistingContent(t *testing.T) {
 		t.Fatalf("writeSidecarManifest: %v", err)
 	}
 
-	managedSkill := filepath.Join(workDir, ".pi", "skills", "issue-review", "SKILL.md")
+	managedSkill := filepath.Join(workDir, ".omp", "skills", "issue-review", "SKILL.md")
 	if _, err := os.Stat(managedSkill); err != nil {
 		t.Fatalf("managed OMP skill missing before cleanup: %v", err)
 	}

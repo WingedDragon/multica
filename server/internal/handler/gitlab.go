@@ -348,7 +348,7 @@ func (h *Handler) ensureGitLabProjectWorkspaceRepo(ctx context.Context, workspac
 		return err
 	}
 	h.publish(protocol.EventWorkspaceUpdated, uuidToString(workspaceID), "member", userID, map[string]any{
-		"workspace": workspaceToResponse(updated),
+		"workspace": h.workspaceToResponse(updated),
 	})
 	return nil
 }

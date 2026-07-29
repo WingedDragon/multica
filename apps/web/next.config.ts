@@ -44,6 +44,14 @@ const nextConfig: NextConfig = {
   experimental: {
     webpackMemoryOptimizations: true,
   },
+  webpack(config, { dev }) {
+    if (!dev) {
+      // Keep the self-hosted production compiler inside its 4 GiB cgroup.
+      // Webpack's default module-build parallelism exceeds that limit.
+      config.parallelism = 1;
+    }
+    return config;
+  },
   ...(allowedDevOrigins && allowedDevOrigins.length > 0
     ? { allowedDevOrigins }
     : {}),

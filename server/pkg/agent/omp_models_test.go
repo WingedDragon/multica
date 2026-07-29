@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const ompCatalogFixture = `{
@@ -108,6 +109,16 @@ func TestParseOMPModels_FallsBackToProviderAndID(t *testing.T) {
 	}
 }
 
+func TestParseOMPModels_SkipsTypeMalformedEntries(t *testing.T) {
+	models, err := parseOMPModels([]byte(`{"models":[{"selector":"valid/model","name":"Valid"},{"selector":42}]}`))
+	if err != nil {
+		t.Fatalf("parseOMPModels: %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "valid/model" {
+		t.Fatalf("models = %+v, want only valid/model", models)
+	}
+}
+
 func TestParseOMPModels_RejectsMalformedTopLevelJSON(t *testing.T) {
 	for _, raw := range [][]byte{
 		[]byte(`{"models":`),
@@ -153,9 +164,16 @@ func TestListModels_OMPIsolatedByExecutablePath(t *testing.T) {
 		modelCacheMu.Lock()
 		delete(modelCache, discoveryCacheKey("omp", first))
 		delete(modelCache, discoveryCacheKey("omp", second))
+		delete(modelCache, "pi")
 		modelCacheMu.Unlock()
 	}
 	resetCache()
+	modelCacheMu.Lock()
+	modelCache["pi"] = modelCacheEntry{
+		models:    []Model{{ID: "pi/sentinel"}},
+		expiresAt: time.Now().Add(modelCacheTTL),
+	}
+	modelCacheMu.Unlock()
 	t.Cleanup(resetCache)
 
 	firstModels, err := ListModels(context.Background(), "omp", first)

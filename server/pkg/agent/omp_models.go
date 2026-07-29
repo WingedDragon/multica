@@ -72,14 +72,18 @@ func parseOMPModels(raw []byte) ([]Model, error) {
 		return nil, fmt.Errorf("missing models array")
 	}
 
-	var entries []ompCatalogModel
+	var entries []json.RawMessage
 	if err := json.Unmarshal(modelsJSON, &entries); err != nil {
 		return nil, fmt.Errorf("decode models array: %w", err)
 	}
 
 	models := make([]Model, 0, len(entries))
 	seen := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
+	for _, rawEntry := range entries {
+		var entry ompCatalogModel
+		if err := json.Unmarshal(rawEntry, &entry); err != nil {
+			continue
+		}
 		selector := entry.Selector
 		if selector == "" {
 			if entry.Provider == "" || entry.ID == "" {

@@ -2,7 +2,6 @@
 
 import { useRef, useState, useCallback, useEffect } from "react";
 import { ContentEditor, type ContentEditorRef, useFileDropZone, FileDropOverlay, useLazyEditor, useUploadGate, useComposerSubmit } from "../../editor";
-import { PASTE_AS_FILE_THRESHOLD } from "../../editor/paste-as-file";
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
 import { SubmitButton } from "@multica/ui/components/common/submit-button";
 import { ActorAvatar } from "../../common/actor-avatar";
@@ -15,7 +14,6 @@ import { useT } from "../../i18n";
 import { CommentTriggerChips } from "./comment-trigger-chips";
 import { useCommentTriggerPreview } from "../hooks/use-comment-trigger-preview";
 import { useCommentUploads } from "./use-comment-uploads";
-import { ComposerUploadChips } from "./composer-upload-chips";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -242,7 +240,6 @@ function ReplyInput({
             }}
             onSubmit={submit}
             onUploadFile={handleUpload}
-            pasteAsFileThreshold={PASTE_AS_FILE_THRESHOLD}
             onUploadingChange={uploadGate.onUploadingChange}
             debounceMs={100}
             currentIssueId={issueId}
@@ -251,9 +248,6 @@ function ReplyInput({
             slashCommandMode="command"
           />
         </div>
-        )}
-        {uploads.some((u) => u.status !== "uploaded") && (
-          <ComposerUploadChips uploads={uploads} onRemove={removeUpload} className="mt-1" />
         )}
         {/* Static shell — clones the empty single-line reply box (see
             CommentInput for the pattern). */}

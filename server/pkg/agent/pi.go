@@ -18,7 +18,37 @@ import (
 // JSON mode (`pi -p --mode json --session <path>`) and parsing its event
 // stream on stdout.
 type piBackend struct {
-	cfg Config
+	cfg     Config
+	runtime piRuntimeMode
+}
+
+type piRuntimeMode string
+
+const (
+	piRuntimeModeNative        piRuntimeMode = "pi"
+	piRuntimeModeOMPCompatible piRuntimeMode = "omp"
+)
+
+func newPiBackend(cfg Config) *piBackend {
+	return &piBackend{cfg: cfg}
+}
+
+func newOMPCompatibleBackend(cfg Config) *piBackend {
+	return &piBackend{cfg: cfg, runtime: piRuntimeModeOMPCompatible}
+}
+
+func (b *piBackend) runtimeMode() piRuntimeMode {
+	if b.runtime == piRuntimeModeOMPCompatible {
+		return piRuntimeModeOMPCompatible
+	}
+	return piRuntimeModeNative
+}
+
+func (m piRuntimeMode) name() string {
+	if m == piRuntimeModeOMPCompatible {
+		return "omp"
+	}
+	return "pi"
 }
 
 var (
@@ -174,36 +204,51 @@ func isPiToolNameByte(b byte) bool {
 }
 
 func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	mode := b.runtimeMode()
+	backendName := mode.name()
 	execName := b.cfg.ExecutablePath
 	if execName == "" {
-		execName = "pi"
+		execName = backendName
 	}
 	lookedUp, err := exec.LookPath(execName)
 	if err != nil {
-		return nil, fmt.Errorf("pi executable not found at %q: %w", execName, err)
+		return nil, fmt.Errorf("%s executable not found at %q: %w", backendName, execName, err)
 	}
 
 	timeout := opts.Timeout
+	sessionID := opts.ResumeSessionID
+	var args []string
+	var argv0 string
+	var cmdArgs []string
 
-	// Pi's --session flag expects a file path where events are appended.
-	// The path doubles as our opaque session identifier: we return it as
-	// SessionID and expect it back as ResumeSessionID on the next turn.
-	sessionPath := opts.ResumeSessionID
-	if sessionPath == "" {
-		p, err := newPiSessionPath()
+	if mode == piRuntimeModeOMPCompatible {
+		sessionDir, err := ompSessionDir()
 		if err != nil {
-			return nil, fmt.Errorf("pi session path: %w", err)
+			return nil, fmt.Errorf("omp session directory: %w", err)
 		}
-		sessionPath = p
-	}
-	if err := ensurePiSessionFile(sessionPath); err != nil {
-		return nil, fmt.Errorf("pi session file: %w", err)
+		args = buildOMPArgs(prompt, sessionDir, opts, b.cfg.Logger)
+		argv0, cmdArgs = execName, args
+	} else {
+		// Pi's --session flag expects a file path where events are appended.
+		// The path doubles as our opaque session identifier: we return it as
+		// SessionID and expect it back as ResumeSessionID on the next turn.
+		sessionPath := opts.ResumeSessionID
+		if sessionPath == "" {
+			p, err := newPiSessionPath()
+			if err != nil {
+				return nil, fmt.Errorf("pi session path: %w", err)
+			}
+			sessionPath = p
+		}
+		if err := ensurePiSessionFile(sessionPath); err != nil {
+			return nil, fmt.Errorf("pi session file: %w", err)
+		}
+		sessionID = sessionPath
+		args = buildPiArgs(prompt, sessionPath, opts, b.cfg.Logger)
+		argv0, cmdArgs = choosePiInvocation(execName, lookedUp, args, b.cfg.Logger)
 	}
 
 	runCtx, cancel := runContext(ctx, timeout)
-
-	args := buildPiArgs(prompt, sessionPath, opts, b.cfg.Logger)
-	argv0, cmdArgs := choosePiInvocation(execName, lookedUp, args, b.cfg.Logger)
 
 	cmd := exec.CommandContext(runCtx, argv0, cmdArgs...)
 	hideAgentWindow(cmd)
@@ -217,7 +262,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("pi stdout pipe: %w", err)
+		return nil, fmt.Errorf("%s stdout pipe: %w", backendName, err)
 	}
 	// Attach an explicit stdin pipe so we can close it ourselves. Pi reads
 	// its prompt from argv (positional, see buildPiArgs) and never expects
@@ -229,18 +274,18 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("pi stdin pipe: %w", err)
+		return nil, fmt.Errorf("%s stdin pipe: %w", backendName, err)
 	}
-	cmd.Stderr = newLogWriter(b.cfg.Logger, "[pi:stderr] ")
+	cmd.Stderr = newLogWriter(b.cfg.Logger, "["+backendName+":stderr] ")
 
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		cancel()
-		return nil, fmt.Errorf("start pi: %w", err)
+		return nil, fmt.Errorf("start %s: %w", backendName, err)
 	}
 	_ = stdin.Close()
 
-	b.cfg.Logger.Info("pi started", "pid", cmd.Process.Pid, "cwd", opts.Cwd, "model", opts.Model)
+	b.cfg.Logger.Info(backendName+" started", "pid", cmd.Process.Pid, "cwd", opts.Cwd, "model", opts.Model)
 
 	msgCh := make(chan Message, 256)
 	resCh := make(chan Result, 1)
@@ -279,6 +324,12 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			}
 
 			switch evt.Type {
+			case "session":
+				if mode == piRuntimeModeOMPCompatible && evt.ID != "" {
+					sessionID = evt.ID
+					trySend(msgCh, Message{Type: MessageStatus, Status: "running", SessionID: sessionID})
+				}
+
 			case "agent_start":
 				trySend(msgCh, Message{Type: MessageStatus, Status: "running"})
 
@@ -352,7 +403,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 					if evt.FinalError != "" {
 						finalError = evt.FinalError
 					} else {
-						finalError = "pi exhausted automatic retries"
+						finalError = backendName + " exhausted automatic retries"
 					}
 				}
 			}
@@ -367,23 +418,23 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 
 		if runCtx.Err() == context.DeadlineExceeded {
 			finalStatus = "timeout"
-			finalError = fmt.Sprintf("pi timed out after %s", timeout)
+			finalError = fmt.Sprintf("%s timed out after %s", backendName, timeout)
 		} else if runCtx.Err() == context.Canceled {
 			finalStatus = "aborted"
 			finalError = "execution cancelled"
 		} else if waitErr != nil && finalStatus == "completed" {
 			finalStatus = "failed"
-			finalError = fmt.Sprintf("pi exited with error: %v", waitErr)
+			finalError = fmt.Sprintf("%s exited with error: %v", backendName, waitErr)
 		}
 
-		b.cfg.Logger.Info("pi finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
+		b.cfg.Logger.Info(backendName+" finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
 		resCh <- Result{
 			Status:     finalStatus,
 			Output:     output.String(),
 			Error:      finalError,
 			DurationMs: duration.Milliseconds(),
-			SessionID:  sessionPath,
+			SessionID:  sessionID,
 			Usage:      usage,
 		}
 	}()
@@ -399,6 +450,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 // demand by the switch arms.
 type piStreamEvent struct {
 	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
 
 	// message_update
 	AssistantMessageEvent *piAssistantMessageEvent `json:"assistantMessageEvent,omitempty"`

@@ -206,7 +206,7 @@ type Result struct {
 
 // Config configures a Backend instance.
 type Config struct {
-	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro-cli, agy, qodercli, traecli, grok, qwen)
+	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, omp, cursor, kimi, kiro-cli, agy, qodercli, traecli, grok, qwen)
 	CLIVersion     string            // detected version paired with ExecutablePath; observation only, never used to choose behavior
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
@@ -217,7 +217,7 @@ type Config struct {
 }
 
 // New creates a Backend for the given agent type.
-// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "qoder", "traecli", "grok", "qwen".
+// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "omp", "cursor", "kimi", "kiro", "antigravity", "qoder", "traecli", "grok", "qwen".
 //
 // SupportedTypes is the canonical whitelist of agent types eligible to back a
 // custom runtime profile. It MUST stay in lockstep with the
@@ -243,6 +243,7 @@ var SupportedTypes = []string{
 	"openclaw",
 	"hermes",
 	"pi",
+	"omp",
 	"cursor",
 	"kimi",
 	"kiro",
@@ -282,6 +283,7 @@ var resumeRejectionUndetectable = map[string]bool{
 	"cursor":      true,
 	"deveco":      true,
 	"opencode":    true,
+	"omp":         true,
 }
 
 // ResumeRejectionUndetectable reports whether agentType is a backend that
@@ -315,7 +317,9 @@ func New(agentType string, cfg Config) (Backend, error) {
 	case "hermes":
 		return &hermesBackend{cfg: cfg}, nil
 	case "pi":
-		return &piBackend{cfg: cfg}, nil
+		return newPiBackend(cfg), nil
+	case "omp":
+		return newOMPCompatibleBackend(cfg), nil
 	case "cursor":
 		return &cursorBackend{cfg: cfg}, nil
 	case "kimi":
@@ -333,7 +337,7 @@ func New(agentType string, cfg Config) (Backend, error) {
 	case "qwen":
 		return &qwenBackend{cfg: cfg}, nil
 	default:
-		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, qoder, traecli, grok, qwen)", agentType)
+		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, omp, cursor, kimi, kiro, antigravity, qoder, traecli, grok, qwen)", agentType)
 	}
 }
 
@@ -362,6 +366,7 @@ var launchHeaders = map[string]string{
 	"openclaw":    "openclaw agent (json)",
 	"opencode":    "opencode run (json)",
 	"pi":          "pi (json mode)",
+	"omp":         "omp (json mode)",
 	"qoder":       "qodercli --acp",
 	"traecli":     "traecli acp serve",
 	"grok":        "grok agent stdio",

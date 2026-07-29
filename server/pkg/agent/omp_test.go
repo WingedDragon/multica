@@ -43,9 +43,10 @@ func TestOMPBackend_PassesSelectorThinkingAndBlockedArgs(t *testing.T) {
 		Model:           selector,
 		ThinkingLevel:   "high",
 		CustomArgs: []string{
-			"-p", "--print", "--mode", "wrong-mode", "--session-dir", "wrong-dir",
-			"--resume", "wrong-resume", "--model", "wrong-model", "--thinking", "low",
-			"--provider", "wrong-provider", "--verbose",
+			"-p", "--print", "--mode", "wrong-mode", "--session", "wrong-session",
+			"--session-dir", "wrong-dir", "--continue", "--resume", "wrong-resume",
+			"--model", "wrong-model", "--thinking", "low", "--provider", "wrong-provider",
+			"--verbose",
 		},
 	})
 

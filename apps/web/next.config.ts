@@ -44,14 +44,12 @@ const nextConfig: NextConfig = {
   experimental: {
     webpackMemoryOptimizations: true,
   },
-  webpack(config, { dev }) {
-    if (!dev) {
-      // Keep the self-hosted production compiler inside its 4 GiB cgroup.
-      // Webpack's default module-build parallelism exceeds that limit.
-      config.parallelism = 1;
-    }
-    return config;
-  },
+  ...(process.env.MULTICA_WEB_TYPECHECK_ALREADY_PASSED === "1"
+    ? {
+        // deploy.sh validates types first, without retaining Webpack's graph.
+        typescript: { ignoreBuildErrors: true },
+      }
+    : {}),
   ...(allowedDevOrigins && allowedDevOrigins.length > 0
     ? { allowedDevOrigins }
     : {}),

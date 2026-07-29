@@ -152,6 +152,13 @@ if ! {
   exit 3
 fi
 
+echo "    Validating TypeScript before the Webpack build..."
+if ! NODE_OPTIONS="$build_node_options" pnpm --filter @multica/web... typecheck; then
+  echo "ERROR: frontend TypeScript validation failed" >&2
+  exit 1
+fi
+
+
 build_started_at="$(date '+%Y-%m-%d %H:%M:%S')"
 sudo systemctl reset-failed "$WEB_BUILD_UNIT.service" >/dev/null 2>&1 || true
 build_status=0
@@ -171,7 +178,7 @@ sudo systemd-run --wait --pipe --collect \
   --setenv="NODE_ENV=${NODE_ENV:-production}" \
   --setenv="NODE_OPTIONS=$build_node_options" \
   "$BUILD_DIAGNOSTICS_SCRIPT" "$cgroup_diagnostics_file" \
-  /usr/bin/env pnpm --filter @multica/web... build || build_status=$?
+  /usr/bin/env MULTICA_WEB_TYPECHECK_ALREADY_PASSED=1 pnpm --filter @multica/web... build || build_status=$?
 if [ "$build_status" -ne 0 ]; then
   echo "ERROR: frontend build failed with exit $build_status"
   echo "Build cgroup diagnostics: $cgroup_diagnostics_file"

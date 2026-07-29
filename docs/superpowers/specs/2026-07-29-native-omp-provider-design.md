@@ -1,7 +1,7 @@
 # 原生 OMP Provider 设计规格
 
 - 日期：2026-07-29
-- 状态：待用户审查
+- 状态：修订待用户审查
 - 范围：将 Oh My Pi（OMP）作为 Multica 的一等 agent provider 接入
 
 ## 1. 背景与问题
@@ -17,7 +17,13 @@
 
 ## 2. 决策
 
-新增独立的原生 `omp` provider，执行层只复用 Pi/OMP 确实共有的 JSON 事件解析逻辑，不把 OMP 注册成 Pi 别名，也不复制整份 Pi backend。
+新增独立的原生 `omp` provider。执行层不抽取、不搬迁或大范围重构 `pi.go`：现有 `piBackend` 只增加一个私有且固定的 Pi-compatible runtime profile，用于在 Pi 与 OMP 两个已验证的 JSONL 协议实现间选择命令、session 策略、日志/错误 provider 名和结果 session ID。
+
+OMP 17.1.8 的实测 CLI 契约与 Pi 不同：
+
+- OMP 使用 `--session-dir <directory>` 与 `--resume <session-id>`，不使用 Pi 的 `--session <file>`；
+- OMP 以完整 `provider/model` selector 传给 `--model`，不拆成 Pi 的 `--provider` / `--model`；
+- OMP 原生支持 `--thinking <level>`。
 
 核心边界：
 
@@ -26,10 +32,11 @@ omp provider
 ├── 独立命令探测：omp
 ├── 独立模型发现：omp models --json
 ├── 独立 provider 注册和能力声明
-└── 复用最小公共 JSON event decoder
+├── OMP argv/session helper（新增 omp.go）
+└── 原位复用 pi.go 的 JSONL 事件循环（不移动主体）
 ```
 
-原有 `pi` provider 和已有 Pi custom runtime profile 继续工作，不迁移、不删除、不增加兼容别名。
+`omp` 不是 `pi` 的注册别名：daemon/runtime/model catalog/数据库 protocol family 仍使用独立的 `omp`。共享事件循环只是内部实现细节。原有 `pi` provider 和已有 Pi custom runtime profile 继续工作，不迁移、不删除、不增加兼容别名。
 
 ## 3. 目标
 
@@ -38,15 +45,15 @@ omp provider
 3. Agent 创建、runtime 注册和任务派发可以直接使用 `omp` provider。
 4. OMP 任务使用非交互 JSON 模式，并将事件映射为 Multica 的消息、状态、结果和 usage。
 5. UI 的 runtime 模型列表展示 OMP 返回的模型，支持 `selector` 和 thinking levels。
-6. 支持 OMP session 文件恢复，并正确处理不存在或拒绝恢复的 session。
+6. 支持 OMP session ID 恢复，并正确保留不可检测 resume-rejection 的能力边界。
 7. Multica 分配的 skills 写入 OMP 实际扫描的工作区目录。
 8. 新增回归测试，且不依赖开发机上真实安装的 OMP。
 9. 改动可拆分、可重放，尽量降低与 upstream provider 代码的合并冲突。
 
 ## 4. 非目标
 
-- 不重构所有 agent backend 为新的通用框架。
-- 不把 Pi backend 改造成可配置的任意 CLI runner。
+- 不重构所有 agent backend 为新的通用框架，也不抽取或移动 `pi.go` 的 JSON 事件循环。
+- 不把 Pi backend 变成可运行任意 CLI 的通用 runner；私有配置只允许固定的 Pi 与 OMP 两个已验证协议 profile。
 - 不支持 OMP TUI、RPC、ACP 或交互式终端模式；Multica daemon 只使用一次性 JSON 执行模式。
 - 不在本次接入 OMP 专属的扩展、主题、工作流或模型 catalog 编辑功能。
 - 不改变 React Query、Zustand 或 runtime 模型请求协议。
@@ -59,46 +66,47 @@ omp provider
 在 `server/pkg/agent/agent.go` 中：
 
 - 将 `omp` 加入 `SupportedTypes`；
-- 在 `New` 中返回 OMP backend；
+- 在 `New` 中返回配置为 OMP 的 Pi-compatible backend；
 - 更新 supported-type 注释和未知 provider 错误文本；
-- 仅在 OMP 明确缺少某项 resume rejection 检测时加入相应能力声明，默认 fail-closed，避免继承错误的 Pi 假设。
+- 将 OMP 加入 `resumeRejectionUndetectable`：当前协议没有可验证的拒绝 resume 结构化信号，必须 fail-closed，不得把 `false` 误读为“确认可恢复”。
 
-新增 `ompBackend`。它拥有 OMP provider 的独立身份和命令构造，但将事件解码依赖抽到 Pi/OMP 共享的最小内部组件。共享组件只包含：
+不新增 `ompBackend` 或公共通用 executor。`pi.go` 的 `piBackend` 增加一个私有固定 runtime profile；`omp.go` 提供 OMP 专属的 profile factory、argv builder 与 session-directory helper。profile 只能选择以下已验证行为：
 
-- stdout JSON line 扫描；
-- `agent_start`、`turn_start`、`message_update`、`agent_end` 等事件解码；
-- 文本 delta 清洗；
-- result、session ID、usage 汇总。
+- Pi：默认 executable `pi`，Pi file-path session，既有 `buildPiArgs`；
+- OMP：默认 executable `omp`，`--session-dir` / `--resume <session-id>`，`buildOMPArgs`；
+- provider 名：`pi` 或 `omp`，用于日志、错误与结果归因。
 
-Pi 的参数构造、错误文案和默认 executable 保持 Pi 专属；OMP backend 自己构造 OMP 参数和错误文案。
+`New("pi")` 与零值 `piBackend` 保持当前 Pi 行为；`New("omp")` 使用 OMP profile。两者继续原位共用 `pi.go` 中已验证的 JSON line 扫描、`agent_start`、`turn_start`、`message_update`、tool event、`turn_end`、文本清洗、usage 汇总和进程生命周期实现。OMP stream 的 `session` 事件只新增一个窄分支，用其 `id` 作为 `Result.SessionID` 和早期 status 的 session ID。不会搬迁扫描器、复制 Pi backend，或加入可由用户配置的 protocol/flag 模板。
 
 ### 5.2 OMP 启动命令
 
 默认启动形态：
 
 ```bash
-omp -p --mode json --session <session-file> <prompt>
+omp -p --mode json --session-dir <session-directory> [--resume <session-id>] [--model <provider/model>] [--thinking <level>] <prompt>
 ```
 
 实现要求：
 
-- executable 优先使用 `Config.ExecutablePath`，为空时使用 `omp`；
+- executable 优先使用 `Config.ExecutablePath`，为空时使用 OMP profile 的 `omp`；
 - 使用 `exec.LookPath` 验证 executable；
 - prompt 作为位置参数传递，不通过 shell 拼接；
 - 继续使用工作目录、超时、环境变量、窗口隐藏和进程树回收约定；
-- `--session` 使用 Multica 生成或传入的 session 文件路径；
-- `--model <provider/model>` 仅在 `ExecOptions.Model` 非空时传递；
-- thinking level 仅在 OMP 命令行明确支持且已有 `ThinkingLevel` 映射时传递，否则保持 provider 默认值，不伪造参数。
+- `--session-dir` 始终为 `~/.multica/omp-sessions`，由 daemon 在启动前创建；
+- `ResumeSessionID` 非空时原样传给 `--resume`；
+- `--model` 接收完整 `provider/model` selector，不拆分；
+- `ThinkingLevel` 非空时原样传给 `--thinking`，为空时不传，保留 OMP 默认值；
+- `-p`、`--mode`、`--session-dir`、`--resume`、`--model`、`--thinking` 与 Pi 遗留 `--provider` 全部是 blocked custom args。
 
 OMP 事件中间输出继续进入 `Session.Messages`，最终答案只进入 `Result.Output`，遵守现有 channel/issue-comment 的最终答案边界。
 
 ### 5.3 Session 恢复
 
-- 新任务生成 OMP session 文件，并以文件路径作为 Multica `SessionID`；
-- resume 时复用 `ResumeSessionID`；
-- 不存在的 session 文件必须返回可识别的启动错误；
-- OMP 明确拒绝 resume 时，backend 设置现有 `ResumeRejected` 语义；
-- 不把 Pi 的 session 文件解析逻辑或错误字符串直接当作 OMP 的协议契约；测试使用 OMP 事件样本固定行为。
+- 新任务启动前确保 `~/.multica/omp-sessions/` 存在；OMP 自己在该目录生成 session；
+- OMP JSONL 的 `session` 事件提供 `id`；backend 保存这个 ID 为 `Result.SessionID`，后续运行将它原样传给 `--resume`；
+- resumed run 若未重新发出 session 事件，保留请求的 `ResumeSessionID` 作为结果 session ID；
+- 因当前 OMP JSONL 协议没有已验证的 resume-rejection 事件或错误码，`ResumeRejectionUndetectable("omp")` 必须为 true；不得以 Pi 文字错误或猜测标记 `Result.ResumeRejected`；
+- 当后续 OMP 提供稳定的拒绝信号时，再单独加入精确检测和 fresh-session fallback 测试。
 
 ## 6. 模型发现
 
@@ -185,14 +193,14 @@ Sidecar manifest、清理和 skill 文件内容沿用现有 Pi 规则；不复�
 
 ### 文档
 
-更新 provider 能力对照和 OMP provider 页面，说明：
+更新 provider 能力对照，说明：
 
 - 安装与 `omp` 命令要求；
 - `MULTICA_OMP_PATH`、`MULTICA_OMP_MODEL`；
 - 模型选择使用 `provider/model` selector；
-- session 恢复边界；
+- `--session-dir` / `--resume <session-id>` 恢复边界；
 - `.pi/skills/` skill 路径；
-- OMP 不使用 TUI/RPC/ACP，而使用 daemon headless JSON 模式。
+- Multica 不启动 OMP 的 TUI、RPC 或 ACP 入口，而使用 daemon headless JSON 模式。
 
 文档改动与 backend 改动保持独立 commit，减少 upstream 合并时的无关冲突。
 
@@ -203,11 +211,11 @@ Sidecar manifest、清理和 skill 文件内容沿用现有 Pi 规则；不复�
 使用 fake executable 验证：
 
 - 正确 argv 顺序和 prompt 位置；
-- model selector 和 session path 传递；
-- OMP JSON event 到消息和最终结果的映射；
+- 完整 model selector、thinking level、session directory 与 resume session ID 传递；
+- OMP JSON event 到消息、stream session ID 和最终结果的映射；
 - usage 汇总；
 - 取消、超时、非零退出；
-- session resume 和 resume rejection；
+- session resume，以及 OMP 的 resume-rejection capability 保持 undetectable；
 - 不会把中间 narration 写入最终结果。
 
 ### Model discovery

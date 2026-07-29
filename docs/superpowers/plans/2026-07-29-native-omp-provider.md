@@ -4,16 +4,19 @@
 
 **Goal:** 将 Oh My Pi 作为 Multica 的原生 `omp` provider 接入，支持 headless JSON 执行、模型发现、session 恢复、自动探测和 workspace skill 注入。
 
-**Architecture:** 新增独立 `ompBackend`，只与 Pi 共享窄范围的 JSONL event/session 执行器，不复制整份 Pi backend，也不重构其他 provider。模型发现单独执行 `omp models --json`；daemon 复用现有 built-in runtime 探测和任务调度路径，不增加 custom-profile 特殊分支。
+**Architecture:** 原生 `omp` provider 用现有 `piBackend` 的两种固定 Pi-compatible runtime mode 执行；`pi.go` 原位保留 JSONL 扫描循环，只增加 session event、runtime mode 与 launch hook。新增 `omp.go` 只承载 OMP 的 argv/session helpers：`--session-dir`、`--resume <id>`、完整 selector `--model` 和 `--thinking`。模型发现仍单独执行 `omp models --json`；daemon 复用现有 built-in runtime 探测和任务调度路径，不增加 custom-profile 特殊分支。
 
 **Tech Stack:** Go、Chi daemon、`server/pkg/agent` backend 接口、JSONL stdout events、PostgreSQL migrations、React/Next.js runtime model picker、pnpm/Vitest。
 
 ## Global Constraints
 
-- 不把 OMP 注册成 `pi` 别名；原有 Pi provider 和 Pi custom runtime profile 必须继续工作。
+- `omp` 必须是独立的 provider key；原有 Pi provider 和 Pi custom runtime profile 必须继续工作。
 - 不修改 `server/internal/daemon/daemon.go` 的通用任务调度或 custom-profile launch 流程。
-- OMP headless invocation 固定使用 `omp -p --mode json --session <session-file> <prompt>`，prompt 必须作为最后一个 argv，不得经过 shell 拼接。
-- 模型发现固定使用 `omp models --json`；保存和回传 `provider/model` selector 时不得拆掉 provider 前缀。
+- `pi.go` 的 JSONL 扫描循环不得移动到新文件，也不得复制到 OMP 文件；只增加 Pi/OMP 两个固定 runtime mode、OMP `session` event 的 `id` 捕获与小型 launch hook。
+- `omp.go` 只定义固定 OMP argv/session helper；不得成为任意 CLI、协议或 flag 的用户可配置 runner。
+- OMP headless invocation 固定使用 `omp -p --mode json --session-dir <dir> [--resume <id>] [--model <provider/model>] [--thinking <level>] <prompt>`，prompt 必须作为最后一个 argv，不得经过 shell 拼接。
+- 模型发现固定使用 `omp models --json`；保存和传回 `provider/model` selector 时不得拆掉 provider 前缀。
+- OMP 仍标记为 `ResumeRejectionUndetectable`，直到存在已验证的结构化 rejection 信号；不得用 Pi 错误文字猜测 `Result.ResumeRejected`。
 - 不把 OMP TUI、RPC、ACP、扩展主题或模型 catalog 编辑纳入本次实现。
 - 所有 Go 测试使用 fake executable 或 fixture，不依赖真实 OMP、账号、网络或本机配置。
 - 新增 migration 使用编号 `233`，不增加外键或级联动作。
@@ -24,12 +27,11 @@
 
 ### Agent execution
 
-- Create: `server/pkg/agent/pi_compatible.go` — Pi/OMP 专用 JSONL 执行器、事件类型、session 文件工具。
-- Create: `server/pkg/agent/omp.go` — OMP backend 参数、默认 executable 和 provider-specific errors。
-- Modify: `server/pkg/agent/pi.go` — 将现有 Pi execution 接到窄范围共享执行器，保留 Pi 参数、日志和 session 目录兼容行为。
-- Modify: `server/pkg/agent/agent.go` — 注册 `omp`、更新 supported type 文案。
-- Create: `server/pkg/agent/omp_test.go` — fake OMP executable 的执行、事件、resume 和错误测试。
-- Create: `server/pkg/agent/pi_compatible_test.go` — 共享事件/结果边界测试；原 Pi 行为必须继续覆盖。
+- Modify: `server/pkg/agent/pi.go` — 增加私有 Pi/OMP fixed runtime mode，原位保留 JSONL 执行主体并捕获 OMP `session` event ID。
+- Create: `server/pkg/agent/omp.go` — OMP 固定 argv builder、blocked args 和 session-directory helper；不包含事件循环。
+- Modify: `server/pkg/agent/agent.go` — 注册 `omp`、更新 supported type 与 resume-detection capability 文案。
+- Create: `server/pkg/agent/omp_test.go` — fake OMP executable 的命令、argv、事件、session 和 capability 测试。
+- Modify: `server/pkg/agent/pi_test.go` — 仅在 runtime mode 影响既有 Pi contract 时扩展回归断言。
 
 ### Model discovery
 
@@ -60,111 +62,82 @@
 
 ---
 
-### Task 1: Extract the narrow Pi-compatible JSON executor
+### Task 1: Add OMP through a bounded Pi-compatible runtime mode
 
 **Files:**
-- Create: `server/pkg/agent/pi_compatible.go`
 - Modify: `server/pkg/agent/pi.go`
-- Create: `server/pkg/agent/pi_compatible_test.go`
-- Test: `server/pkg/agent/pi_test.go` and `server/pkg/agent/pi_compatible_test.go`
+- Create: `server/pkg/agent/omp.go`
+- Modify: `server/pkg/agent/agent.go`
+- Create: `server/pkg/agent/omp_test.go`
+- Test: `server/pkg/agent/pi_test.go` and `server/pkg/agent/omp_test.go`
 
 **Interfaces:**
-- Consumes: existing `Config`, `ExecOptions`, `Session`, `Message`, `Result`, `TokenUsage`, Pi event shapes and `filterCustomArgs`.
-- Produces: private `piCompatibleBackend` with `Execute(context.Context, string, ExecOptions) (*Session, error)`, configurable `provider`, `defaultExecutable`, `buildArgs`, `newSessionPath` and `ensureSessionFile` hooks. `piBackend` remains the Pi-facing wrapper and preserves its current default executable, error wording, session directory and argument behavior.
+- Consumes: existing `piBackend`, `buildPiArgs`, `newPiSessionPath`, `ensurePiSessionFile`, `Config`, `ExecOptions`, `Session`, `Message`, `Result`, `TokenUsage`, and `filterCustomArgs`.
+- Produces: private fixed Pi/OMP runtime mode selected by `newPiBackend(Config) *piBackend` and `newOMPCompatibleBackend(Config) *piBackend`; `buildOMPArgs(prompt, sessionDir string, opts ExecOptions, logger *slog.Logger) []string`; `ompSessionDir() (string, error)`; `New("omp", cfg)` returns the OMP mode. Zero-value `piBackend` retains Pi’s existing defaults.
 
-- [ ] **Step 1: Add regression tests around the existing Pi event contract.**
+- [ ] **Step 1: Write fake-executable OMP behavior tests.**
 
-  Move no assertions from existing Pi tests. Add fake JSONL cases that assert `agent_start` emits running, `message_update` text deltas reach `MessageText`, thinking deltas reach `MessageThinking`, tool start/end preserve call ID and decoded input/output, `turn_end` aggregates usage, `error` fails the result, and `agent_end` closes the session. Assert `Result.Output` contains only final text, not narration or tool markup.
+  Add a temporary executable named `omp` on PATH that records argv and emits deterministic Pi-compatible JSONL, including:
 
-- [ ] **Step 2: Run the focused tests before implementation.**
+  ```json
+  {"type":"session","id":"omp-session-1"}
+  ```
+
+  Add:
+
+  ```go
+  func TestOMPBackend_UsesOMPDefaultExecutableAndJSONProtocol(t *testing.T)
+  func TestOMPBackend_PassesSelectorThinkingAndBlockedArgs(t *testing.T)
+  func TestOMPBackend_MapsStreamSessionIDAndResume(t *testing.T)
+  func TestOMPProviderResumeRejectionIsUndetectable(t *testing.T)
+  ```
+
+  Assert `New("omp", Config{})` starts `omp`; argv includes `-p --mode json --session-dir <dir>`; selector `openai-codex/gpt-5.6-luna` is passed unchanged as one `--model` value with no `--provider`; `ThinkingLevel: "high"` becomes `--thinking high`; `ResumeSessionID: "prior-1"` becomes `--resume prior-1`; custom args cannot replace `-p`, `--mode`, `--session-dir`, `--resume`, `--model`, `--thinking` or `--provider`; prompt stays last; the stream `session.id` becomes `Result.SessionID`; a resumed run with no replacement session event retains `prior-1`; and `ResumeRejectionUndetectable("omp")` is true.
+
+- [ ] **Step 2: Run the new OMP tests to verify they fail.**
 
   Run from `server/`:
 
   ```bash
-  go test ./pkg/agent -run 'Test(Pi|PiCompatible)' -count=1
+  go test ./pkg/agent -run 'TestOMP' -count=1
   ```
 
-  Expected: the new test names fail because the shared executor/test fixture does not exist; existing Pi tests must remain green.
+  Expected: FAIL because `New("omp", ...)`, OMP argv/session helpers, OMP stream session handling and the OMP capability declaration do not exist.
 
-- [ ] **Step 3: Move only shared JSONL mechanics into `pi_compatible.go`.**
+- [ ] **Step 3: Add OMP-only helpers in `omp.go`.**
 
-  Extract the event structs currently named `piStreamEvent`, `piAssistantMessageEvent`, `piMessage`, and `piUsage` into provider-neutral private names. Move the scanner loop, text buffer handling, event-to-`Message` mapping, usage accumulation, command lifecycle, cancellation and result construction into `piCompatibleBackend.Execute`. Keep Pi-specific markup helpers shared because OMP uses the same markup shape; rename only if required by the extraction, without changing behavior.
+  Implement `ompSessionDir` as `~/.multica/omp-sessions` and create that directory before launch. Define `ompBlockedArgs` for `-p`, `--print`, `--mode`, `--session`, `--session-dir`, `--continue`, `--resume`, `--model`, `--thinking` and `--provider`. Implement `buildOMPArgs` in this exact order: `-p`, `--mode json`, `--session-dir <dir>`, optional `--resume <ResumeSessionID>`, optional `--model <Model>`, optional `--thinking <ThinkingLevel>`, filtered custom args, prompt. Do not split model selectors and do not add a shell layer.
 
-- [ ] **Step 4: Keep Pi as a thin compatibility wrapper.**
+- [ ] **Step 4: Add the fixed runtime mode inside `pi.go`.**
 
-  Make `piBackend.Execute` delegate to the shared executor with `provider="pi"`, default executable `pi`, `buildPiArgs`, `newPiSessionPath`, and `ensurePiSessionFile`. Preserve Pi session directory `~/.multica/pi-sessions`, Pi-specific error/log prefixes, blocked args and model splitting.
-
-- [ ] **Step 5: Run the focused executor tests.**
-
-  ```bash
-  go test ./pkg/agent -run 'Test(Pi|PiCompatible)' -count=1
-  ```
-
-  Expected: PASS with unchanged existing Pi behavior and the new event/result boundary coverage.
-
-- [ ] **Step 6: Commit the isolated parser extraction.**
-
-  ```bash
-  git add server/pkg/agent/pi_compatible.go server/pkg/agent/pi_compatible_test.go server/pkg/agent/pi.go server/pkg/agent/pi_test.go
-  git commit -m "refactor(agent): share Pi-compatible JSON event execution"
-  ```
-
-### Task 2: Add the native OMP backend
-
-**Files:**
-- Create: `server/pkg/agent/omp.go`
-- Modify: `server/pkg/agent/agent.go`
-- Create: `server/pkg/agent/omp_test.go`
-
-**Interfaces:**
-- Consumes: `piCompatibleBackend`, `Config`, `ExecOptions`, existing blocked-argument filtering.
-- Produces: `ompBackend` implementing `Backend`; `New("omp", cfg)` returns it; default executable is `omp` and OMP provider errors identify `omp`.
-
-- [ ] **Step 1: Write fake-executable tests for OMP argv and result behavior.**
-
-  Add a POSIX fake executable that records argv and emits deterministic OMP JSONL. Test these observable contracts:
+  Add private Pi and OMP constructors and a private fixed runtime mode selector. Keep the existing scanner loop in `pi.go`. Route launch preparation to Pi’s existing file-path session plus `buildPiArgs`, or OMP’s directory/ID session plus `buildOMPArgs`. Extend the existing event struct:
 
   ```go
-  func TestOMPBackend_ExecutesHeadlessJSON(t *testing.T)
-  func TestOMPBackend_PreservesSelectorAndSession(t *testing.T)
-  func TestOMPBackend_RejectsMissingResumeSession(t *testing.T)
-  func TestOMPBackend_ReportsTimeoutAndCancellation(t *testing.T)
+  ID string `json:"id,omitempty"`
   ```
 
-  Assert argv is equivalent to `omp -p --mode json --session <path> --provider <provider> --model <id> <prompt>`, with the prompt last and custom args unable to override `-p`, `--mode`, or `--session`. Assert final result/session/usage values.
+  Add one `case "session"` that, only for OMP mode, captures the emitted ID and sends a running `MessageStatus` with that ID. For OMP, `Result.SessionID` is the captured stream ID, falling back to `ResumeSessionID`; Pi continues returning the file path. Update default executable, error text, stderr prefix, start/finish log label and timeout/retry wording from the fixed mode without changing Pi’s zero-value behavior.
 
-- [ ] **Step 2: Run the OMP tests to verify they fail.**
+- [ ] **Step 5: Register OMP without an alias.**
+
+  In `agent.go`, use `newPiBackend(c)` for `case "pi"` and `newOMPCompatibleBackend(c)` for `case "omp"`. Add `omp` to `SupportedTypes`, the unknown-provider text and `resumeRejectionUndetectable`. Do not add a public generic backend type and do not copy the JSONL loop.
+
+- [ ] **Step 6: Run Pi and OMP regression tests.**
 
   ```bash
-  go test ./pkg/agent -run 'TestOMPBackend' -count=1
+  go test ./pkg/agent -run 'Test(OMP|Pi|Supported|ResumeRejection)' -count=1
   ```
 
-  Expected: FAIL because `ompBackend` and `New("omp", ...)` are not registered.
+  Expected: PASS. Pi’s executable, file-path session, parser and fixtures remain unchanged; OMP uses its native session directory/ID, model selector and thinking flags while sharing the original JSONL loop.
 
-- [ ] **Step 3: Implement `ompBackend` with OMP-specific command construction.**
-
-  Use the shared executor with `provider="omp"`, default executable `omp`, an OMP blocked-args set, and an OMP session path under `~/.multica/omp-sessions`. Split `provider/model` exactly as Pi does for OMP’s `--provider`/`--model` flags, while retaining the full selector in Multica’s model field. Do not pass an unsupported thinking flag; preserve custom args filtering.
-
-- [ ] **Step 4: Register the provider.**
-
-  Add `omp` to `SupportedTypes` and the `New` switch. Update the supported provider error text and comments. Add a focused test in `omp_test.go` that `IsSupportedType("omp")` is true and `New("omp", Config{ExecutablePath: fake})` returns a backend that executes the fake CLI.
-
-- [ ] **Step 5: Run the OMP and existing Pi tests.**
+- [ ] **Step 7: Commit the merge-safe native backend.**
 
   ```bash
-  go test ./pkg/agent -run 'Test(OMP|Pi|Supported)' -count=1
-  ```
-
-  Expected: PASS; Pi uses its own default and session directory, OMP uses `omp` and `omp-sessions`.
-
-- [ ] **Step 6: Commit the native backend.**
-
-  ```bash
-  git add server/pkg/agent/omp.go server/pkg/agent/omp_test.go server/pkg/agent/agent.go
+  git add server/pkg/agent/pi.go server/pkg/agent/pi_test.go server/pkg/agent/omp.go server/pkg/agent/omp_test.go server/pkg/agent/agent.go
   git commit -m "feat(agent): add native OMP backend"
   ```
 
-### Task 3: Implement OMP model discovery
+### Task 2: Implement OMP model discovery
 
 **Files:**
 - Create: `server/pkg/agent/omp_models.go`
@@ -218,7 +191,7 @@
   git commit -m "feat(agent): discover OMP models"
   ```
 
-### Task 4: Register and persist OMP daemon runtimes
+### Task 3: Register and persist OMP daemon runtimes
 
 **Files:**
 - Modify: `server/internal/daemon/config.go`
@@ -280,7 +253,7 @@
   git commit -m "feat(daemon): detect and persist OMP runtimes"
   ```
 
-### Task 5: Inject OMP workspace skills
+### Task 4: Inject OMP workspace skills
 
 **Files:**
 - Modify: `server/internal/daemon/execenv/context.go`
@@ -321,7 +294,7 @@
   git commit -m "feat(execenv): inject OMP workspace skills"
   ```
 
-### Task 6: Add provider copy and documentation
+### Task 5: Add provider copy and documentation
 
 **Files:**
 - Modify: `server/internal/daemon/daemon.go:3873-3877`
@@ -332,7 +305,7 @@
 - Modify: `apps/docs/content/docs/providers.ko.mdx`
 
 **Interfaces:**
-- Consumes: backend provider name `omp`, model selector contract and skill path from Tasks 2–5.
+- Consumes: backend provider name `omp`, model selector contract and skill path from Tasks 1–4.
 - Produces: user-visible OMP label, capability matrix row, installation/configuration instructions and no stale claim that OMP is merely Pi.
 
 - [ ] **Step 1: Add provider display-name regression coverage.**
@@ -341,7 +314,7 @@
 
 - [ ] **Step 2: Update the four existing provider pages.**
 
-  Modify `apps/docs/content/docs/providers.mdx`, `providers.zh.mdx`, `providers.ja.mdx`, and `providers.ko.mdx`. Add OMP to each capability matrix and provider section with `omp models --json`, `MULTICA_OMP_PATH`, `MULTICA_OMP_MODEL`, `provider/model` selectors, session file behavior, `.pi/skills/`, and headless JSON mode. Do not create a new `providers/` directory.
+  Modify `apps/docs/content/docs/providers.mdx`, `providers.zh.mdx`, `providers.ja.mdx`, and `providers.ko.mdx`. Add OMP to each capability matrix and provider section with `omp models --json`, `MULTICA_OMP_PATH`, `MULTICA_OMP_MODEL`, `provider/model` selectors, `--session-dir` / `--resume <session-id>`, `.pi/skills/`, and headless JSON mode. Do not create a new `providers/` directory.
 
 - [ ] **Step 3: Run the focused docs and display tests.**
 
@@ -359,11 +332,11 @@
   git commit -m "docs: document native OMP runtime"
   ```
 
-### Task 7: Verify the end-to-end contract and merge boundary
+### Task 6: Verify the end-to-end contract and merge boundary
 
 **Files:**
-- Modify only if focused verification exposes a contract failure in Tasks 1–6.
-- Test: all files changed by Tasks 1–6.
+- Modify only if focused verification exposes a contract failure in Tasks 1–5.
+- Test: all files changed by Tasks 1–5.
 
 **Interfaces:**
 - Consumes: registered `omp` provider, fake CLI fixtures, model catalog parser, daemon probe and skill sidecar.
@@ -390,7 +363,7 @@
 
 - [ ] **Step 3: Perform an OMP smoke test without changing tracked files.**
 
-  With a temporary workspace and the installed OMP binary, execute one headless JSON prompt and verify: process exits successfully, JSONL contains start/update/end events, session file exists, and `omp models --json` contains at least one selector. Use a temporary `OMP_HOME`/config if supported so the smoke test does not alter user configuration.
+  With a temporary workspace and temporary `--session-dir`, execute one headless JSON prompt and verify: process exits successfully, JSONL contains a `session` event and start/update/end events, the stream has a non-empty session ID, the temporary session directory receives OMP state, and `omp models --json` contains at least one selector. Do not alter the user's session files or global OMP configuration.
 
 - [ ] **Step 4: Review the final diff for merge-safe scope.**
 

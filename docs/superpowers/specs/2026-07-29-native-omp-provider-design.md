@@ -171,15 +171,15 @@ MULTICA_OMP_MODEL
 
 ## 9. Skill 注入
 
-OMP 源于 Pi，但 skill 目录必须以 OMP 实际行为为准。规格采用以下契约：
+OMP 的项目级 skill 扫描目录独立于 Pi。实测 OMP 17.1.8：在同一临时工作区同时放置 `.pi/skills/probe` 与 `.omp/skills/probe` 时，OMP 仅加载 `.omp/skills/probe`。因此规格采用以下固定契约：
 
 ```text
-<workdir>/.pi/skills/
+<workdir>/.omp/skills/
 ```
 
-在 `skillsDirPath` 中为 `omp` 增加显式分支，避免依赖 default fallback 或隐式 provider alias。实现前用 OMP smoke test 验证工作区 skill 被发现；若当前 OMP 版本的实际目录不同，必须以该版本官方行为为准同步调整设计和测试，不允许静默写入未经验证的目录。
+在 `skillsDirPath` 中为 `omp` 保留显式分支，返回 `.omp/skills`；`pi` 继续返回 `.pi/skills`。不得双写两个目录：这会制造重复 skill、命名冲突与额外清理面，而没有兼容性证据支持。
 
-Sidecar manifest、清理和 skill 文件内容沿用现有 Pi 规则；不复制全局用户 skill，只写入 Multica 分配的项目级 skill。
+Sidecar manifest、清理和 skill 文件内容沿用现有 Pi 规则；不复制全局用户 skill，只写入 Multica 分配的项目级 skill。回归测试必须断言 OMP skill 写入 `.omp/skills`、`.pi/skills` 不出现 Multica 注入副本，并验证任务结束后只清理 Multica 管理的 `.omp` 内容，保留预先存在的用户内容。
 
 ## 10. UI 与文档
 
@@ -199,7 +199,7 @@ Sidecar manifest、清理和 skill 文件内容沿用现有 Pi 规则；不复�
 - `MULTICA_OMP_PATH`、`MULTICA_OMP_MODEL`；
 - 模型选择使用 `provider/model` selector；
 - `--session-dir` / `--resume <session-id>` 恢复边界；
-- `.pi/skills/` skill 路径；
+- 项目级 `.omp/skills/` skill 路径；
 - Multica 不启动 OMP 的 TUI、RPC 或 ACP 入口，而使用 daemon headless JSON 模式。
 
 文档改动与 backend 改动保持独立 commit，减少 upstream 合并时的无关冲突。
@@ -243,12 +243,12 @@ Sidecar manifest、清理和 skill 文件内容沿用现有 Pi 规则；不复�
 
 验证：
 
-- OMP skill 写入 `.pi/skills/`；
-- sidecar cleanup 不删除用户已有内容；
+- OMP skill 写入 `.omp/skills/`，且 `.pi/skills/` 不出现 Multica 注入副本；
+- sidecar cleanup 不删除 `.omp/skills/` 下用户已有内容；
 - migration 后 `omp` 可作为 runtime profile protocol family；
 - migration down 恢复旧约束。
 
-所有测试默认使用 fake CLI 或 fixture，不执行开发机真实的 `omp`，避免账号、网络和本地配置导致不稳定。
+所有测试默认使用 fake CLI 或 fixture，不执行开发机真实的 `omp`，避免账号、网络和本地配置导致不稳定。真实 CLI 仅作为一次性的手工 smoke：以临时工作区和唯一 sentinel 验证 OMP 发现 `.omp/skills`。
 
 ## 12. Upstream 合并策略
 

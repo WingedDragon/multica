@@ -50,8 +50,8 @@
 
 ### Skill injection and UI
 
-- Modify: `server/internal/daemon/execenv/context.go` — `omp` explicitly maps to `.pi/skills/`, reusing Pi sidecar manifest/cleanup.
-- Create: `server/internal/daemon/execenv/omp_skill_test.go` — skill writing, existing-content protection and cleanup tests.
+- Modify: `server/internal/daemon/execenv/context.go` — `omp` explicitly maps to `.omp/skills/`, while `pi` remains `.pi/skills/`; reuse the existing sidecar manifest/cleanup mechanism.
+- Create: `server/internal/daemon/execenv/omp_skill_test.go` — skill writing, `.pi` non-write, existing-content protection and cleanup tests.
 - Modify: `server/internal/daemon/daemon.go:3873-3877` — add only the `omp` friendly display-name entry; do not touch generic scheduling.
 - Modify: `packages/core/runtimes/display.ts:43-46` — mirror the daemon display-name mapping with `omp: "OMP"`.
 - Modify: `packages/core/runtimes/display.test.ts` — assert `providerDisplayName("omp")` and aliased runtime labels.
@@ -261,11 +261,11 @@
 
 **Interfaces:**
 - Consumes: `resolveSkillsDir`, `skillsDirPath`, `sidecarManifest`, `CleanupSidecars`, existing Pi skill tests.
-- Produces: `skillsDirPath(workDir, "omp") == filepath.Join(workDir, ".pi", "skills")` with the existing write and cleanup semantics.
+- Produces: `skillsDirPath(workDir, "omp") == filepath.Join(workDir, ".omp", "skills")`; Pi remains `filepath.Join(workDir, ".pi", "skills")`.
 
 - [ ] **Step 1: Add skill path and cleanup tests.**
 
-  Assert an assigned skill is written to `<workdir>/.pi/skills/<slug>/SKILL.md`, pre-existing files are preserved, manifest cleanup removes only Multica-managed files/directories, and the OMP path is distinct from the fallback `.agent_context/skills` path.
+  Assert an assigned skill is written to `<workdir>/.omp/skills/<slug>/SKILL.md`, no Multica skill exists at `<workdir>/.pi/skills/<slug>/SKILL.md`, pre-existing `.omp` files are preserved, manifest cleanup removes only Multica-managed files/directories, and the OMP path is distinct from the fallback `.agent_context/skills` path.
 
 - [ ] **Step 2: Run the focused skill tests to verify they fail.**
 
@@ -273,11 +273,11 @@
   go test ./internal/daemon/execenv -run 'Test.*OMP.*Skill|Test.*Skill.*Cleanup' -count=1
   ```
 
-  Expected: FAIL because `omp` currently takes the fallback path.
+  Expected: FAIL because `omp` currently maps to `.pi/skills`.
 
-- [ ] **Step 3: Add the explicit `omp` switch case.**
+- [ ] **Step 3: Separate the explicit `omp` switch case.**
 
-  Return `.pi/skills` for both `pi` and `omp`, without changing any other provider mapping or manifest behavior.
+  Return `.pi/skills` only for `pi`; return `.omp/skills` only for `omp`. Do not dual-write, change any other provider mapping, or alter manifest behavior.
 
 - [ ] **Step 4: Run Pi and OMP skill tests.**
 
@@ -285,13 +285,13 @@
   go test ./internal/daemon/execenv -run 'Test.*(Pi|OMP).*Skill|Test.*Skill.*Cleanup' -count=1
   ```
 
-  Expected: PASS with unchanged Pi behavior.
+  Expected: PASS with unchanged Pi behavior and OMP injection only below `.omp/skills`.
 
 - [ ] **Step 5: Commit skill injection.**
 
   ```bash
   git add server/internal/daemon/execenv/context.go server/internal/daemon/execenv/omp_skill_test.go
-  git commit -m "feat(execenv): inject OMP workspace skills"
+  git commit -m "fix(execenv): inject OMP workspace skills"
   ```
 
 ### Task 5: Add provider copy and documentation

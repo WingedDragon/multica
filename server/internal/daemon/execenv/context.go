@@ -371,8 +371,8 @@ func skillsDirPath(workDir, provider string) string {
 		// MUL-2219 this used to fall back to .agent_context/skills/, which
 		// no openclaw scan path ever inspected.
 		return filepath.Join(workDir, "skills")
-	case "pi":
-		// Pi natively discovers skills from .pi/skills/ in the workdir.
+	case "pi", "omp":
+		// Pi and OMP natively discover skills from .pi/skills/ in the workdir.
 		return filepath.Join(workDir, ".pi", "skills")
 	case "cursor":
 		// Cursor natively discovers skills from .cursor/skills/ in the workdir.

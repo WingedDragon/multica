@@ -14,6 +14,7 @@ import type {
   BillingTopupsPage,
   BillingTransactionsPage,
   CancelTaskResponse,
+  Comment,
   ChatDraftRestoresResponse,
   CreateAgentFromTemplateResponse,
   CreateBillingCheckoutSessionResponse,
@@ -47,6 +48,9 @@ import type {
   ListWebhookDeliveriesResponse,
   NotificationPreferenceResponse,
   ResourceLabelsResponse,
+  QuickAction,
+  ListQuickActionsResponse,
+  ChatMessage,
   RuntimeModelListRequest,
   SearchIssuesResponse,
   SearchProjectsResponse,
@@ -271,6 +275,56 @@ export const EMPTY_LIST_PROPERTIES_RESPONSE: ListPropertiesResponse = {
   properties: [],
   total: 0,
 };
+export const QuickActionSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  name: z.string(),
+  description: z.string().optional().default(""),
+  assignee_type: z.string(),
+  assignee_id: z.string(),
+  prompt: z.string().optional().default(""),
+  visibility: z.string().optional().default("public"),
+  status: z.string().optional().default("active"),
+  last_used_at: z.string().nullable().optional().default(null),
+  use_count: z.number().optional().default(0),
+  created_by_id: z.string().optional().default(""),
+  created_at: z.string(),
+  updated_at: z.string(),
+  target_name: z.string().optional(),
+  target_public: z.boolean().optional().default(false),
+  target_missing: z.boolean().optional().default(false),
+}).loose();
+
+export const EMPTY_QUICK_ACTION: QuickAction = {
+  id: "",
+  workspace_id: "",
+  name: "",
+  description: "",
+  assignee_type: "agent",
+  assignee_id: "",
+  prompt: "",
+  visibility: "public",
+  status: "active",
+  last_used_at: null,
+  use_count: 0,
+  created_by_id: "",
+  created_at: "",
+  updated_at: "",
+  target_public: false,
+  target_missing: true,
+};
+
+export const ListQuickActionsResponseSchema = z.object({
+  quick_actions: z.array(QuickActionSchema).default([]),
+}).loose();
+
+export const EMPTY_LIST_QUICK_ACTIONS_RESPONSE: ListQuickActionsResponse = {
+  quick_actions: [],
+};
+
+export const QuickActionRenderSchema = z.object({
+  content: z.string().default(""),
+}).loose();
 
 // Value bag: keyed by definition UUID; values are primitives or string
 // arrays (multi_select). The preprocess step drops entries with unknown
@@ -379,6 +433,38 @@ const AttachmentSchema = z
     id: z.string(),
   })
   .loose();
+const ChatQuickActionSchema = z.object({
+  label: z.string(),
+  prompt: z.string(),
+  primary: z.boolean().optional(),
+}).loose();
+
+export const ChatMessageSchema = z.object({
+  id: z.string(),
+  chat_session_id: z.string(),
+  role: z.enum(["user", "assistant"]).catch("assistant"),
+  content: z.string().default(""),
+  task_id: z.string().nullable().default(null),
+  created_at: z.string().default(""),
+  attachments: z.array(AttachmentSchema).optional(),
+  failure_reason: z.string().nullable().optional(),
+  elapsed_ms: z.number().nullable().optional(),
+  message_kind: z.enum(["message", "no_response"]).catch("message").optional(),
+  quick_actions: z.array(ChatQuickActionSchema).catch([]).optional().default([]),
+}).loose();
+
+export const ChatMessageListSchema = z.array(ChatMessageSchema).default([]);
+export const EMPTY_CHAT_MESSAGE_LIST: ChatMessage[] = [];
+
+export const ChatMessagesPageSchema = z.object({
+  messages: z.array(ChatMessageSchema).default([]),
+  limit: z.number().default(50),
+  has_more: z.boolean().default(false),
+  next_cursor: z.object({
+    created_at: z.string(),
+    id: z.string(),
+  }).loose().nullable().optional(),
+}).loose();
 
 // Standalone attachment lookup (`GET /api/attachments/{id}`) is the source of
 // truth for click-time download URLs. The two fields the download flow opens
@@ -548,6 +634,22 @@ export const CommentSchema = z
   .loose();
 
 export const CommentsListSchema = z.array(CommentSchema);
+export const EMPTY_COMMENT: Comment = {
+  id: "",
+  issue_id: "",
+  author_type: "member",
+  author_id: "",
+  content: "",
+  type: "comment",
+  parent_id: null,
+  reactions: [],
+  attachments: [],
+  created_at: "",
+  updated_at: "",
+  resolved_at: null,
+  resolved_by_type: null,
+  resolved_by_id: null,
+};
 
 const CommentTriggerPreviewAgentSchema = z
   .object({

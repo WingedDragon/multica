@@ -184,10 +184,10 @@ func TestListModels_OMPIsolatedByExecutablePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListModels second: %v", err)
 	}
-	if len(firstModels) != 1 || firstModels[0].ID != "first/model" {
-		t.Errorf("first models = %+v, want first/model", firstModels)
+	if len(firstModels.Models) != 1 || firstModels.Models[0].ID != "first/model" {
+		t.Errorf("first models = %+v, want first/model", firstModels.Models)
 	}
-	if len(secondModels) != 1 || secondModels[0].ID != "second/model" {
-		t.Errorf("second models = %+v, want second/model", secondModels)
+	if len(secondModels.Models) != 1 || secondModels.Models[0].ID != "second/model" {
+		t.Errorf("second models = %+v, want second/model", secondModels.Models)
 	}
 }

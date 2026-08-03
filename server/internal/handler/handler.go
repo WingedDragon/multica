@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -318,8 +320,18 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		daemonWorkspaceRefresh = daemonHub
 	}
 
+	llmClient := llm.New(llm.Config{
+		APIKey:       cfg.LLMAPIKey,
+		BaseURL:      cfg.LLMBaseURL,
+		DefaultModel: cfg.LLMDefaultModel,
+	})
+
 	taskSvc := service.NewTaskService(queries, txStarter, hub, bus, daemonHub)
 	taskSvc.Analytics = analyticsClient
+	// Chat follow-up suggestions run through the same internal LLM layer that
+	// backs auto-titling. A deployment with no MULTICA_LLM_* configuration gets
+	// a disabled client, which turns the feature off rather than failing.
+	taskSvc.QuickActions = llmClient
 	h := &Handler{
 		Queries:                      queries,
 		DB:                           executor,
@@ -350,11 +362,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 			BaseURL: cfg.CloudRuntimeFleetURL,
 			Timeout: cfg.CloudRuntimeFleetTimeout,
 		}),
-		LLM: llm.New(llm.Config{
-			APIKey:       cfg.LLMAPIKey,
-			BaseURL:      cfg.LLMBaseURL,
-			DefaultModel: cfg.LLMDefaultModel,
-		}),
+		LLM: llmClient,
 		cfg: cfg,
 	}
 	h.WebhookDeliveryWorker = NewWebhookDeliveryWorker(h)
@@ -820,6 +828,12 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 }
 
 // resolveIssueByIdentifier tries to look up an issue by "PREFIX-NUMBER" format.
+//
+// The prefix must match the workspace's own issue prefix, the same rule
+// `lookupIssueByIdentifier` applies to VCS webhooks. Without it every prefix
+// resolved to the same issue number, so `FOO-134` and `TRS-134` were
+// interchangeable — which makes the identifier URL `/{ws}/issues/{key}`
+// unusable as a canonical link.
 func (h *Handler) resolveIssueByIdentifier(ctx context.Context, id, workspaceID string) (db.Issue, bool) {
 	parts := splitIdentifier(id)
 	if parts == nil {
@@ -830,6 +844,11 @@ func (h *Handler) resolveIssueByIdentifier(ctx context.Context, id, workspaceID 
 	}
 	wsUUID, err := util.ParseUUID(workspaceID)
 	if err != nil {
+		return db.Issue{}, false
+	}
+	// Case-insensitive: a hand-typed `trs-134` should open `TRS-134`.
+	prefix := h.getIssuePrefix(ctx, wsUUID)
+	if prefix == "" || !strings.EqualFold(parts.prefix, prefix) {
 		return db.Issue{}, false
 	}
 	issue, err := h.Queries.GetIssueByNumber(ctx, db.GetIssueByNumberParams{
@@ -865,6 +884,12 @@ func splitIdentifier(id string) *identifierParts {
 			return nil
 		}
 		num = num*10 + int(c-'0')
+		// Guard the int32 conversion below: a UUID whose last group happens to
+		// be all digits ("…-421234567890") reaches here and would otherwise be
+		// truncated into a plausible-looking issue number.
+		if num > math.MaxInt32 {
+			return nil
+		}
 	}
 	if num <= 0 {
 		return nil

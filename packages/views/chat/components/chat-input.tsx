@@ -96,6 +96,7 @@ interface ChatInputProps {
    *  as opposed to the session itself being archived — swaps the placeholder
    *  copy so the read-only reason reads accurately. */
   agentArchived?: boolean;
+  agentRuntimeRequired?: boolean;
   /** Name of the currently selected agent, used in the placeholder. */
   agentName?: string;
   /** Rendered at the bottom-left of the input bar — typically the agent picker. */
@@ -136,6 +137,7 @@ export function ChatInput({
   disabled,
   noAgent,
   agentArchived,
+  agentRuntimeRequired,
   agentName,
   leftAdornment,
   contextItems,
@@ -527,6 +529,8 @@ export function ChatInput({
     : disabled
       ? agentArchived
         ? t(($) => $.input.placeholder_archived_agent)
+        : agentRuntimeRequired
+          ? t(($) => $.input.placeholder_runtime_required)
         : t(($) => $.input.placeholder_archived)
       : agentName
         ? t(($) => $.input.placeholder_named, { name: agentName })
@@ -603,13 +607,13 @@ export function ChatInput({
                     disabled={!projectSelectionEnabled}
                     aria-label={t(($) => $.input.change_project_context)}
                     title={t(($) => $.input.change_project_context)}
-                    className="flex h-6 max-w-56 items-center gap-1.5 rounded-full border border-surface-border bg-surface-raised px-2 pr-7 text-xs font-medium text-foreground transition-colors hover:bg-accent/60"
+                    className="flex h-6 max-w-56 items-center gap-1.5 rounded-full border border-surface-border bg-surface-raised px-2 pr-7 text-caption font-medium text-foreground transition-colors hover:bg-accent/60"
                   />
                 }
               />
             </div>
             {projectContextUnsupported && (
-              <span className="inline-flex min-w-0 items-center gap-1 text-xs text-warning">
+              <span className="inline-flex min-w-0 items-center gap-1 text-caption text-warning">
                 <TriangleAlert className="size-3 shrink-0" />
                 {t(($) => $.input.project_context_unsupported)}
               </span>

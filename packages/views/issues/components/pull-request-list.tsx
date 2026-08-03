@@ -257,7 +257,7 @@ function PullRequestRowDetails({ pr }: { pr: GitHubPullRequest }) {
 
   return (
     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-micro text-muted-foreground">
-      {showStats ? <PullRequestStats pr={pr} /> : null}
+      {showStats ? <PullRequestStats stats={pr} /> : null}
       {checksBadge ? <PullRequestBadge badge={checksBadge} stale={stale} title={staleTitle} /> : null}
       {mergeBadge ? <PullRequestBadge badge={mergeBadge} stale={stale} title={staleTitle} /> : null}
     </div>

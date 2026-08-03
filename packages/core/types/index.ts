@@ -1,4 +1,12 @@
-export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction } from "./issue";
+export type {
+  Issue,
+  IssueStatus,
+  IssuePriority,
+  IssueAssigneeType,
+  IssueMetadata,
+  IssueMetadataValue,
+  IssueReaction,
+} from "./issue";
 export type {
   Agent,
   AgentStatus,
@@ -77,44 +85,75 @@ export type {
   IssueUsageSummary,
 } from "./agent";
 export { RUNTIME_PROFILE_PROTOCOL_FAMILIES } from "./agent";
-export type { Workspace, WorkspaceRepo, Member, MemberRole, User, MemberWithUser, Invitation } from "./workspace";
-export type { InboxItem, InboxSeverity, InboxItemType, InboxWorkspaceUnread } from "./inbox";
-export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferences, NotificationPreferenceResponse } from "./notification-preference";
-export type { Comment, CommentType, CommentAuthorType, CommentTriggerPreview, CommentTriggerPreviewAgent, CommentTriggerSource, CommentTriggerOutcome, CommentTriggerStatus, Reaction } from "./comment";
-export type { Label, LabelResourceType, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse, ResourceLabelsResponse } from "./label";
-export type { IssueProperty, IssuePropertyType, IssuePropertyOption, IssuePropertyConfig, IssuePropertyValue, IssuePropertyValues, CreatePropertyRequest, UpdatePropertyRequest, ListPropertiesResponse, IssuePropertiesResponse } from "./property";
+export type {
+  Workspace,
+  WorkspaceRepo,
+  Member,
+  MemberRole,
+  User,
+  MemberWithUser,
+  Invitation,
+} from "./workspace";
+export type {
+  InboxItem,
+  InboxSeverity,
+  InboxItemType,
+  InboxWorkspaceUnread,
+} from "./inbox";
+export type {
+  NotificationGroupKey,
+  NotificationGroupValue,
+  NotificationPreferences,
+  NotificationPreferenceResponse,
+} from "./notification-preference";
+export type {
+  Comment,
+  CommentType,
+  CommentAuthorType,
+  CommentTriggerPreview,
+  CommentTriggerPreviewAgent,
+  CommentTriggerSource,
+  CommentTriggerOutcome,
+  CommentTriggerStatus,
+  Reaction,
+} from "./comment";
+export type {
+  Label,
+  LabelResourceType,
+  CreateLabelRequest,
+  UpdateLabelRequest,
+  ListLabelsResponse,
+  IssueLabelsResponse,
+  ResourceLabelsResponse,
+} from "./label";
+export type {
+  IssueProperty,
+  IssuePropertyType,
+  IssuePropertyOption,
+  IssuePropertyConfig,
+  IssuePropertyValue,
+  IssuePropertyValues,
+  CreatePropertyRequest,
+  UpdatePropertyRequest,
+  ListPropertiesResponse,
+  IssuePropertiesResponse,
+} from "./property";
 export { ISSUE_PROPERTY_TYPES, isKnownPropertyType } from "./property";
-export type {
-  QuickAction,
-  QuickActionVisibility,
-  QuickActionAssigneeType,
-  QuickActionStatus,
-  CreateQuickActionRequest,
-  UpdateQuickActionRequest,
-  ListQuickActionsResponse,
-} from "./quick-action";
-export {
-  QUICK_ACTION_SIDEBAR_LIMIT,
-  QUICK_ACTION_TEMPLATE_TOKEN_RE,
-  findQuickActionTemplateToken,
-} from "./quick-action";
-export type {
-  TimelineEntry,
-  AssigneeFrequencyEntry,
-} from "./activity";
+export type { TimelineEntry, AssigneeFrequencyEntry } from "./activity";
 export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";
 export type * from "./api";
 export type { Attachment } from "./attachment";
-export { attachmentDownloadPath, attachmentIdFromDownloadURL, contentReferencesAttachment } from "./attachment-url";
+export {
+  attachmentDownloadPath,
+  attachmentIdFromDownloadURL,
+  contentReferencesAttachment,
+} from "./attachment-url";
 export type {
   ChatSession,
   ChatLastMessage,
   ChatPinnedAgent,
   ChatMessage,
-  ChatQuickAction,
-  ChatQuickActionsPendingState,
-  ChatQuickActionsFailureState,
   ChatMessagesPage,
   ChatPendingTask,
   PendingChatTaskItem,
@@ -143,7 +182,12 @@ export type {
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
 } from "./project";
-export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
+export type {
+  PinnedItem,
+  PinnedItemType,
+  CreatePinRequest,
+  ReorderPinsRequest,
+} from "./pin";
 export type {
   GitHubInstallation,
   GitHubMergeableState,
@@ -158,6 +202,25 @@ export type {
   ListGitHubRepositoriesResponse,
   GitHubConnectResponse,
 } from "./github";
+export type {
+  CreateGitLabProjectRequest,
+  CreateGitLabProjectResponse,
+  GitLabConfigResponse,
+  GitLabJobTraceResponse,
+  GitLabMergeRequestDetailsResponse,
+  GitLabMergeRequest,
+  GitLabMergeRequestState,
+  GitLabApprovalRule,
+  GitLabMRApproval,
+  GitLabMRDiscussion,
+  GitLabMRNote,
+  GitLabPipelineJob,
+  GitLabPipelineStatus,
+  GitLabProjectRefreshResponse,
+  GitLabProjectBinding,
+  GitLabUserRef,
+  ListGitLabMergeRequestsResponse,
+} from "./gitlab";
 export type {
   VCSProvider,
   VCSConnection,
@@ -183,6 +246,12 @@ export type {
   RegisterSlackBYORequest,
   RedeemSlackBindingTokenResponse,
 } from "./slack";
+export type {
+  OctoInstallation,
+  ListOctoInstallationsResponse,
+  RegisterOctoBYORequest,
+  RedeemOctoBindingTokenResponse,
+} from "./octo";
 export type {
   Autopilot,
   AutopilotStatus,

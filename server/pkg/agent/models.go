@@ -186,8 +186,8 @@ func ListModels(ctx context.Context, providerType, executablePath string) (Catal
 			return discovered(discoverDevecoModels(ctx, executablePath))
 		})
 	case "omp":
-		return cachedDiscovery(discoveryCacheKey("omp", executablePath), func() ([]Model, error) {
-			return discoverOMPModels(ctx, executablePath)
+		return cachedDiscovery(discoveryCacheKey("omp", executablePath), func() (Catalog, error) {
+			return discovered(discoverOMPModels(ctx, executablePath))
 		})
 	case "pi":
 		return cachedDiscovery(providerType, func() (Catalog, error) {

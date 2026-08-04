@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -276,7 +277,8 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		cancel()
 		return nil, fmt.Errorf("%s stdin pipe: %w", backendName, err)
 	}
-	cmd.Stderr = newLogWriter(b.cfg.Logger, "["+backendName+":stderr] ")
+	stderrBuf := newStderrTail(newLogWriter(b.cfg.Logger, "["+backendName+":stderr] "), agentStderrTailBytes)
+	cmd.Stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
@@ -424,22 +426,46 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			finalError = "execution cancelled"
 		} else if waitErr != nil && finalStatus == "completed" {
 			finalStatus = "failed"
-			finalError = fmt.Sprintf("%s exited with error: %v", backendName, waitErr)
+			finalError = withAgentStderr(fmt.Sprintf("%s exited with error: %v", backendName, waitErr), backendName, stderrBuf.Tail())
 		}
+		resumeRejected := mode == piRuntimeModeOMPCompatible && ompResumeWasRejected(opts.ResumeSessionID, finalStatus == "failed", finalError)
 
 		b.cfg.Logger.Info(backendName+" finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
 		resCh <- Result{
-			Status:     finalStatus,
-			Output:     output.String(),
-			Error:      finalError,
-			DurationMs: duration.Milliseconds(),
-			SessionID:  sessionID,
-			Usage:      usage,
+			Status:         finalStatus,
+			Output:         output.String(),
+			Error:          finalError,
+			DurationMs:     duration.Milliseconds(),
+			SessionID:      sessionID,
+			Usage:          usage,
+			ResumeRejected: resumeRejected,
 		}
 	}()
 
 	return &Session{Messages: msgCh, Result: resCh}, nil
+}
+
+var ompResumeRejectedPhrases = []string{
+	"belongs to a directory that no longer exists",
+	"session not found",
+	"no session found",
+	"unknown session",
+}
+
+func ompResumeWasRejected(requestedResume string, failed bool, texts ...string) bool {
+	if !failed || requestedResume == "" {
+		return false
+	}
+	for _, text := range texts {
+		lower := strings.ToLower(text)
+		if slices.ContainsFunc(ompResumeRejectedPhrases, func(phrase string) bool {
+			return strings.Contains(lower, phrase)
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 // ── Pi event types ──

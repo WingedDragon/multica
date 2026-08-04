@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +148,36 @@ func TestDiscoverOMPModels_ReturnsCommandErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "catalog unavailable") {
 		t.Errorf("error = %q, want stderr diagnostic", err)
+	}
+}
+
+func TestDiscoverOMPModels_DisablesExtensions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "argv")
+	fake := filepath.Join(dir, "omp")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > \"$OMP_ARGV_FILE\"\n" +
+		"printf '%s\\n' '{\"models\":[{\"selector\":\"vendor/model\"}]}'\n"
+	writeTestExecutable(t, fake, []byte(script))
+	t.Setenv("OMP_ARGV_FILE", argvPath)
+
+	models, err := discoverOMPModels(context.Background(), fake)
+	if err != nil {
+		t.Fatalf("discoverOMPModels: %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "vendor/model" {
+		t.Fatalf("models = %+v, want vendor/model", models)
+	}
+	args, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	if got, want := strings.Fields(string(args)), []string{"models", "--no-extensions", "--json"}; !slices.Equal(got, want) {
+		t.Fatalf("argv = %q, want %q", got, want)
 	}
 }
 

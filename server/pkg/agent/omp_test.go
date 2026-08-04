@@ -86,9 +86,37 @@ func TestOMPBackend_MapsStreamSessionIDAndResume(t *testing.T) {
 	}
 }
 
-func TestOMPProviderResumeRejectionIsUndetectable(t *testing.T) {
-	if !ResumeRejectionUndetectable("omp") {
-		t.Fatal("ResumeRejectionUndetectable(\"omp\") = false, want true")
+func TestOMPBackend_ClassifiesMissingSessionDirectoryAsResumeRejection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' 'Error: Session \"stale-session\" belongs to a directory that no longer exists (/tmp/removed); run interactively to move it into the current project.' >&2\n" +
+		"exit 1\n"
+	writeTestExecutable(t, filepath.Join(dir, "omp"), []byte(script))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	backend, err := New("omp", Config{Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("New(omp): %v", err)
+	}
+	result, _ := executeOMPTestBackend(t, backend, "prompt", ExecOptions{
+		Timeout:         5 * time.Second,
+		ResumeSessionID: "stale-session",
+	})
+	if !result.ResumeRejected {
+		t.Fatalf("ResumeRejected = false, want true (error=%q)", result.Error)
+	}
+	if !strings.Contains(result.Error, "belongs to a directory that no longer exists") {
+		t.Fatalf("error = %q, want OMP stderr diagnostic", result.Error)
+	}
+}
+
+func TestOMPProviderResumeRejectionIsDetectable(t *testing.T) {
+	if ResumeRejectionUndetectable("omp") {
+		t.Fatal("ResumeRejectionUndetectable(\"omp\") = true, want false")
 	}
 }
 

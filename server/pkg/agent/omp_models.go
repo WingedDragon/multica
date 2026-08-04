@@ -24,8 +24,10 @@ type ompCatalogModel struct {
 	Thinking []string `json:"thinking"`
 }
 
-// discoverOMPModels runs `omp models --json` and converts the runtime catalog
-// into dropdown models. OMP's selectors are passed back to its CLI verbatim.
+// discoverOMPModels runs `omp models --no-extensions --json` and converts the
+// runtime catalog into dropdown models. Disabling extensions keeps discovery
+// independent of extension startup cost and failures; selectors are passed
+// back to OMP verbatim.
 func discoverOMPModels(ctx context.Context, executablePath string) ([]Model, error) {
 	if executablePath == "" {
 		executablePath = "omp"
@@ -37,7 +39,7 @@ func discoverOMPModels(ctx context.Context, executablePath string) ([]Model, err
 	runCtx, cancel := context.WithTimeout(ctx, ompModelDiscoveryTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, executablePath, "models", "--json")
+	cmd := exec.CommandContext(runCtx, executablePath, "models", "--no-extensions", "--json")
 	hideAgentWindow(cmd)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout

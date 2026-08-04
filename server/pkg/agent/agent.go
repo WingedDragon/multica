@@ -288,7 +288,6 @@ var resumeRejectionUndetectable = map[string]bool{
 	"cursor":      true,
 	"deveco":      true,
 	"opencode":    true,
-	"omp":         true,
 }
 
 // ResumeRejectionUndetectable reports whether agentType is a backend that

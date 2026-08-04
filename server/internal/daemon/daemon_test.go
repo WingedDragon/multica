@@ -2188,6 +2188,18 @@ func TestShouldRetryWithFreshSession(t *testing.T) {
 			want:           true,
 		},
 		{
+			name: "OMP missing workdir rejection retries",
+			result: agent.Result{
+				Status:         "failed",
+				Error:          "Error: Session stale-id belongs to a directory that no longer exists",
+				SessionID:      "stale-id",
+				ResumeRejected: true,
+			},
+			priorSessionID: "stale-id",
+			provider:       "omp",
+			want:           true,
+		},
+		{
 			// qwen-code 0.20.0's real wording, from
 			// pkg/agent/testdata/qwen-code-0.20.0-resume-not-found.stderr.txt.
 			// The backend reports no session at all here, so before the
@@ -2438,7 +2450,7 @@ func TestShouldRetryWithFreshSession_CompatPathIsBackendScoped(t *testing.T) {
 		})
 	}
 
-	detectable := []string{"claude", "codebuddy", "qwen", "codex", "grok", "hermes", "kimi", "kiro", "qoder", "qoderclicn", "traecli", "pi", "openclaw"}
+	detectable := []string{"claude", "codebuddy", "qwen", "codex", "grok", "hermes", "kimi", "kiro", "qoder", "qoderclicn", "traecli", "pi", "omp", "openclaw"}
 	for _, provider := range detectable {
 		t.Run(provider+" does not retry", func(t *testing.T) {
 			t.Parallel()

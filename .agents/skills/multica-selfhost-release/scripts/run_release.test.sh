@@ -43,6 +43,7 @@ case "$*" in
   "push --force-with-lease origin feature/selfhost-cli-update") ;;
   "push origin feature/selfhost-cli-update") ;;
   "describe --tags --always --dirty") echo "v0.0.0-test" ;;
+  "rev-parse HEAD") echo "abc1234deadbeef" ;;
   "rev-parse --short HEAD") echo "abc1234" ;;
   *) echo "unexpected git $*" >&2; exit 9 ;;
 esac
@@ -68,7 +69,7 @@ fi
 mkdir -p "$(dirname "$out")"
 cat >"$out" <<'BIN'
 #!/usr/bin/env bash
-echo "multica test cli"
+echo "multica v0.0.0-test (commit: abc1234, built: test)"
 BIN
 chmod 0755 "$out"
 SH
@@ -126,6 +127,8 @@ grep -q "install -m 0755 $REPO/server/bin/multica $HOME_DIR/.local/bin/multica" 
 grep -Fq 'ssh -o RequestTTY=no my-mini zsh -lc' "$LOG"
 grep -Fq "scp -o RequestTTY=no $REPO/server/bin/multica my-mini:~/.local/bin/multica.upload." "$LOG"
 grep -q 'mv.*multica.upload.*multica.*version' "$LOG"
+grep -q 'codesign.*--force.*--sign.*multica.upload' "$LOG"
+grep -q 'codesign.*--verify.*--strict.*multica' "$LOG"
 
 test -x "$HOME_DIR/.local/bin/multica"
 
@@ -233,3 +236,23 @@ fi
 
 grep -Fq 'git merge --ff-only "$REMOTE_NAME/$BRANCH"' "$SCRIPT_DIR/run_release.sh"
 ! grep -Fq 'git reset --hard "$REMOTE_NAME/$BRANCH"' "$SCRIPT_DIR/run_release.sh"
+
+
+# The deployment window must stop only services that were running, clear stale
+# swap before the guarded build, and restore every stopped service on all exits.
+grep -Fq 'trap restore_release_services EXIT' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'sudo systemctl stop multica-frontend multica-backend' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'sudo docker stop litellm' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'sudo swapoff -a' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'sudo swapon -a' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'sudo systemctl start multica-backend' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'sudo systemctl start multica-frontend' "$SCRIPT_DIR/run_release.sh"
+
+# Every artifact and deployment must remain pinned to the HEAD selected after
+# synchronization; a later fix commit requires rerunning the whole workflow.
+grep -Fq 'assert_release_head' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'EXPECTED_HEAD=' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'EXPECTED_COMMIT=' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'EXPECTED_VERSION=' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'commit: $EXPECTED_COMMIT' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'does not match release $EXPECTED_VERSION' "$SCRIPT_DIR/run_release.sh"

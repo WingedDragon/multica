@@ -48,6 +48,8 @@ The script's `auto` mode uses published state as a conservative mechanical proxy
 - If the remote working tree has only generated noise, leave it uncommitted or restore it only when it blocks a Git operation.
 - If a rebase intentionally rewrites published history, the deployment checkout may no longer fast-forward. The script must stop rather than reset automatically; inspect the remote commits and only perform a manual reset after separately confirming the rewrite and target SHA.
 - Never use a force push after merge. Never use plain `--force`; a published rebase requires `--force-with-lease`.
+- Pin one final `HEAD` after synchronization. Build the CLI, update the deployment checkout, package the desktop app, and verify all artifacts against that commit. If conflict repair or any other fix creates a later commit, restart the full workflow from CLI build; never mix artifacts from different commits.
+- On `my-mini`, ad-hoc sign the uploaded CLI before replacing `~/.local/bin/multica`, then run `codesign --verify --strict` and `multica version`.
 
 ## Resolved Incident: Selfhost Build Host Pressure (2026-07-20)
 
@@ -61,6 +63,13 @@ The protected retries established the safe operating boundary:
 - After stopping the already-unavailable Multica frontend and then the backend for the deployment window, `MemAvailable=5790 MiB` passed the `4G + 1536 MiB` guard. The build succeeded with `MemoryHigh=4G`, `MemoryMax=4G`, `MemorySwapMax=256M`, and a 2048 MiB Node heap. It compiled webpack in 118s, completed TypeScript in 69s, and finished in 3m50s with 3m45s CPU. The cgroup peak was exactly 4 GiB, swap peak was 256 MiB, `oom_kill` stayed zero, and the host remained responsive. Evidence: `/var/tmp/multica-selfhost-release/cgroup-20260720T071925Z.log`.
 
 The default safe budget is therefore `MemoryHigh=4G`, `MemoryMax=4G`, `MemorySwapMax=256M`, and a 1536 MiB host reserve. If the preflight cannot cover 5632 MiB or existing swap use exceeds 256 MiB, do not start the build. First inspect resident RSS and stop only confirmed-unused services; Multica frontend/backend may be stopped for the deployment window and restarted after the backend build.
+
+The recurring 2026-08-03 release also established the safe release-window procedure:
+
+- LiteLLM runs as the Docker container `litellm`, not a systemd unit. Stop it with `sudo docker stop litellm` only when it was running, and restore it on every exit with `sudo docker start litellm`.
+- Record whether `multica-backend`, `multica-frontend`, and `litellm` were active before stopping them. Install an `EXIT` trap before the first stop so failed preflight, TypeScript, Webpack, or backend builds restore the original running services.
+- Stop the Multica frontend/backend and LiteLLM for the protected build window. Reset stale swap with `sudo swapoff -a && sudo swapon -a`, then let `deploy.sh` run its mandatory post-install resource guard. Never lower or bypass the 5632 MiB availability threshold.
+- A container restart policy may bring LiteLLM back. Check its actual Docker running state immediately before the guarded build; if it restarted and causes the preflight to fail, stop it again without weakening the guard.
 
 Repeatable verification:
 
@@ -129,15 +138,16 @@ install -m 0755 server/bin/multica ~/.local/bin/multica
 ~/.local/bin/multica version
 
 ssh my-mini 'zsh -lc "mkdir -p ~/.local/bin && if command -v brew >/dev/null 2>&1 && brew list --formula multica >/dev/null 2>&1; then brew uninstall multica; fi"'
-scp server/bin/multica my-mini:~/.local/bin/multica
-ssh my-mini 'zsh -lc "chmod 0755 ~/.local/bin/multica && ~/.local/bin/multica version"'
+scp server/bin/multica my-mini:~/.local/bin/multica.upload
+ssh my-mini 'zsh -lc "chmod 0755 ~/.local/bin/multica.upload && codesign --force --sign - ~/.local/bin/multica.upload && mv ~/.local/bin/multica.upload ~/.local/bin/multica && codesign --verify --strict ~/.local/bin/multica && ~/.local/bin/multica version"'
 ```
 
-Update and deploy remote:
+Update and deploy remote through a protected release window. Preserve pre-release service state and restore it with an `EXIT` trap; use `scripts/run_release.sh` for the exact implementation rather than copying a partial inline command. The core sequence is:
 
-```bash
-ssh my-mini 'ssh dj "cd ~/apps/multica && git fetch wingeddragon <branch> && git merge --ff-only wingeddragon/<branch> && ./scripts/deploy.sh"'
-```
+1. Fast-forward the remote checkout to the pinned final `HEAD` and verify the SHA.
+2. Record active services, install the cleanup trap, stop Multica services and the `litellm` Docker container.
+3. Reset stale swap, run `./scripts/deploy.sh`, and allow its resource guard to refuse unsafe builds.
+4. Restore every service that was active before the release, whether deployment succeeds or fails.
 
 Build and install locally:
 
@@ -160,6 +170,8 @@ ssh my-mini 'zsh -lc "~/.local/bin/multica version"'
 cat ~/.multica/desktop.json
 ssh my-mini 'ssh dj "cd ~/apps/multica && git status --short --branch && git rev-parse HEAD && systemctl is-active multica-backend multica-frontend"'
 ```
+
+Verify that the local app version, local CLI commit, `my-mini` CLI commit, remote checkout SHA, and expected final `HEAD` all match. A mismatch means the release is incomplete; rebuild and reinstall from the final commit.
 
 ## Scripted Path
 

@@ -1126,20 +1126,23 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 		body["project_id"] = project.ID
 	}
 	parentFlag, _ := cmd.Flags().GetString("parent")
-	// Rebase note: keep this automatic project binding after explicit
-	// --project and --parent handling. It is a convenience for top-level
-	// repo-bound issue creates only; explicit --project wins, and parent
-	// issues keep their server-side project inheritance semantics. Use a
-	// child timeout so slow project-resource discovery never cancels the real
-	// /api/issues create request that follows.
+	// Explicit --project wins. In daemon-managed runs the task's project is
+	// authoritative even when the agent creates a top-level follow-up from an
+	// empty workdir, where cwd-based git inference has no repository to inspect.
+	// Parent creates omit this default so the service can inherit the parent's
+	// project. Outside managed tasks, retain the unique git-origin fallback.
 	if !projectFlagChanged && strings.TrimSpace(parentFlag) == "" {
-		autoProjectCtx, autoProjectCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer autoProjectCancel()
-		project, ok, err := resolveProjectFromCurrentGitRemote(autoProjectCtx, client)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Skipping automatic project binding: %v\n", err)
-		} else if ok {
-			body["project_id"] = project.ID
+		if taskProjectID := strings.TrimSpace(os.Getenv("MULTICA_PROJECT_ID")); taskProjectID != "" {
+			body["project_id"] = taskProjectID
+		} else {
+			autoProjectCtx, autoProjectCancel := context.WithTimeout(ctx, 5*time.Second)
+			defer autoProjectCancel()
+			project, ok, err := resolveProjectFromCurrentGitRemote(autoProjectCtx, client)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Skipping automatic project binding: %v\n", err)
+			} else if ok {
+				body["project_id"] = project.ID
+			}
 		}
 	}
 	if cmd.Flags().Changed("stage") {

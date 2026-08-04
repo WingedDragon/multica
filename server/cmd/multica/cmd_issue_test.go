@@ -637,54 +637,6 @@ func TestRunIssueCreateDefaultsProjectFromCurrentGitRemote(t *testing.T) {
 	}
 }
 
-func TestRunIssueCreateDefaultsProjectFromTaskContext(t *testing.T) {
-	const projectID = "31163d2d-2a4d-49c0-93fb-abc9169afc70"
-
-	chdirTemp(t)
-	t.Setenv("MULTICA_PROJECT_ID", projectID)
-
-	var projectLookups atomic.Int32
-	var body map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/projects":
-			projectLookups.Add(1)
-			http.Error(w, "git-remote project lookup should not run", http.StatusInternalServerError)
-		case "/api/issues":
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Errorf("decode body: %v", err)
-			}
-			json.NewEncoder(w).Encode(map[string]any{
-				"id":         "issue-1",
-				"identifier": "MUL-1",
-				"title":      "Project follow-up",
-				"status":     "todo",
-				"priority":   "none",
-				"project_id": projectID,
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-
-	t.Setenv("MULTICA_SERVER_URL", srv.URL)
-	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
-	t.Setenv("MULTICA_TOKEN", "test-token")
-
-	cmd := newIssueCreateTestCmd()
-	_ = cmd.Flags().Set("title", "Project follow-up")
-	if err := runIssueCreate(cmd, nil); err != nil {
-		t.Fatalf("runIssueCreate: %v", err)
-	}
-	if got := projectLookups.Load(); got != 0 {
-		t.Fatalf("automatic project lookups = %d, want 0 with task project context", got)
-	}
-	if got := body["project_id"]; got != projectID {
-		t.Fatalf("project_id = %#v, want task project %q", got, projectID)
-	}
-}
-
 func TestRunIssueCreateExplicitProjectSkipsGitRemoteDefault(t *testing.T) {
 	const projectID = "11111111-1111-1111-1111-111111111111"
 

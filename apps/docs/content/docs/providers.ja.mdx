@@ -33,7 +33,27 @@ Multica は **17 個の AI コーディングツール**を標準でサポート
 
 ## 各ツールの用途
 
-### Antigravity
+| ツール | 検出コマンド | セッション再開 | Multica による MCP 管理 | スキルの注入先 |
+|---|---|---:|---:|---|
+| Antigravity | `agy` | ✓ | — | `.agents/skills/` |
+| Claude Code | `claude` | ✓ | ✓ | `.claude/skills/` |
+| CodeBuddy | `codebuddy` | ✓ | ✓ | `.codebuddy/skills/` |
+| Codex | `codex` | ✓ | ✓ | `$CODEX_HOME/skills/` |
+| GitHub Copilot CLI | `copilot` | ✓ | — | `.github/skills/` |
+| Cursor Agent | `cursor-agent` | ✓ | ✓ | `.cursor/skills/` |
+| DevEco Code | `deveco` | ✓ | — | `.deveco/skills/` |
+| Grok | `grok` | ✓ | ✓ | `.grok/skills/` |
+| Hermes | `hermes` | ✓ | ✓ | 1 回の実行専用の `HERMES_HOME/skills/` |
+| Kimi CLI | `kimi` | ✓ | ✓ | `.kimi/skills/` |
+| Reasonix | `reasonix` | ✓ | ✓ | `.reasonix/skills/` |
+| Kiro CLI | `kiro-cli` | ✓ | ✓ | `.kiro/skills/` |
+| OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
+| OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
+| Pi | `pi` | ✓ | — | `.pi/skills/` |
+| Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
+| Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
+| Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
+| Trae CLI | `traecli` | ✓ | ✓ | `.traecli/skills/` |
 
 Google が提供します。CLI バイナリ名は `agy` です。Google の Antigravity サービスと連携し、Gemini ベースのデフォルトモデルが付属しています。**セッション再開が動作します** — `--conversation <id>` を通じて行われ、stdout が構造化されたイベントストリームではなくプレーンテキストであるため、デーモンが CLI のログファイルから conversation UUID をキャプチャします。**モデル選択が動作します** — `--model` flag（agy 1.0.6 で追加）を通じて行われ、デーモンが `agy models` でカタログを列挙し、選択された値をそのまま渡します。これらは `provider/model` slug ではなく `Claude Opus 4.6 (Thinking)` のような人間が読める表示名である点に注意してください。また agy は認識できない値を渡すと黙って空実行するため、手入力ではなく検出されたリストから選ぶことをおすすめします。スキルは `.agents/skills/` に配置されます（CLI が Gemini CLI のワークスペーススキルレイアウトをそのまま継承します — [Antigravity 移行ドキュメント](https://antigravity.google/docs/gcli-migration)を参照）。
 

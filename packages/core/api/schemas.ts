@@ -15,8 +15,12 @@ import type {
   BillingTopupsPage,
   BillingTransactionsPage,
   CancelTaskResponse,
-  Comment,
+  ChatMessage,
   ChatDraftRestoresResponse,
+  ChatPendingTask,
+  PrioritizeQueuedChatTaskResponse,
+  SendChatMessageResponse,
+  Comment,
   CreateAgentFromTemplateResponse,
   CreateBillingCheckoutSessionResponse,
   CreateBillingPortalSessionResponse,
@@ -51,7 +55,6 @@ import type {
   ResourceLabelsResponse,
   QuickAction,
   ListQuickActionsResponse,
-  ChatMessage,
   RuntimeModelListRequest,
   SearchIssuesResponse,
   SearchProjectsResponse,
@@ -1244,39 +1247,57 @@ const OptionalStringArraySchema = z.preprocess(
   z.array(z.string()).optional(),
 );
 
-export const AgentTaskSchema = z
-  .object({
-    id: z.string(),
-    agent_id: z.string().default(""),
-    runtime_id: z.string().default(""),
-    issue_id: z.string().default(""),
-    status: z.string().default("cancelled"),
-    priority: z.number().default(0),
-    dispatched_at: z.string().nullable().default(null),
-    started_at: z.string().nullable().default(null),
-    completed_at: z.string().nullable().default(null),
-    result: z.unknown().default(null),
-    error: z.string().nullable().default(null),
-    failure_reason: z.string().optional(),
-    created_at: z.string().default(""),
-    chat_session_id: z.string().optional(),
-    autopilot_run_id: z.string().optional(),
-    parent_task_id: z.string().optional(),
-    attempt: z.number().optional(),
-    trigger_comment_id: z.string().optional(),
-    // Coverage is additive display metadata. A mixed-version or partially
-    // upgraded server must not make one malformed optional field erase the
-    // entire execution log, so degrade that field to "absent" independently.
-    coalesced_comment_ids: OptionalStringArraySchema,
-    delivered_comment_ids: OptionalStringArraySchema,
-    trigger_summary: z.string().optional(),
-    handoff_note: z.string().optional(),
-    kind: z.string().optional(),
-    work_dir: z.string().optional(),
-    relative_work_dir: z.string().optional(),
-    attribution: TaskAttributionSchema.optional(),
-  })
-  .loose();
+// One (provider, model) slice of a run's token usage. Token counts default to
+// 0 rather than failing the row: a slice missing one counter is still worth
+// pricing on the counters it does have, and the "we have no usage at all" case
+// is carried by the field's absence, not by a zeroed entry.
+const TaskUsageSchema = z.object({
+  provider: z.string().optional(),
+  model: z.string().default(""),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cache_write_tokens: z.number().default(0),
+  cost_usd_ticks: z.number().optional(),
+}).loose();
+
+export const AgentTaskSchema = z.object({
+  id: z.string(),
+  agent_id: z.string().default(""),
+  runtime_id: z.string().default(""),
+  issue_id: z.string().default(""),
+  status: z.string().default("cancelled"),
+  priority: z.number().default(0),
+  dispatched_at: z.string().nullable().default(null),
+  started_at: z.string().nullable().default(null),
+  completed_at: z.string().nullable().default(null),
+  result: z.unknown().default(null),
+  error: z.string().nullable().default(null),
+  failure_reason: z.string().optional(),
+  created_at: z.string().default(""),
+  chat_session_id: z.string().optional(),
+  autopilot_run_id: z.string().optional(),
+  parent_task_id: z.string().optional(),
+  attempt: z.number().optional(),
+  trigger_comment_id: z.string().optional(),
+  // Coverage is additive display metadata. A mixed-version or partially
+  // upgraded server must not make one malformed optional field erase the
+  // entire execution log, so degrade that field to "absent" independently.
+  coalesced_comment_ids: OptionalStringArraySchema,
+  delivered_comment_ids: OptionalStringArraySchema,
+  trigger_summary: z.string().optional(),
+  handoff_note: z.string().optional(),
+  kind: z.string().optional(),
+  work_dir: z.string().optional(),
+  relative_work_dir: z.string().optional(),
+  attribution: TaskAttributionSchema.optional(),
+  // Per-run token usage. Same independent-degradation rule as the coverage
+  // arrays above: usage is additive display metadata, so one malformed entry
+  // must cost the row its usage figure, not erase the whole execution log.
+  // `.catch(undefined)` collapses a bad array to "no usage recorded", which
+  // the UI already renders as an em dash.
+  usage: z.array(TaskUsageSchema).optional().catch(undefined),
+}).loose();
 
 export const AgentTaskListSchema = z.array(AgentTaskSchema);
 
@@ -1323,6 +1344,52 @@ export const ChatDraftRestoresResponseSchema = z
     restores: z.array(ChatDraftRestoreSchema).default([]),
   })
   .loose();
+
+const ChatQueuedTaskSchema = z.object({
+  task_id: z.string(),
+  status: z.string().default("queued"),
+  created_at: z.string().default(""),
+  message_id: z.string().optional(),
+  content: z.string().optional(),
+}).loose();
+
+const ChatQueuedTasksSchema = z.array(z.unknown()).transform((tasks) =>
+  tasks.flatMap((task) => {
+    const parsed = ChatQueuedTaskSchema.safeParse(task);
+    return parsed.success ? [parsed.data] : [];
+  }),
+);
+
+// Root fields retain the legacy single-task response shape. Keep additive
+// fields optional so callers can distinguish an older server from an empty
+// queue. A malformed queue row is ignored without discarding a valid head.
+export const ChatPendingTaskSchema: z.ZodType<ChatPendingTask> = z.object({
+  task_id: z.string().optional(),
+  status: z.string().optional(),
+  created_at: z.string().optional(),
+  supports_queue: z.boolean().optional(),
+  queued_tasks: ChatQueuedTasksSchema.optional(),
+}).loose();
+
+export const EMPTY_CHAT_PENDING_TASK: ChatPendingTask = {};
+
+export const SendChatMessageResponseSchema: z.ZodType<SendChatMessageResponse> = z.object({
+  message_id: z.string().min(1),
+  task_id: z.string().min(1),
+  supports_queue: z.boolean().optional(),
+  queued: z.boolean().optional().catch(undefined),
+  created_at: z.string().min(1),
+  attachment_ids: z.array(z.string()).nullish().transform((ids) => ids ?? undefined),
+}).loose();
+
+export const PrioritizeQueuedChatTaskResponseSchema:
+  z.ZodType<PrioritizeQueuedChatTaskResponse> = z.object({
+    task_id: z.string(),
+    active_task_id: z.string().optional(),
+  }).loose();
+
+export const EMPTY_PRIORITIZE_QUEUED_CHAT_TASK_RESPONSE:
+  PrioritizeQueuedChatTaskResponse = { task_id: "" };
 
 export const EMPTY_CHAT_DRAFT_RESTORES: ChatDraftRestoresResponse = {
   restores: [],
@@ -1395,6 +1462,8 @@ export const AgentTemplateSchema = AgentTemplateSummarySchemaBase.extend({
   // Detail-only field. Default "" so a malformed detail still renders the
   // header + skill list; the user just sees an empty Instructions block.
   instructions: z.string().default(""),
+  system_key: z.string().optional(),
+  system_instructions: z.string().optional(),
 }).loose();
 
 // Used as the parse fallback for `GET /api/agent-templates/:slug`. Slug comes
@@ -1564,36 +1633,24 @@ const SquadMemberPreviewSchema = z
   })
   .loose();
 
-export const SquadSchema = z
-  .object({
-    id: z.string(),
-    workspace_id: z.string(),
-    name: z.string(),
-    description: z.string().default(""),
-    instructions: z.string().default(""),
-    avatar_url: z
-      .string()
-      .nullable()
-      .optional()
-      .transform((v) => v ?? null),
-    leader_id: z.string(),
-    creator_id: z.string(),
-    created_at: z.string(),
-    updated_at: z.string(),
-    archived_at: z
-      .string()
-      .nullable()
-      .optional()
-      .transform((v) => v ?? null),
-    archived_by: z
-      .string()
-      .nullable()
-      .optional()
-      .transform((v) => v ?? null),
-    member_count: z.number().default(0),
-    member_preview: z.array(SquadMemberPreviewSchema).default([]),
-  })
-  .loose();
+export const SquadSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  name: z.string(),
+  description: z.string().default(""),
+  instructions: z.string().default(""),
+  system_key: z.string().optional(),
+  system_instructions: z.string().optional(),
+  avatar_url: z.string().nullable().optional().transform((v) => v ?? null),
+  leader_id: z.string(),
+  creator_id: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  archived_at: z.string().nullable().optional().transform((v) => v ?? null),
+  archived_by: z.string().nullable().optional().transform((v) => v ?? null),
+  member_count: z.number().default(0),
+  member_preview: z.array(SquadMemberPreviewSchema).default([]),
+}).loose();
 
 export const SquadListSchema = z.array(SquadSchema);
 export const EMPTY_SQUAD_LIST: Squad[] = [];

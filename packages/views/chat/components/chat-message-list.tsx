@@ -33,6 +33,8 @@ import { RichContent } from "../../rich-content";
 import { RichContentScrollRootProvider } from "../../rich-content/scroll-root";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { AttachmentList } from "../../issues/components/comment-card";
+import { ImageSequenceProvider } from "../../editor";
+import { collectImageSequence } from "@multica/core/attachments/image-sequence";
 import type { AgentAvailability } from "@multica/core/agents";
 import { resolveFailureReasonKey } from "@multica/core/agents";
 import type {
@@ -228,14 +230,18 @@ export function ChatMessageList({
   // Persisted messages plus, while a task is in flight, one synthetic trailing
   // row for it. When the assistant message persists, `hasLive` goes false and
   // the message takes the SAME key at the SAME position — an in-place data
-  // swap, not a remount.
+  // swap, not a remount. The onboarding kickoff is a server-authored carrier
+  // for Mika's first task, not something the member typed, so it never becomes
+  // a visible bubble.
   const renderItems: ChatRenderItem[] = useMemo(() => {
-    const items: ChatRenderItem[] = messages.map((message) => ({
-      key: messageRowKey(message),
-      kind: "message" as const,
-      message,
-      taskId: message.task_id ?? null,
-    }));
+    const items: ChatRenderItem[] = messages
+      .filter((message) => message.message_kind !== "onboarding_kickoff")
+      .map((message) => ({
+        key: messageRowKey(message),
+        kind: "message" as const,
+        message,
+        taskId: message.task_id ?? null,
+      }));
     if (hasLive && pendingTaskId) {
       items.push({ key: `task:${pendingTaskId}`, kind: "live", taskId: pendingTaskId });
     }
@@ -252,7 +258,27 @@ export function ChatMessageList({
     availability,
   };
 
+  // Every image in this session, in message order, so opening one lets the
+  // reader page through the rest (MUL-5752). Built from the message data, not
+  // from what Virtuoso currently has mounted.
+  //
+  // Persisted messages only: a task transcript's own attachments live behind a
+  // separate query and its blocks are collapsed by default, so an image in
+  // there keeps its standalone preview instead of entering a sequence the
+  // reader can't see the rest of.
+  const imageSequence = useMemo(
+    () =>
+      collectImageSequence(
+        messages.map((message) => ({
+          content: message.content,
+          attachments: message.attachments,
+        })),
+      ),
+    [messages],
+  );
+
   return (
+    <ImageSequenceProvider items={imageSequence}>
     <div
       ref={setScrollContainerRef}
       data-tab-scroll-root
@@ -318,6 +344,7 @@ export function ChatMessageList({
       </RichContentScrollRootProvider>
       )}
     </div>
+    </ImageSequenceProvider>
   );
 }
 

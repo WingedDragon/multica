@@ -10,7 +10,8 @@ import (
 	"time"
 )
 
-// thinking.go discovers per-model reasoning/effort catalogs so the daemon can
+// thinking.go discovers per-model reasoning/effort catalogs for the
+// claude, codex, opencode, pi, kimi, and omp backends so the daemon can
 // advertise them to the UI without hard-coding (and getting wrong) what's
 // installed locally.
 //
@@ -760,6 +761,17 @@ var providerThinkingEnums = map[string]map[string]bool{
 		"medium": true,
 		"high":   true,
 	},
+	// Pi owns a fixed CLI vocabulary; RPC discovery narrows this universe to
+	// the exact subset supported by each model before execution.
+	"pi": {
+		"off":     true,
+		"minimal": true,
+		"low":     true,
+		"medium":  true,
+		"high":    true,
+		"xhigh":   true,
+		"max":     true,
+	},
 }
 
 // thinkingDynamicCatalogProviders are the runtimes whose effort vocabulary is
@@ -770,6 +782,7 @@ var thinkingDynamicCatalogProviders = map[string]bool{
 	"codex":    true,
 	"opencode": true,
 	"omp":      true,
+	"kimi":     true,
 }
 
 // ThinkingControlSupported reports whether Multica can deliver a per-agent
@@ -806,9 +819,10 @@ func ThinkingControlSupported(providerType string) bool {
 
 // IsKnownThinkingValue reports whether `value` is a recognised effort
 // token for the given provider. Empty string is always accepted (means
-// "use runtime default"). Unknown providers (no thinking concept) accept
-// only empty; catalog-backed providers accept well-formed tokens here because
-// their daemon-local catalogs perform the exact per-model check before execution.
+// "use runtime default"). Providers with no reasoning control accept
+// only empty; Codex, OpenCode, Kimi, and OMP accept well-formed tokens here
+// because their daemon-local catalogs perform the exact per-model check before
+// execution.
 //
 // This is the cheap synchronous gate the server uses on CreateAgent /
 // UpdateAgent. Unlike ValidateThinkingLevel it does NOT consult the live

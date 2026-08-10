@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -300,9 +301,10 @@ func TestRepoCheckoutModeFor(t *testing.T) {
 		name, provider, goos, want string
 	}{
 		{name: "Linux Codex isolates Git metadata", provider: "codex", goos: "linux", want: repoCheckoutModeIsolated},
+		{name: "Windows Codex isolates Git metadata", provider: "codex", goos: "windows", want: repoCheckoutModeIsolated},
 		{name: "macOS Codex keeps worktree", provider: "codex", goos: "darwin"},
-		{name: "Windows Codex keeps worktree", provider: "codex", goos: "windows"},
 		{name: "Linux Claude keeps worktree", provider: "claude", goos: "linux"},
+		{name: "Windows Claude keeps worktree", provider: "claude", goos: "windows"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -338,11 +340,12 @@ func TestConfigureCodexTaskShellEnvironment(t *testing.T) {
 			"MULTICA_LLM_API_KEY=daemon-secret",
 		}
 		agentEnv := map[string]string{
-			"CUSTOM_ACCESS_TOKEN": "agent-secret",
-			"CUSTOM_FLAG":         "enabled",
-			"UNAUTHORIZED_TOKEN":  "daemon-secret",
-			"MULTICA_SERVER_URL":  "https://task.example",
-			"MULTICA_TOKEN":       "mat_task",
+			"CUSTOM_ACCESS_TOKEN":      "agent-secret",
+			"CUSTOM_FLAG":              "enabled",
+			"UNAUTHORIZED_TOKEN":       "daemon-secret",
+			"MULTICA_TASK_CONFIG_ROOT": "/task/multica-config",
+			"MULTICA_SERVER_URL":       "https://task.example",
+			"MULTICA_TOKEN":            "mat_task",
 		}
 		agentCustomEnv := map[string]string{
 			"CUSTOM_ACCESS_TOKEN": "agent-secret",
@@ -356,7 +359,7 @@ func TestConfigureCodexTaskShellEnvironment(t *testing.T) {
 			t.Fatalf("read config.toml: %v", err)
 		}
 		config := string(data)
-		for _, want := range []string{"SystemRoot", "USERPROFILE", "CUSTOM_ACCESS_TOKEN", "CUSTOM_FLAG", "MULTICA_SERVER_URL", "MULTICA_TOKEN"} {
+		for _, want := range []string{"SystemRoot", "USERPROFILE", "CUSTOM_ACCESS_TOKEN", "CUSTOM_FLAG", "MULTICA_TASK_CONFIG_ROOT", "MULTICA_SERVER_URL", "MULTICA_TOKEN"} {
 			if !strings.Contains(config, want) {
 				t.Errorf("config.toml missing %q:\n%s", want, config)
 			}
@@ -400,9 +403,10 @@ func TestCodexTaskShellEnvInheritsRealHome(t *testing.T) {
 	// What runTask layers on top for a Codex task: task identity plus the
 	// task-scoped CODEX_HOME, and — since MUL-5578 — no HOME/XDG entry.
 	explicit := map[string]string{
-		"CODEX_HOME":         codexHome,
-		"MULTICA_TOKEN":      "mat_task",
-		"MULTICA_SERVER_URL": "https://task.example",
+		"CODEX_HOME":               codexHome,
+		"MULTICA_TASK_CONFIG_ROOT": "/task/multica-config",
+		"MULTICA_TOKEN":            "mat_task",
+		"MULTICA_SERVER_URL":       "https://task.example",
 	}
 
 	if err := configureCodexTaskShellEnvironment("codex", codexHome, inherited, explicit, nil, slog.Default()); err != nil {
@@ -433,6 +437,9 @@ func TestCodexTaskShellEnvInheritsRealHome(t *testing.T) {
 	// CODEX_HOME is the one home-shaped variable the daemon does own.
 	if !slices.Contains(include, "CODEX_HOME") {
 		t.Errorf("include_only missing CODEX_HOME, got %v", include)
+	}
+	if !slices.Contains(include, "MULTICA_TASK_CONFIG_ROOT") {
+		t.Errorf("include_only missing MULTICA_TASK_CONFIG_ROOT, got %v", include)
 	}
 }
 
@@ -501,6 +508,56 @@ func TestTaskScopedAuthToken(t *testing.T) {
 				t.Fatalf("taskScopedAuthToken() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTaskMulticaEnvironmentIncludesPrivateConfigRoot(t *testing.T) {
+	t.Parallel()
+
+	const (
+		fakeToken      = "mat_task_environment_sentinel"
+		taskRoot       = "/task/private-multica-config"
+		workspacesRoot = "/daemon/multica_workspaces_staging"
+	)
+	task := Task{
+		ID:          "task-test",
+		AgentID:     "agent-test",
+		WorkspaceID: "workspace-test",
+	}
+	env := taskMulticaEnvironment(task, "agent-name", fakeToken, taskRoot, workspacesRoot, "https://task.example", 19514, 3, "/task/tmp")
+
+	want := map[string]string{
+		"MULTICA_TOKEN":                fakeToken,
+		"MULTICA_TASK_CONFIG_ROOT":     taskRoot,
+		"MULTICA_TASK_WORKSPACES_ROOT": workspacesRoot,
+		"MULTICA_SERVER_URL":           "https://task.example",
+		"MULTICA_DAEMON_PORT":          "19514",
+		"MULTICA_WORKSPACE_ID":         "workspace-test",
+		"MULTICA_AGENT_NAME":           "agent-name",
+		"MULTICA_AGENT_ID":             "agent-test",
+		"MULTICA_TASK_ID":              "task-test",
+		"MULTICA_TASK_SLOT":            "3",
+		"TMPDIR":                       "/task/tmp",
+		"TMP":                          "/task/tmp",
+		"TEMP":                         "/task/tmp",
+	}
+	if !maps.Equal(env, want) {
+		t.Fatalf("taskMulticaEnvironment() = %#v, want %#v", env, want)
+	}
+
+	layerCustomEnvAndHermesHome(env, map[string]string{
+		"MULTICA_TASK_CONFIG_ROOT":     "/owner/config",
+		"MULTICA_TASK_WORKSPACES_ROOT": "/owner/multica_workspaces",
+		"MULTICA_TOKEN":                "mul_owner_sentinel",
+	}, "", nil)
+	if env["MULTICA_TASK_CONFIG_ROOT"] != taskRoot {
+		t.Fatalf("custom env replaced task config root: %q", env["MULTICA_TASK_CONFIG_ROOT"])
+	}
+	if env[TaskWorkspacesRootEnv] != workspacesRoot {
+		t.Fatalf("custom env replaced task workspaces root: %q", env[TaskWorkspacesRootEnv])
+	}
+	if env["MULTICA_TOKEN"] != fakeToken {
+		t.Fatal("custom env replaced task-scoped token")
 	}
 }
 
@@ -1042,11 +1099,10 @@ func TestBuildPromptCommentTriggered(t *testing.T) {
 		commentID,
 		"multica issue comment add " + issueID + " --parent " + commentID,
 		"do NOT reuse --parent values from previous turns",
-		// Silence-as-valid-exit for agent-to-agent loops depends on the
-		// reply command being framed conditionally rather than as a hard
-		// requirement. Guard the phrasing so the conflict with the new
-		// workflow (MUL-1323) doesn't come back.
-		"If you decide to reply",
+		// MUL-5442 (2026-08-06): with the generic no-reply rule retired,
+		// the reply command is framed as a plain imperative again — the
+		// squad leader's `no_action` block states its own exception.
+		"Post your reply as a comment",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q\n---\n%s", want, prompt)
@@ -1059,11 +1115,17 @@ func TestBuildPromptCommentTriggered(t *testing.T) {
 	}
 }
 
-// TestBuildPromptCommentTriggeredByAgent covers the agent-to-agent mention
-// loop signal injected into the per-turn prompt (MUL-1323 / GH#1576). When
-// the triggering comment was posted by another agent, the prompt must name
-// the author, warn against sign-off @mentions, and point at silence as a
-// valid exit.
+// TestBuildPromptCommentTriggeredByAgent covers the trigger-attribution
+// line for agent-authored triggers, and guards the RETIREMENT of the
+// generic no-reply warning block that used to follow it (MUL-1323 /
+// GH#1576). Retired by MUL-5442 owner decision (2026-08-06): an agent
+// comment cannot wake an ordinary agent without an explicit @mention
+// (computeCommentAgentTriggers routes agent-authored comments only via
+// mentions, plus the squad-leader wake), so loop prevention belongs to the
+// mention discipline in the brief's `## Mentions`, and recorded silence
+// stays squad-leader-only (`no_action`). Retired pins, now negative
+// guards: "do not @mention the other agent as a sign-off", "Silence is
+// the preferred way".
 func TestBuildPromptCommentTriggeredByAgent(t *testing.T) {
 	t.Parallel()
 
@@ -1076,13 +1138,20 @@ func TestBuildPromptCommentTriggeredByAgent(t *testing.T) {
 		Agent:                 &AgentData{Name: "Test"},
 	}, "claude")
 
-	for _, want := range []string{
-		"Another agent (Atlas)",
-		"do not @mention the other agent as a sign-off",
+	if !strings.Contains(prompt, "Another agent (Atlas)") {
+		t.Fatalf("prompt missing trigger attribution\n---\n%s", prompt)
+	}
+	for _, banned := range []string{
 		"Silence is the preferred way",
+		"do not @mention the other agent as a sign-off",
+		"reply is warranted",
+		"exit with no output",
+		// The conditional reply framing was the door the retired rule
+		// walked through — guard it shut (MUL-5442 #6493 review).
+		"If you decide to reply",
 	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing %q\n---\n%s", want, prompt)
+		if strings.Contains(prompt, banned) {
+			t.Fatalf("per-turn prompt still carries retired no-reply warning %q\n---\n%s", banned, prompt)
 		}
 	}
 }
@@ -1108,15 +1177,16 @@ func TestBuildPromptCommentTriggeredByMember(t *testing.T) {
 	if strings.Contains(prompt, "Another agent") {
 		t.Fatalf("member-triggered prompt should not claim the author was another agent")
 	}
-	// Must NOT use the old "You MUST respond" language — that conflicts with
-	// the agent-to-agent silence-as-valid-exit workflow. Even on human-authored
-	// triggers, the reply command is framed conditionally for a single
-	// consistent rule across turn types.
+	// Must NOT use the old "You MUST respond" language: the reply command is
+	// shared across turn types, and a squad leader's `no_action` exit — the
+	// one silent path left after MUL-5442 retired the generic no-reply rule —
+	// must not be shouted over by the per-turn channel. The unconditional
+	// one-comment contract for ordinary agents lives in the brief.
 	if strings.Contains(prompt, "MUST respond") {
 		t.Fatalf("prompt should not contain unconditional \"MUST respond\" language\n---\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "If you decide to reply") {
-		t.Fatalf("prompt should frame the reply command conditionally\n---\n%s", prompt)
+	if !strings.Contains(prompt, "Post your reply as a comment") {
+		t.Fatalf("prompt should carry the imperative reply command\n---\n%s", prompt)
 	}
 }
 
@@ -1149,6 +1219,8 @@ func TestBuildPromptSquadLeaderNoActionProhibition(t *testing.T) {
 		TriggerCommentContent: "Progress update: tests passing.",
 		TriggerAuthorType:     "agent",
 		TriggerAuthorName:     "Worker",
+		IsLeaderTask:          true,
+		LeaderRoleResolved:    true,
 		Agent: &AgentData{
 			Name:         "Leader",
 			Instructions: "You lead the team.\n\n## Squad Operating Protocol\n\nYou are the LEADER.",
@@ -2797,6 +2869,63 @@ func (blockingBackend) Execute(_ context.Context, _ string, _ agent.ExecOptions)
 	resCh := make(chan agent.Result)
 	close(msgCh)
 	return &agent.Session{Messages: msgCh, Result: resCh}, nil
+}
+
+type countedRunningBackend struct {
+	release <-chan struct{}
+}
+
+func (b countedRunningBackend) Execute(_ context.Context, _ string, _ agent.ExecOptions) (*agent.Session, error) {
+	msgCh := make(chan agent.Message)
+	resCh := make(chan agent.Result, 1)
+	go func() {
+		<-b.release
+		close(msgCh)
+		resCh <- agent.Result{Status: "completed"}
+	}()
+	return &agent.Session{Messages: msgCh, Result: resCh}, nil
+}
+
+func TestExecuteAndDrainTracksRunningTaskCount(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDaemon(t)
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := d.executeAndDrain(
+			context.Background(),
+			countedRunningBackend{release: release},
+			"p",
+			agent.ExecOptions{},
+			slog.Default(),
+			"task-counted-running",
+			"",
+			new(atomic.Int32),
+		)
+		done <- err
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for d.runningTasks.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := d.runningTasks.Load(); got != 1 {
+		t.Fatalf("running task count while backend is live = %d, want 1", got)
+	}
+
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("executeAndDrain: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("executeAndDrain did not return after backend release")
+	}
+	if got := d.runningTasks.Load(); got != 0 {
+		t.Fatalf("running task count after backend exit = %d, want 0", got)
+	}
 }
 
 func TestExecuteAndDrain_ContextCancelled_ReportsCancelled(t *testing.T) {
@@ -5023,5 +5152,109 @@ func TestFreshSessionMayHelp(t *testing.T) {
 	const hermesAuth = "hermes provider error: \"Could not resolve authentication method. Expected either api_key or auth_token to be set. Or for one of the X-Api-Key or Authorization headers to be explicitly omitted\""
 	if !freshSessionMayHelp(hermesAuth) {
 		t.Fatalf("freshSessionMayHelp(auth-resolution error) = false; a fresh session cures this failure, it must report session-fixable")
+	}
+}
+
+// TestBuildPromptSquadLeaderReplyCommandCarvesOutNoAction renders the COMPLETE
+// leader prompt and pins the exception's scope relation (MUL-5442 #6493
+// review): the no_action rule and the reply imperative appear in the same
+// prompt, so the imperative must carry the carve-out itself — a bare
+// unconditional "Post your reply as a comment" anywhere in a leader prompt
+// re-opens the contradiction the carve-out exists to close.
+func TestBuildPromptSquadLeaderReplyCommandCarvesOutNoAction(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		IssueID:               "issue-1",
+		TriggerCommentID:      "comment-1",
+		TriggerCommentContent: "team update posted",
+		TriggerAuthorType:     "member",
+		TriggerAuthorName:     "Bohan",
+		IsLeaderTask:          true,
+		LeaderRoleResolved:    true,
+		Agent: &AgentData{
+			Name:         "Lead",
+			Instructions: "Some instructions\n\n## Squad Operating Protocol\n\nYou are the LEADER...",
+		},
+	}, "claude")
+
+	if !strings.Contains(prompt, "Squad leader no_action rule") {
+		t.Fatalf("leader prompt missing the no_action rule\n---\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Unless your outcome is `no_action`, post your reply as a comment") {
+		t.Fatalf("leader prompt missing the carve-out reply imperative\n---\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Post your reply as a comment") {
+		t.Fatalf("leader prompt still carries the unconditional reply imperative\n---\n%s", prompt)
+	}
+}
+
+// TestBuildPromptSquadLeaderMultiThreadCarvesOutNoAction renders the complete
+// leader prompt on the cross-thread fan-out path (MUL-5442 #6493 review): the
+// fan-out imperative fires AFTER the no_action rule, so its scope sentence
+// must govern the ENTIRE block — assert it precedes every later obligation,
+// not just the first verb. The ordinary fan-out output keeps the
+// unconditional form byte-for-byte.
+func TestBuildPromptSquadLeaderMultiThreadCarvesOutNoAction(t *testing.T) {
+	t.Parallel()
+
+	leaderTask := Task{
+		IssueID:               "issue-1",
+		TriggerCommentID:      "comment-9",
+		TriggerThreadID:       "thread-B",
+		TriggerCommentContent: "second update",
+		TriggerAuthorType:     "agent",
+		TriggerAuthorName:     "Worker",
+		CoalescedComments: []CoalescedCommentData{
+			{ID: "comment-8", ThreadID: "thread-A", Content: "first update"},
+		},
+		IsLeaderTask:       true,
+		LeaderRoleResolved: true,
+		Agent: &AgentData{
+			Name:         "Lead",
+			Instructions: "Some instructions\n\n## Squad Operating Protocol\n\nYou are the LEADER...",
+		},
+	}
+	prompt := BuildPrompt(leaderTask, "claude")
+	if !strings.Contains(prompt, "Squad leader no_action rule") {
+		t.Fatalf("leader multi-thread prompt missing the no_action rule\n---\n%s", prompt)
+	}
+	scope := strings.Index(prompt, "skip this ENTIRE fan-out block")
+	if scope < 0 {
+		t.Fatalf("leader multi-thread prompt missing the whole-block scope sentence\n---\n%s", prompt)
+	}
+	// Obligation strings track the converged fan-out block (MUL-5825). Pin
+	// ledger: "Post the replies in the order listed below" → the order rule
+	// merged into the targets header ("OLDEST thread first"); "For EACH
+	// thread above" → the embedded cookbook collapsed to the
+	// `## Comment Formatting` pointer plus the per-thread file delta
+	// ("DISTINCT body file per thread"). The assertion shape is unchanged:
+	// every obligation must sit AFTER the no_action scope sentence.
+	for _, obligation := range []string{
+		"multiple replies are required and correct",
+		"OLDEST thread first",
+		"DISTINCT body file per thread",
+	} {
+		idx := strings.Index(prompt, obligation)
+		if idx < 0 {
+			t.Fatalf("leader multi-thread prompt missing obligation %q\n---\n%s", obligation, prompt)
+		}
+		if idx < scope {
+			t.Fatalf("obligation %q precedes the no_action scope sentence — it escapes the carve-out\n---\n%s", obligation, prompt)
+		}
+	}
+	if strings.Contains(prompt, ". Post ONE reply per thread") {
+		t.Fatalf("leader multi-thread prompt still carries the unconditional imperative\n---\n%s", prompt)
+	}
+
+	ordinaryTask := leaderTask
+	ordinaryTask.IsLeaderTask = false
+	ordinaryTask.Agent = &AgentData{Name: "Reg", Instructions: "You are a regular agent."}
+	ordinary := BuildPrompt(ordinaryTask, "claude")
+	if !strings.Contains(ordinary, ". Post ONE reply per thread") {
+		t.Fatalf("ordinary multi-thread prompt missing the unconditional imperative\n---\n%s", ordinary)
+	}
+	if strings.Contains(ordinary, "Unless your outcome is") || strings.Contains(ordinary, "skip this ENTIRE fan-out block") {
+		t.Fatalf("ordinary multi-thread prompt leaked the leader carve-out\n---\n%s", ordinary)
 	}
 }

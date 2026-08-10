@@ -46,7 +46,6 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | Grok | `grok` | ✓ | ✓ | `.grok/skills/` |
 | Hermes | `hermes` | ✓ | ✓ | per-task `HERMES_HOME/skills/` |
 | Kimi CLI | `kimi` | ✓ | ✓ | `.kimi/skills/` |
-| Reasonix | `reasonix` | ✓ | ✓ | `.reasonix/skills/` |
 | Kiro CLI | `kiro-cli` | ✓ | ✓ | `.kiro/skills/` |
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
@@ -54,6 +53,8 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
 | Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
+| QwenPaw | `qwenpaw` | ✓ | ✓ | per-task workspace `skills/` |
+| Reasonix | `reasonix` | ✓ | ✓ | `.reasonix/skills/` |
 | Trae CLI | `traecli` | ✓ | ✓ | `.traecli/skills/` |
 
 From Google. CLI binary name is `agy`. Pairs with Google's Antigravity service and ships with a Gemini-backed default model. Multica launches Antigravity with `agy -p` because that is the daemon-compatible non-interactive mode; `agy -i` needs an attached TTY and is not suitable for background task execution. Current Antigravity CLI releases can still execute tools from this mode, but stdout is plain assistant text rather than a structured event stream, so Multica relays the transcript as text and cannot show per-tool telemetry for Antigravity today. **Session resumption works** via `--conversation <id>`; the daemon captures the conversation UUID from the CLI's log file. **Model selection works** via the `--model` flag (added in agy 1.0.6): the daemon enumerates the catalog with `agy models` and ships the chosen value verbatim. Note these are human display strings such as `Claude Opus 4.6 (Thinking)`, not `provider/model` slugs — and agy silently no-ops on a value it doesn't recognise, so prefer picking from the discovered list over typing a custom one. Skills land in `.agents/skills/` (the CLI inherits Gemini CLI's workspace skill layout — see [Antigravity migration docs](https://antigravity.google/docs/gcli-migration)).
@@ -65,6 +66,11 @@ From Anthropic. **First choice for new users** — the most complete feature set
 ### CodeBuddy
 
 From Tencent. A Claude Code–compatible CLI agent — Multica drives it with the same stream-json protocol as Claude Code, so session resumption works (via `--resume`) and MCP config is passed through `--mcp-config`. CodeBuddy ships its own native config directory rather than reusing Claude's, so skills land in `.codebuddy/skills/` and the runtime brief is written to `CODEBUDDY.md`. Models are discovered dynamically.
+QwenPaw is the one exception: it does not accept a model chosen from Multica, so the picker is inert and shows "Managed by runtime". Choose the model in QwenPaw's own configuration instead. An empty model list is expected there and is not a sign that the runtime is offline.
+
+<Callout type="info">
+Different tools may use different model names. After switching AI coding tools, the previous model value is invalid in the new tool and needs to be selected again.
+</Callout>
 
 ### Codex
 

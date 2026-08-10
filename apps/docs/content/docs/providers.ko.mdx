@@ -45,7 +45,6 @@ Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | Grok | `grok` | ✓ | ✓ | `.grok/skills/` |
 | Hermes | `hermes` | ✓ | ✓ | 실행별 `HERMES_HOME/skills/` |
 | Kimi CLI | `kimi` | ✓ | ✓ | `.kimi/skills/` |
-| Reasonix | `reasonix` | ✓ | ✓ | `.reasonix/skills/` |
 | Kiro CLI | `kiro-cli` | ✓ | ✓ | `.kiro/skills/` |
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
@@ -53,6 +52,8 @@ Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
 | Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
+| QwenPaw | `qwenpaw` | ✓ | ✓ | 실행별 워크스페이스 `skills/` |
+| Reasonix | `reasonix` | ✓ | ✓ | `.reasonix/skills/` |
 | Trae CLI | `traecli` | ✓ | ✓ | `.traecli/skills/` |
 
 Google에서 제공합니다. CLI 바이너리 이름은 `agy`입니다. Google의 Antigravity 서비스와 연동되며 Gemini 기반의 기본 모델을 함께 제공합니다. **세션 재개가 동작합니다** — `--conversation <id>`를 통해서이며, stdout이 구조화된 이벤트 스트림이 아니라 일반 텍스트이기 때문에 데몬이 CLI의 로그 파일에서 conversation UUID를 캡처합니다. **모델 선택이 동작합니다** — `--model` flag(agy 1.0.6에서 추가)를 통해서이며, 데몬이 `agy models`로 카탈로그를 열거하고 선택된 값을 그대로 전달합니다. 이 값들은 `provider/model` slug가 아니라 `Claude Opus 4.6 (Thinking)` 같은 사람이 읽는 표시 이름이라는 점에 유의하세요. 또한 agy는 인식할 수 없는 값을 받으면 조용히 빈 실행을 하므로, 직접 입력하기보다 발견된 목록에서 선택하는 것을 권장합니다. 스킬은 `.agents/skills/`에 들어갑니다(CLI가 Gemini CLI의 워크스페이스 스킬 레이아웃을 그대로 따릅니다 — [Antigravity 마이그레이션 문서](https://antigravity.google/docs/gcli-migration) 참고).
@@ -64,6 +65,11 @@ Anthropic에서 제공합니다. **신규 사용자에게 첫 번째 선택지**
 ### CodeBuddy
 
 Tencent에서 제공합니다. Claude Code 호환 CLI 에이전트입니다 — Multica는 Claude Code와 동일한 stream-json 프로토콜로 구동하므로 세션 재개가 동작하고(`--resume` 경유), MCP 구성은 `--mcp-config`로 전달됩니다. CodeBuddy는 Claude의 디렉터리를 재사용하지 않고 자체 설정 디렉터리를 사용하므로, 스킬은 `.codebuddy/skills/`에 배치되고 런타임 브리핑은 `CODEBUDDY.md`에 기록됩니다. 모델은 동적으로 탐색됩니다.
+QwenPaw만 예외입니다. Multica에서 고른 모델을 받아들이지 않으므로 선택 상자가 비활성 상태로 "런타임에서 관리"라고 표시됩니다. 모델은 QwenPaw 자체 설정에서 선택하세요. QwenPaw의 모델 목록이 비어 있는 것은 정상이며 런타임이 오프라인이라는 뜻이 아닙니다.
+
+<Callout type="info">
+도구마다 모델 이름이 다를 수 있습니다. AI 코딩 도구를 바꾸면 기존 모델 값은 새 도구에서 유효하지 않으므로 다시 선택해야 합니다.
+</Callout>
 
 ### Codex
 

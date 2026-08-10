@@ -12,12 +12,18 @@ import (
 )
 
 type fakeOctoChatSession struct {
-	appendIn engine.AppendInput
-	mediaIn  engine.BindMediaInput
+	appendIn     engine.AppendInput
+	mediaIn      engine.BindMediaInput
+	pendingFresh pgtype.UUID
 }
 
 func (f *fakeOctoChatSession) EnsureSession(_ context.Context, _ engine.EnsureSessionInput) (pgtype.UUID, error) {
 	return testUUID(42), nil
+}
+
+func (f *fakeOctoChatSession) MarkPendingFresh(_ context.Context, sessionID pgtype.UUID) error {
+	f.pendingFresh = sessionID
+	return nil
 }
 
 func (f *fakeOctoChatSession) AppendUserMessage(_ context.Context, in engine.AppendInput) (engine.AppendResult, error) {
@@ -28,6 +34,19 @@ func (f *fakeOctoChatSession) AppendUserMessage(_ context.Context, in engine.App
 func (f *fakeOctoChatSession) BindMediaRefs(_ context.Context, in engine.BindMediaInput) error {
 	f.mediaIn = in
 	return nil
+}
+
+func TestOctoSessionBinderMarksPendingFresh(t *testing.T) {
+	session := &fakeOctoChatSession{}
+	binder := sessionBinder{session: session}
+	sessionID := testUUID(91)
+
+	if err := binder.MarkPendingFresh(context.Background(), sessionID); err != nil {
+		t.Fatalf("MarkPendingFresh: %v", err)
+	}
+	if session.pendingFresh != sessionID {
+		t.Fatalf("pending fresh session = %v, want %v", session.pendingFresh, sessionID)
+	}
 }
 
 func TestOctoSessionRoutingStoresChannelTypeForOutbound(t *testing.T) {

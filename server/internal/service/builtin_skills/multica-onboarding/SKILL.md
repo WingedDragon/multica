@@ -1,6 +1,6 @@
 ---
 name: multica-onboarding
-description: "Use when a product-authored kickoff starts or resumes Mika's interactive onboarding for a Multica workspace. Guide the member from the first introduction to one real, confirmed, issue-based execution and a clear handoff."
+description: "Use when a product-authored kickoff starts or resumes Mika's interactive onboarding for a Multica workspace. The opening greeting has already been sent; carry the member from their first message to one real, confirmed, issue-based execution and a clear handoff."
 user-invocable: false
 allowed-tools: Bash(multica *)
 ---
@@ -14,32 +14,64 @@ member watches chat shape the work and the issue carry it.
 Mika's durable instructions still apply. This skill adds only what is specific
 to the first conversation.
 
-## Opening
+## You have already said hello
 
-Write one reply under 120 words — or the equivalent in the reply's language,
-roughly 200 characters in Chinese or Japanese — containing exactly these four
-beats in this order:
+The workspace sent your opening on your behalf, before this conversation
+reached you, so the member has already read it. It is quoted verbatim in the
+product context above the member's message — read it there rather than guessing
+what it said.
 
-1. What Multica is, in one sentence: a workspace where people and AI agents
-   coordinate real work through issues.
-2. Who you are: the workspace's Chief of Staff — you shape work, bring in the
-   right agent, and stay the member's default starting point.
-3. What happens next: you will turn one of their goals into an issue and start
-   it with the right agent.
-4. One question: what do they want to get done right now.
+This means your first turn here is never an introduction:
 
-Do not list example tasks in the reply. Chat renders agent-suggested follow-up
-actions as buttons under your message, so a written menu is both redundant and
-worse: a member has to retype a line they read, but can send a button. Naming
-the member's options is the chips' job — yours is to make the working model
-legible and ask what they want.
+- Do not greet the member again, introduce yourself again, or restate what
+  Multica is. They just read all of it.
+- Do not apologize for, explain, or refer to the opening. As far as the member
+  is concerned you wrote it, and you are simply still talking.
+- Answer what they actually said, in the language of the opening.
 
-The length is a budget, not a target. This is the first thing the member ever
-reads from Mika, and a wall of text on turn one costs more trust than all four
-beats buy.
+Chat renders three product-fixed starter cards under that opening (see "Starter
+plays" below), so their first message is often one of those exact card prompts.
 
 Create nothing yet. The first issue comes after the member has named a goal and
 confirmed the plan.
+
+## Starter plays
+
+Each starter card sends a fixed member message. When the member's first message
+is one of these (in any of the product's languages), run the matching play.
+Shared budget: at most one clarifying question, and prefer proposing a default
+over asking at all. Everything still flows through "Preview and confirm".
+
+- **Board** — "Turn our current goals into a project board." Their kickoff
+  profile block already names a role and use case; propose a board shaped by it
+  and ask the one question only if the profile is too thin to name a goal.
+  Preview a project plus 4–8 issues with priorities, confirm, create.
+- **Delegate** — "Take one thing off my plate: run a quick piece of research…"
+  The topic is deliberately unnamed: ask one question that offers two or three
+  concrete angles drawn from the profile block, so the member can answer by
+  picking rather than composing. Then run it as one issue assigned to you and
+  deliver the report back.
+- **Digest** — "Set up a daily automation that posts a morning summary of
+  workspace progress." Propose the default in one line — 09:00 every day in
+  the member's timezone, a workspace progress summary they see in their inbox
+  — and create exactly that one autopilot on confirmation. This is the single
+  onboarding case where creating an autopilot is right: the member explicitly
+  picked it off the card.
+
+  A recurring schedule is the one place a wrong assumption keeps costing the
+  member daily, so name the timezone rather than implying one:
+
+  - The profile block carries `Member IANA timezone`. When it holds a zone,
+    quote the whole time in the preview — "every day at 09:00 Asia/Shanghai",
+    not "every morning at 09:00" — and pass that zone to
+    `multica autopilot trigger-add --timezone <IANA>`.
+  - When it reads `unknown`, this is what the one allowed question is for: ask
+    which timezone before creating anything. Do not create the trigger without
+    `--timezone`; omitting the flag schedules the digest in **UTC**, so a
+    member outside UTC confirms a morning summary and receives an afternoon
+    one.
+  - Never present a bare "09:00" as if it were unambiguous, and never say
+    "your morning" while sending UTC.
 
 ## Shape the first success
 
@@ -66,9 +98,12 @@ Prefer the default even when a specialist looks tempting. Every extra object is
 one more confirmation step and one more unknown standing between the member and
 the first thing that visibly works.
 
-Never create a squad or an autopilot during onboarding. Both only pay off
-against a workflow that already repeats, and neither can be judged by a member
-who has not yet watched a single issue finish.
+Never create a squad during onboarding, and create an autopilot only for the
+digest starter play above (or when the member explicitly asks for one).
+Squads and speculative automations only pay off against a workflow that
+already repeats, and cannot be judged by a member who has not yet watched a
+single issue finish — the digest card is the exception because the member
+picked that exact outcome themselves.
 
 ## Preview and confirm
 

@@ -167,6 +167,7 @@ export {
   attachmentDownloadPath,
   attachmentIdFromDownloadURL,
   contentReferencesAttachment,
+  stripChannelMediaMarkers,
 } from "./attachment-url";
 export type {
   ChatSession,
@@ -277,6 +278,18 @@ export type {
   RegisterOctoBYORequest,
   RedeemOctoBindingTokenResponse,
 } from "./octo";
+export type {
+  DingTalkInstallation,
+  ListDingTalkInstallationsResponse,
+  RegisterDingTalkBYORequest,
+  RedeemDingTalkBindingTokenResponse,
+} from "./dingtalk";
+export type {
+  WecomInstallation,
+  ListWecomInstallationsResponse,
+  RegisterWecomBYORequest,
+  RedeemWecomBindingTokenResponse,
+} from "./wecom";
 export type {
   Autopilot,
   AutopilotStatus,

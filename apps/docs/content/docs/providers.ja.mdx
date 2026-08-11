@@ -26,7 +26,7 @@ Multica は **17 個の AI コーディングツール**を標準でサポート
 | **DevEco Code** | Huawei（ファーウェイ） | ✅ | ❌ | `.deveco/skills/` | 動的探索（`deveco models`） |
 | **OpenClaw** | オープンソース | ✅ | ✅ | `.agent_context/skills/`（フォールバック） | エージェントにバインドされ、タスクごとに切り替え不可 |
 | **Pi** | Inflection AI | ✅（セッションがファイルパス） | ❌ | `.pi/skills/` | 動的探索 |
-| **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.pi/skills/` | 動的探索（`omp models --json`） |
+| **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.omp/skills/` | 動的探索（`omp models --no-extensions --json`） |
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | 動的探索 |
 | **Trae CLI** | ByteDance | ✅（ACP `session/load`） | ✅ | `.traecli/skills/` | 動的探索 |
 | **Grok** | xAI | ✅（ACP `session/load`） | ✅ | `.grok/skills/` | 動的探索（ACP `session/new`） |
@@ -49,6 +49,7 @@ Multica は **17 個の AI コーディングツール**を標準でサポート
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
 | Pi | `pi` | ✓ | — | `.pi/skills/` |
+| Oh-My-Pi | `omp` | ✓ | — | `.omp/skills/` |
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
 | Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
@@ -121,7 +122,7 @@ Inflection AI が提供し、ミニマルです。**セッション再開の方�
 
 ### OMP
 
-[Oh My Pi](https://omp.sh) は独立したコーディングエージェントであり、**Pi の別名ではありません**。Multica は `omp -p --mode json --session-dir <dir>` を非対話モードで実行し、Pi 互換の JSON イベントストリームを読み取ります。イベントで返る文字列の session ID は、次のタスクで `--resume <id>` に渡して再開します。モデルと対応する thinking level は `omp models --json` から動的に探索され、選択された model selector は `--model`、thinking level は `--thinking` で渡されます。割り当てられたワークスペーススキルは、OMP のネイティブ探索用に `.pi/skills/` へ書き込まれます。
+[Oh My Pi](https://omp.sh) は独立したコーディングエージェントであり、**Pi の別名ではありません**。Multica は `omp -p --mode json --session-dir <dir>` を非対話モードで実行し、Pi 互換の JSON イベントストリームを読み取ります。イベントで返る文字列の session ID は、次のタスクで `--resume <id>` に渡して再開します。モデルと対応する thinking level は `omp models --no-extensions --json` から動的に探索され、選択された model selector は `--model`、thinking level は `--thinking` で渡されます。割り当てられたワークスペーススキルは、OMP のネイティブ探索用に `.omp/skills/` へ書き込まれます。
 
 OMP を有効にするには、最初に OMP をインストールして認証し、daemon の `PATH` から `omp` を見つけられるようにするか、`MULTICA_OMP_PATH` に絶対実行パスを設定します。daemon を再起動または更新してランタイムを再検出します。OMP selector を `MULTICA_OMP_MODEL` に設定すると daemon 全体の既定モデルになり、個別のエージェントでは動的に検出された selector を選択できます。OMP は現在、エージェントの `mcp_config` を無視します。
 
@@ -167,7 +168,7 @@ xAI の Grok Build CLI（`grok`）です。Multica は `grok --no-auto-update ag
 | OpenCode | `.opencode/skills/` | ✅ ネイティブ |
 | DevEco Code | `.deveco/skills/` | ✅ ネイティブ |
 | Pi | `.pi/skills/` | ✅ ネイティブ |
-| OMP | `.pi/skills/` | ✅ ネイティブ |
+| OMP | `.omp/skills/` | ✅ ネイティブ |
 | Qoder | `.qoder/skills/` | ✅ ネイティブ |
 | Trae CLI | `.traecli/skills/` | ✅ ネイティブ |
 | Grok | `.grok/skills/` | ✅ ネイティブ |

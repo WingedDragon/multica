@@ -26,7 +26,7 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | **DevEco Code** | Huawei | ✅ | ❌ | `.deveco/skills/` | Dynamic discovery (`deveco models`) |
 | **OpenClaw** | Open source | ✅ | ✅ | `.agent_context/skills/` (fallback) | Bound to the agent, can't be switched per task |
 | **Pi** | Inflection AI | ✅ (session is a file path) | ❌ | `.pi/skills/` | Dynamic discovery |
-| **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.pi/skills/` | Dynamic discovery (`omp models --json`) |
+| **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.omp/skills/` | Dynamic discovery (`omp models --no-extensions --json`) |
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | Dynamic discovery |
 | **Qwen Code** | Alibaba | ✅ (`--resume <id>`) | ✅ | `.qwen/skills/` | Runtime default or manual `--model` |
 | **Trae** | ByteDance | ✅ (ACP `session/load`) | ✅ | `.traecli/skills/` | Dynamic discovery |
@@ -50,6 +50,7 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
 | Pi | `pi` | ✓ | — | `.pi/skills/` |
+| Oh-My-Pi | `omp` | ✓ | — | `.omp/skills/` |
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
 | Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
@@ -122,7 +123,7 @@ From Inflection AI, minimalist. **Session resumption is unusual** — the sessio
 
 ### OMP
 
-[Oh My Pi](https://omp.sh) is a standalone coding agent, **not a Pi alias**. Multica launches it non-interactively as `omp -p --mode json --session-dir <dir>`, reads its Pi-compatible JSON event stream, and saves the emitted string session ID for `--resume <id>` on the next task. Models and their supported thinking levels are discovered from `omp models --json`; Multica sends the selected model selector with `--model` and the selected level with `--thinking`. Assigned workspace skills are written to `.pi/skills/` for OMP's native discovery.
+[Oh My Pi](https://omp.sh) is a standalone coding agent, **not a Pi alias**. Multica launches it non-interactively as `omp -p --mode json --session-dir <dir>`, reads its Pi-compatible JSON event stream, and saves the emitted string session ID for `--resume <id>` on the next task. Models and their supported thinking levels are discovered from `omp models --no-extensions --json`; Multica sends the selected model selector with `--model` and the selected level with `--thinking`. Assigned workspace skills are written to `.omp/skills/` for OMP's native discovery.
 
 To enable OMP, install and authenticate it first, then make `omp` available on the daemon's `PATH` or set `MULTICA_OMP_PATH` to its absolute executable path. Restart or refresh the daemon so it detects the runtime. Set `MULTICA_OMP_MODEL` to an OMP selector to choose a daemon-wide default, or choose a discovered selector for an individual agent. OMP currently ignores an agent's `mcp_config`.
 
@@ -181,7 +182,7 @@ Each tool uses **its own** skill discovery path. Before a task runs, the Multica
 | OpenCode | `.opencode/skills/` | ✅ Native |
 | DevEco Code | `.deveco/skills/` | ✅ Native |
 | Pi | `.pi/skills/` | ✅ Native |
-| OMP | `.pi/skills/` | ✅ Native |
+| OMP | `.omp/skills/` | ✅ Native |
 | Qoder | `.qoder/skills/` | ✅ Native |
 | Qwen Code | `.qwen/skills/` | ✅ Native |
 | Trae | `.traecli/skills/` | ✅ Native |

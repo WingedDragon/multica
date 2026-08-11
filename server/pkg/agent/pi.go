@@ -16,12 +16,19 @@ import (
 	"time"
 )
 
-// piBackend implements Backend by spawning the Pi CLI in non-interactive
-// JSON mode (`pi -p --mode json --session <path>`) and parsing its event
-// stream on stdout.
+// piBackend implements Pi's non-interactive JSON mode
+// (`pi -p --mode json --session <path>`) and parses its event stream on
+// stdout. OMP reuses only that JSON event decoder: OMP has its own command
+// builder, session-directory protocol, stream session identifier, and resume
+// rejection handling. The mode-specific fallback executable remains `pi` or
+// `omp` when Config.ExecutablePath is empty.
 type piBackend struct {
-	cfg     Config
-	runtime piRuntimeMode
+	cfg               Config
+	runtime           piRuntimeMode
+	defaultExecutable string
+	// providerLabel is the human-facing name used in log messages and errors.
+	// It defaults to the selected protocol mode when unset.
+	providerLabel string
 }
 
 type piRuntimeMode string
@@ -207,14 +214,20 @@ func isPiToolNameByte(b byte) bool {
 
 func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
 	mode := b.runtimeMode()
-	backendName := mode.name()
+	backendName := b.providerLabel
+	if backendName == "" {
+		backendName = mode.name()
+	}
 	// Pi trims piped stdin before building its initial message. Reject an empty
 	// task here so whitespace-only input cannot turn into a successful process
 	// with no turn, no output, and an empty session.
 	if strings.TrimSpace(prompt) == "" {
-		return nil, fmt.Errorf("pi prompt must not be empty")
+		return nil, fmt.Errorf("%s prompt must not be empty", backendName)
 	}
 	execName := b.cfg.ExecutablePath
+	if execName == "" {
+		execName = b.defaultExecutable
+	}
 	if execName == "" {
 		execName = backendName
 	}

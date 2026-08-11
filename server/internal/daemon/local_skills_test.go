@@ -267,6 +267,12 @@ func TestLocalSkills_DiscoversACPProviderRoots(t *testing.T) {
 		wantName string
 	}{
 		{
+			provider: "omp",
+			root:     filepath.Join(".omp", "agent", "skills"),
+			wantPath: "~/.omp/agent/skills/review-helper",
+			wantName: "OMP Review",
+		},
+		{
 			provider: "hermes",
 			root:     filepath.Join(".hermes", "skills"),
 			wantPath: "~/.hermes/skills/review-helper",

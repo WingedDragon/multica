@@ -26,7 +26,7 @@ Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | **DevEco Code** | Huawei(화웨이) | ✅ | ❌ | `.deveco/skills/` | 동적 탐색(`deveco models`) |
 | **OpenClaw** | 오픈소스 | ✅ | ✅ | `.agent_context/skills/` (fallback) | 에이전트에 바인딩되어 작업마다 전환 불가 |
 | **Pi** | Inflection AI | ✅ (세션이 파일 경로) | ❌ | `.pi/skills/` | 동적 탐색 |
-| **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.pi/skills/` | 동적 탐색(`omp models --json`) |
+| **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.omp/skills/` | 동적 탐색(`omp models --no-extensions --json`) |
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | 동적 탐색 |
 | **Trae CLI** | ByteDance | ✅ (ACP `session/load`) | ✅ | `.traecli/skills/` | 동적 탐색 |
 | **Grok** | xAI | ✅ (ACP `session/load`) | ✅ | `.grok/skills/` | 동적 탐색(ACP `session/new`) |
@@ -49,6 +49,7 @@ Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
 | Pi | `pi` | ✓ | — | `.pi/skills/` |
+| Oh-My-Pi | `omp` | ✓ | — | `.omp/skills/` |
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
 | Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
@@ -121,7 +122,7 @@ Inflection AI에서 제공하며, 미니멀합니다. **세션 재개 방식이 
 
 ### OMP
 
-[Oh My Pi](https://omp.sh)는 독립적인 코딩 에이전트이며, **Pi의 별칭이 아닙니다**. Multica는 `omp -p --mode json --session-dir <dir>`를 비대화형으로 실행하고 Pi 호환 JSON 이벤트 스트림을 읽습니다. 이벤트가 반환하는 문자열 session ID는 다음 작업에서 `--resume <id>`로 전달되어 세션을 재개합니다. 모델과 지원되는 thinking level은 `omp models --json`에서 동적으로 탐색되며, 선택된 model selector는 `--model`, thinking level은 `--thinking`으로 전달됩니다. 할당된 워크스페이스 스킬은 OMP의 네이티브 탐색을 위해 `.pi/skills/`에 기록됩니다.
+[Oh My Pi](https://omp.sh)는 독립적인 코딩 에이전트이며, **Pi의 별칭이 아닙니다**. Multica는 `omp -p --mode json --session-dir <dir>`를 비대화형으로 실행하고 Pi 호환 JSON 이벤트 스트림을 읽습니다. 이벤트가 반환하는 문자열 session ID는 다음 작업에서 `--resume <id>`로 전달되어 세션을 재개합니다. 모델과 지원되는 thinking level은 `omp models --no-extensions --json`에서 동적으로 탐색되며, 선택된 model selector는 `--model`, thinking level은 `--thinking`으로 전달됩니다. 할당된 워크스페이스 스킬은 OMP의 네이티브 탐색을 위해 `.omp/skills/`에 기록됩니다.
 
 OMP를 활성화하려면 먼저 OMP를 설치하고 인증한 뒤 daemon의 `PATH`에서 `omp`를 찾을 수 있게 하거나, `MULTICA_OMP_PATH`에 절대 실행 경로를 설정하세요. daemon을 다시 시작하거나 새로 고쳐 런타임을 재탐색합니다. OMP selector를 `MULTICA_OMP_MODEL`로 설정하면 daemon 전체의 기본 모델이 되고, 개별 에이전트에서는 동적으로 발견된 selector를 선택할 수 있습니다. OMP는 현재 에이전트의 `mcp_config`를 무시합니다.
 
@@ -167,7 +168,7 @@ xAI의 Grok Build CLI(`grok`)입니다. Multica는 `grok --no-auto-update agent 
 | OpenCode | `.opencode/skills/` | ✅ 기본 |
 | DevEco Code | `.deveco/skills/` | ✅ 기본 |
 | Pi | `.pi/skills/` | ✅ 기본 |
-| OMP | `.pi/skills/` | ✅ 기본 |
+| OMP | `.omp/skills/` | ✅ 기본 |
 | Qoder | `.qoder/skills/` | ✅ 기본 |
 | Trae CLI | `.traecli/skills/` | ✅ 기본 |
 | Grok | `.grok/skills/` | ✅ 기본 |

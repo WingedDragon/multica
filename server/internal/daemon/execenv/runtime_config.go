@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
 // runtimeMarkerBegin and runtimeMarkerEnd delimit the Multica-managed brief
@@ -165,6 +167,7 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 // For OpenClaw: writes {workDir}/AGENTS.md  (skills discovered natively from {workDir}/skills/ via per-task openclaw-config.json that pins agents.defaults.workspace)
 // For Hermes:   writes {workDir}/AGENTS.md  (skills discovered natively from a per-task HERMES_HOME/skills seeded by the daemon; see hermes_home.go)
 // For Pi:       writes {workDir}/AGENTS.md  (skills discovered natively from .pi/skills/)
+// For Oh-My-Pi (omp): writes {workDir}/AGENTS.md  (omp is a pi fork; skills discovered from .omp/skills/)
 // For Cursor:   writes {workDir}/AGENTS.md  (skills discovered natively from .cursor/skills/)
 // For Kimi:        writes {workDir}/AGENTS.md  (Kimi Code CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
 // For Reasonix:    writes {workDir}/AGENTS.md  (Reasonix reads AGENTS.md and .reasonix/skills/ natively)
@@ -190,6 +193,12 @@ func InjectRuntimeConfig(workDir, provider string, ctx TaskContextForEnv) (strin
 // Cleanup in lockstep — both paths consult the same table so a new provider
 // added to one side cannot drift past the other.
 func runtimeConfigPath(workDir, provider string) string {
+	// Compatible runtime identities inherit the config-file target of their
+	// execution provider. Native providers such as OMP use their own switch
+	// entry, which avoids recursively resolving a descriptor to itself.
+	if desc, ok := agent.BuiltinRuntimeByID(provider); ok && desc.ProtocolFamily != provider {
+		return runtimeConfigPath(workDir, desc.ProtocolFamily)
+	}
 	switch provider {
 	case "claude":
 		return filepath.Join(workDir, "CLAUDE.md")
@@ -202,7 +211,7 @@ func runtimeConfigPath(workDir, provider string) string {
 		return filepath.Join(workDir, "CODEBUDDY.md")
 	case "qwen":
 		return filepath.Join(workDir, "QWEN.md")
-	case "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw":
+	case "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "omp", "cursor", "kimi", "reasonix", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw":
 		return filepath.Join(workDir, "AGENTS.md")
 	default:
 		return ""

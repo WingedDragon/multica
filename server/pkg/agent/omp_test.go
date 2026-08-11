@@ -98,7 +98,7 @@ func TestOMPBackend_ClassifiesMissingSessionDirectoryAsResumeRejection(t *testin
 	writeTestExecutable(t, filepath.Join(dir, "omp"), []byte(script))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	backend, err := New("omp", Config{Logger: slog.Default()})
+	backend, err := ResolveBackend("omp", Config{Logger: slog.Default()})
 	if err != nil {
 		t.Fatalf("New(omp): %v", err)
 	}
@@ -140,7 +140,7 @@ func newOMPTestBackend(t *testing.T, emitSession bool) (Backend, string) {
 	writeTestExecutable(t, filepath.Join(dir, "omp"), []byte(script))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	backend, err := New("omp", Config{Env: map[string]string{"OMP_ARGV_FILE": argvPath}, Logger: slog.Default()})
+	backend, err := ResolveBackend("omp", Config{Env: map[string]string{"OMP_ARGV_FILE": argvPath}, Logger: slog.Default()})
 	if err != nil {
 		t.Fatalf("New(omp): %v", err)
 	}

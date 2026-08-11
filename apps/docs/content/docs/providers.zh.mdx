@@ -26,7 +26,7 @@ Multica 内置支持 **17 款 AI 编程工具**。它们都实现了同一套接
 | **DevEco Code** | 华为 | ✅ | ❌ | `.deveco/skills/` | 动态发现（`deveco models`）|
 | **OpenClaw** | 开源项目 | ✅ | ✅ | `.agent_context/skills/` （fallback）| 绑定在智能体上，不能在任务里切换 |
 | **Pi** | Inflection AI | ✅（session 为文件路径）| ❌ | `.pi/skills/` | 动态发现 |
-| **OMP** | Oh My Pi | ✅（`--resume <id>`）| ❌ | `.pi/skills/` | 动态发现（`omp models --json`）|
+| **OMP** | Oh My Pi | ✅（`--resume <id>`）| ❌ | `.omp/skills/` | 动态发现（`omp models --no-extensions --json`）|
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | 动态发现 |
 | **Trae CLI** | ByteDance | ✅（ACP `session/load`）| ✅ | `.traecli/skills/` | 动态发现 |
 | **Grok** | xAI | ✅（ACP `session/load`）| ✅ | `.grok/skills/` | 动态发现（ACP `session/new`）|
@@ -49,6 +49,7 @@ Multica 内置支持 **17 款 AI 编程工具**。它们都实现了同一套接
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
 | Pi | `pi` | ✓ | — | `.pi/skills/` |
+| Oh-My-Pi | `omp` | ✓ | — | `.omp/skills/` |
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
 | Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
@@ -121,7 +122,7 @@ Inflection AI 出品，极简主义。**会话恢复机制特殊**——session 
 
 ### OMP
 
-[Oh My Pi](https://omp.sh) 是一款独立的编程智能体，**不是 Pi 的别名**。Multica 以非交互方式执行 `omp -p --mode json --session-dir <目录>`，读取其兼容 Pi 的 JSON 事件流，并保存事件返回的字符串 session ID，以便下一次任务通过 `--resume <id>` 续接。模型及其支持的思考强度从 `omp models --json` 动态发现；选中的模型 selector 通过 `--model` 传入，思考强度通过 `--thinking` 传入。分配给工作区的 skill 写入 `.pi/skills/`，由 OMP 原生发现。
+[Oh My Pi](https://omp.sh) 是一款独立的编程智能体，**不是 Pi 的别名**。Multica 以非交互方式执行 `omp -p --mode json --session-dir <目录>`，读取其兼容 Pi 的 JSON 事件流，并保存事件返回的字符串 session ID，以便下一次任务通过 `--resume <id>` 续接。模型及其支持的思考强度从 `omp models --no-extensions --json` 动态发现；选中的模型 selector 通过 `--model` 传入，思考强度通过 `--thinking` 传入。分配给工作区的 skill 写入 `.omp/skills/`，由 OMP 原生发现。
 
 启用 OMP 前，先完成 OMP 的安装与认证；然后让 daemon 的 `PATH` 能找到 `omp`，或将 `MULTICA_OMP_PATH` 设为其绝对可执行路径。重启或刷新 daemon，让它重新探测运行时。可设置 `MULTICA_OMP_MODEL` 为 OMP 的 selector 作为 daemon 全局默认模型，或为单个智能体选择动态发现的 selector。OMP 目前会忽略智能体的 `mcp_config`。
 
@@ -167,7 +168,7 @@ xAI 的 Grok Build CLI（`grok`）。Multica 通过 `grok --no-auto-update agent
 | OpenCode | `.opencode/skills/` | ✅ 原生 |
 | DevEco Code | `.deveco/skills/` | ✅ 原生 |
 | Pi | `.pi/skills/` | ✅ 原生 |
-| OMP | `.pi/skills/` | ✅ 原生 |
+| OMP | `.omp/skills/` | ✅ 原生 |
 | Qoder | `.qoder/skills/` | ✅ 原生 |
 | Trae CLI | `.traecli/skills/` | ✅ 原生 |
 | Grok | `.grok/skills/` | ✅ 原生 |

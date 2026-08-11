@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${MULTICA_REPO:-/Users/dong/.wtc/projects/multica}"
-REMOTE_JUMP="${MULTICA_REMOTE_JUMP:-my-mini}"
+MY_MINI_HOST="${MULTICA_MY_MINI_HOST:-${MULTICA_REMOTE_JUMP:-my-mini}}"
 REMOTE_HOST="${MULTICA_REMOTE_HOST:-dj}"
 REMOTE_DIR="${MULTICA_REMOTE_DIR:-/home/ubuntu/apps/multica}"
 REMOTE_NAME="${MULTICA_REMOTE_NAME:-wingeddragon}"
@@ -58,7 +58,7 @@ run_my_mini_zsh() {
   local script="$1"
   # Rebase note: use zsh -lc for my-mini so Homebrew is discoverable even from
   # a non-login ssh command; this matches prior daemon/PATH recovery work.
-  ssh -o RequestTTY=no "$REMOTE_JUMP" "zsh -lc $(printf '%q' "$script")"
+  ssh -o RequestTTY=no "$MY_MINI_HOST" "zsh -lc $(printf '%q' "$script")"
 }
 
 install_my_mini_cli() {
@@ -71,7 +71,7 @@ if command -v brew >/dev/null 2>&1 && brew list --formula multica >/dev/null 2>&
 fi
 '
   remote_tmp=".local/bin/multica.upload.$$"
-  scp -o RequestTTY=no "$CLI_BIN" "$REMOTE_JUMP:~/$remote_tmp"
+  scp -o RequestTTY=no "$CLI_BIN" "$MY_MINI_HOST:~/$remote_tmp"
   run_my_mini_zsh "chmod 0755 \"\$HOME/$remote_tmp\" && codesign --force --sign - \"\$HOME/$remote_tmp\" && mv \"\$HOME/$remote_tmp\" \"\$HOME/.local/bin/multica\" && codesign --verify --strict \"\$HOME/.local/bin/multica\" && output=\$(\"\$HOME/.local/bin/multica\" version) && printf '%s\\n' \"\$output\" && printf '%s\\n' \"\$output\" | grep -Fq 'commit: $EXPECTED_COMMIT'"
 }
 
@@ -166,7 +166,7 @@ if [ "$SKIP_CLI_INSTALL" != "1" ]; then
 fi
 
 if [ "$SKIP_DEPLOY" != "1" ]; then
-  echo "==> Remote deploy: $REMOTE_JUMP -> $REMOTE_HOST:$REMOTE_DIR"
+  echo "==> Remote deploy: direct ssh $REMOTE_HOST:$REMOTE_DIR"
   remote_script='
 set -euo pipefail
 backend_was_active=0
@@ -230,7 +230,7 @@ git status --short --branch
 git rev-parse HEAD
 systemctl is-active multica-backend multica-frontend
 '
-  ssh "$REMOTE_JUMP" "ssh $REMOTE_HOST 'REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") bash -s'" <<<"$remote_script"
+  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") bash -s" <<<"$remote_script"
 fi
 
 if [ "$SKIP_PACKAGE" != "1" ]; then

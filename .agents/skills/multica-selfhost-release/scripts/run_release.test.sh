@@ -237,6 +237,11 @@ fi
 grep -Fq 'git merge --ff-only "$REMOTE_NAME/$BRANCH"' "$SCRIPT_DIR/run_release.sh"
 ! grep -Fq 'git reset --hard "$REMOTE_NAME/$BRANCH"' "$SCRIPT_DIR/run_release.sh"
 
+# Deploy direct from this Mac. my-mini remains only the CLI-install target.
+grep -Fq 'MY_MINI_HOST="${MULTICA_MY_MINI_HOST:-${MULTICA_REMOTE_JUMP:-my-mini}}"' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'ssh -o RequestTTY=no "$REMOTE_HOST"' "$SCRIPT_DIR/run_release.sh"
+! grep -Fq 'ssh "$REMOTE_JUMP" "ssh $REMOTE_HOST' "$SCRIPT_DIR/run_release.sh"
+
 
 # The deployment window must stop only services that were running, clear stale
 # swap before the guarded build, and restore every stopped service on all exits.

@@ -1,6 +1,6 @@
 ---
 name: multica-selfhost-release
-description: Deploy and package the self-hosted Multica app, including choosing merge or rebase for upstream synchronization. Use when the user asks to update or upload the current Multica branch to dj:~/apps/multica, sync upstream/main, run scripts/deploy.sh through my-mini, build the macOS DMG with scripts/package.sh, replace /Applications/Multica.app, or repeat the full self-hosted release/install workflow.
+description: This skill should be used when the user asks to "deploy Multica self-hosted", "sync upstream/main", "update dj", "run a selfhost release", "package Multica desktop", or "merge or rebase a selfhost branch". It deploys through direct SSH to dj and packages the self-hosted Multica app.
 ---
 
 # Multica Selfhost Release
@@ -11,7 +11,7 @@ Use this skill for the recurring self-hosted Multica release path:
 2. Inspect the branch lifecycle and published state, then choose merge, rebase, or no-op for `upstream/main`.
 3. Push normally after merge/no-op; use `--force-with-lease` only when rebasing an already-published branch.
 4. Build the current branch's `multica` CLI, uninstall Homebrew `multica`, and install the binary to `~/.local/bin/multica` locally and on `my-mini`.
-5. Update `dj:~/apps/multica` through `ssh my-mini` then `ssh dj`.
+5. Update `dj:~/apps/multica` through direct local `ssh dj`.
 6. Run remote `./scripts/deploy.sh`.
 7. Run local `./scripts/package.sh`.
 8. Replace local `/Applications/Multica.app` with the generated app bundle.
@@ -39,6 +39,8 @@ Use this decision order:
 
 The script's `auto` mode uses published state as a conservative mechanical proxy: published branch -> merge; unpublished branch -> rebase. For a known long-lived branch, explicitly set `MULTICA_UPSTREAM_SYNC_STRATEGY=merge` rather than relying only on the proxy.
 
+`dj` is directly reachable from this Mac with `ssh dj`; use that route for the deployment checkout, protected release window, and remote verification. `my-mini` remains only the target for the separately installed and signed CLI.
+
 ## Important Judgement
 
 - Treat remote `apps/web/next-env.d.ts` changes as Next build noise unless the user explicitly asks to track generated type path changes.
@@ -50,6 +52,20 @@ The script's `auto` mode uses published state as a conservative mechanical proxy
 - Never use a force push after merge. Never use plain `--force`; a published rebase requires `--force-with-lease`.
 - Pin one final `HEAD` after synchronization. Build the CLI, update the deployment checkout, package the desktop app, and verify all artifacts against that commit. If conflict repair or any other fix creates a later commit, restart the full workflow from CLI build; never mix artifacts from different commits.
 - On `my-mini`, ad-hoc sign the uploaded CLI before replacing `~/.local/bin/multica`, then run `codesign --verify --strict` and `multica version`.
+
+## Native OMP Merge Policy (2026-08-11)
+
+The native OMP merge was integrated in `4b009c11b8c4b707e4d7e2cd898e53a3b2d09255`. Treat this as a behavioral boundary, not a provider-label rename:
+
+- The OMP descriptor may share only runtime metadata and the minimal JSONL event decoder with Pi. OMP remains an independent runtime identity, profile, discovery path, and display name.
+- Invoke OMP as `omp -p --mode json --session-dir <dir> [--resume <id>] [--model <provider/model>] [--thinking <level>] <prompt>`. Do not replace it with Pi's `--session <file>` protocol or split the complete selector into Pi's provider/model flags.
+- Discover with `omp models --no-extensions --json` and a 15-second timeout. Retain `MULTICA_OMP_MODEL` as the full-selector manual fallback when discovery fails.
+- Classify explicit missing-session failures from bounded stderr as resume rejection; only then retry once from a guarded fresh session.
+- Catalog data governs per-model thinking compatibility. Do not hard-code Pi's or a provider-wide OMP effort allowlist.
+- Keep workspace-injected Skills in `.omp/skills/<slug>/SKILL.md` and OMP user Skills in `.omp/agent/skills`; never write OMP Skills under `.pi`.
+- Use uppercase `OMP` in runtime labels, documentation, UI aliases, and transcript rendering.
+
+When resolving future `upstream/main` conflicts, retain these native semantics even if upstream changes the Pi-compatible adapter. A post-merge repair creates a new final HEAD, so rebuild every release artifact from that commit.
 
 ## Resolved Incident: Selfhost Build Host Pressure (2026-07-20)
 
@@ -74,9 +90,9 @@ The recurring 2026-08-03 release also established the safe release-window proced
 Repeatable verification:
 
 ```bash
-ssh my-mini 'ssh dj "cd /home/ubuntu/apps/multica && ./scripts/check-build-resources.sh"'
-ssh my-mini 'ssh dj "tail -n 30 /var/tmp/multica-selfhost-release/cgroup-*.log; systemctl is-active multica-backend multica-frontend"'
-ssh my-mini 'ssh dj "test -s /home/ubuntu/apps/multica/apps/web/.next/BUILD_ID && test -s /home/ubuntu/apps/multica/apps/web/.next/routes-manifest.json && test -s /home/ubuntu/apps/multica/apps/web/.next/prerender-manifest.json"'
+ssh dj 'cd /home/ubuntu/apps/multica && ./scripts/check-build-resources.sh'
+ssh dj 'tail -n 30 /var/tmp/multica-selfhost-release/cgroup-*.log; systemctl is-active multica-backend multica-frontend'
+ssh dj 'test -s /home/ubuntu/apps/multica/apps/web/.next/BUILD_ID && test -s /home/ubuntu/apps/multica/apps/web/.next/routes-manifest.json && test -s /home/ubuntu/apps/multica/apps/web/.next/prerender-manifest.json'
 curl --noproxy '*' --max-time 20 -I https://multica.zxyh.club/
 ```
 
@@ -142,7 +158,7 @@ scp server/bin/multica my-mini:~/.local/bin/multica.upload
 ssh my-mini 'zsh -lc "chmod 0755 ~/.local/bin/multica.upload && codesign --force --sign - ~/.local/bin/multica.upload && mv ~/.local/bin/multica.upload ~/.local/bin/multica && codesign --verify --strict ~/.local/bin/multica && ~/.local/bin/multica version"'
 ```
 
-Update and deploy remote through a protected release window. Preserve pre-release service state and restore it with an `EXIT` trap; use `scripts/run_release.sh` for the exact implementation rather than copying a partial inline command. The core sequence is:
+Update and deploy remote through direct local `ssh dj` in a protected release window. Preserve pre-release service state and restore it with an `EXIT` trap; use `scripts/run_release.sh` for the exact implementation rather than copying a partial inline command. The core sequence is:
 
 1. Fast-forward the remote checkout to the pinned final `HEAD` and verify the SHA.
 2. Record active services, install the cleanup trap, stop Multica services and the `litellm` Docker container.
@@ -168,7 +184,7 @@ Verify:
 ~/.local/bin/multica version
 ssh my-mini 'zsh -lc "~/.local/bin/multica version"'
 cat ~/.multica/desktop.json
-ssh my-mini 'ssh dj "cd ~/apps/multica && git status --short --branch && git rev-parse HEAD && systemctl is-active multica-backend multica-frontend"'
+ssh dj 'cd ~/apps/multica && git status --short --branch && git rev-parse HEAD && systemctl is-active multica-backend multica-frontend'
 ```
 
 Verify that the local app version, local CLI commit, `my-mini` CLI commit, remote checkout SHA, and expected final `HEAD` all match. A mismatch means the release is incomplete; rebuild and reinstall from the final commit.
@@ -186,8 +202,8 @@ Useful environment overrides:
 ```bash
 MULTICA_REPO=/Users/dong/.wtc/projects/multica
 MULTICA_UPSTREAM_SYNC_STRATEGY=auto  # auto | merge | rebase
-MULTICA_REMOTE_JUMP=my-mini
-MULTICA_REMOTE_HOST=dj
+MULTICA_MY_MINI_HOST=my-mini       # CLI installation host only
+MULTICA_REMOTE_HOST=dj             # direct deployment host
 MULTICA_REMOTE_DIR=/home/ubuntu/apps/multica
 MULTICA_REMOTE_NAME=wingeddragon
 MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=2048

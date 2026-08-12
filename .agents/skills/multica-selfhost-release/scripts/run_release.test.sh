@@ -261,3 +261,21 @@ grep -Fq 'EXPECTED_COMMIT=' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'EXPECTED_VERSION=' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'commit: $EXPECTED_COMMIT' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'does not match release $EXPECTED_VERSION' "$SCRIPT_DIR/run_release.sh"
+
+# Explicitly lowering Node's old-space limit for a protected retry must reach
+# deploy.sh on dj; without propagation the remote always uses its 2048 MiB
+# default and repeats the same cgroup OOM.
+remote_override_log="$TMP/remote-override.log"
+: >"$remote_override_log"
+PATH="$FAKE_BIN:$PATH" \
+HOME="$HOME_DIR" \
+MULTICA_REPO="$REPO" \
+MULTICA_TEST_LOG="$remote_override_log" \
+MULTICA_UPSTREAM_SYNC_STRATEGY=merge \
+MULTICA_SKIP_CLI_INSTALL=1 \
+MULTICA_SKIP_PACKAGE=1 \
+MULTICA_SKIP_INSTALL=1 \
+MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536 \
+"$SCRIPT_DIR/run_release.sh" >/dev/null
+
+grep -Fq 'MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536 bash -s' "$remote_override_log"

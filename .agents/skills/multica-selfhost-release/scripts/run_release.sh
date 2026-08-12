@@ -16,6 +16,8 @@ EXPECTED_HEAD=""
 EXPECTED_COMMIT=""
 EXPECTED_VERSION=""
 
+WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-}"
+
 CLI_BIN="$REPO/server/bin/multica"
 assert_release_head() {
   local actual
@@ -230,7 +232,7 @@ git status --short --branch
 git rev-parse HEAD
 systemctl is-active multica-backend multica-frontend
 '
-  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") bash -s" <<<"$remote_script"
+  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=$(printf '%q' "$WEB_BUILD_MAX_OLD_SPACE_SIZE_MB") bash -s" <<<"$remote_script"
 fi
 
 if [ "$SKIP_PACKAGE" != "1" ]; then

@@ -94,6 +94,17 @@ export type {
   Invitation,
 } from "./workspace";
 export type {
+  PluginBinding,
+  PluginInstallation,
+  PluginCatalogContribution,
+  PluginCatalogRelease,
+  PluginCatalogDiagnostic,
+  PluginCatalogResponse,
+  PluginInstallationListResponse,
+  PluginReleaseRequest,
+  PluginBindingRequest,
+} from "./plugin";
+export type {
   InboxItem,
   InboxSeverity,
   InboxItemType,

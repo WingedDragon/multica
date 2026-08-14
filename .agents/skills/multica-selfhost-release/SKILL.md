@@ -76,9 +76,9 @@ The protected retries established the safe operating boundary:
 - The resource guard runs immediately before `systemd-run`, after dependency installation and migrations. During this release it refused two builds when post-install `MemAvailable` fell to 4396 MiB and 4484 MiB even though an earlier check had passed at 4718 MiB. Do not bypass this second check.
 - `openclaw-gateway.service` was a user-level enabled unit and therefore restarted with `dj`; it used roughly 0.75-0.94 GiB. The unused gateway and the system-level `claw-visual.service` were disabled and stopped. `fwupd.service` was also stopped for the release window after confirming that it had no active work.
 - With webpack memory optimizations enabled, a retry at `MemoryMax=3G` still reached exactly 3 GiB and was isolated by a memory-cgroup OOM at 15:15:43 CST. It ran for 5m43s and consumed 4m38s CPU without taking down the host. Evidence: `/var/tmp/multica-selfhost-release/cgroup-20260720T071000Z.log` and the kernel journal.
-- After stopping the already-unavailable Multica frontend and then the backend for the deployment window, `MemAvailable=5790 MiB` passed the `4G + 1536 MiB` guard. The build succeeded with `MemoryHigh=4G`, `MemoryMax=4G`, `MemorySwapMax=256M`, and a 2048 MiB Node heap. It compiled webpack in 118s, completed TypeScript in 69s, and finished in 3m50s with 3m45s CPU. The cgroup peak was exactly 4 GiB, swap peak was 256 MiB, `oom_kill` stayed zero, and the host remained responsive. Evidence: `/var/tmp/multica-selfhost-release/cgroup-20260720T071925Z.log`.
+- On 2026-08-13, the identical `4G` / `256M` cgroup budget with a 2048 MiB Node heap hit the memory cgroup limit during webpack after 1m49s (`node` anonymous RSS: 4098408 KiB). The guarded retry with `MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536` completed the Next.js build in 1m58s; backend/frontend restarted and the public HTTPS smoke test returned HTTP 200.
 
-The default safe budget is therefore `MemoryHigh=4G`, `MemoryMax=4G`, `MemorySwapMax=256M`, and a 1536 MiB host reserve. If the preflight cannot cover 5632 MiB or existing swap use exceeds 256 MiB, do not start the build. First inspect resident RSS and stop only confirmed-unused services; Multica frontend/backend may be stopped for the deployment window and restarted after the backend build.
+The default safe budget is `MemoryHigh=4G`, `MemoryMax=4G`, `MemorySwapMax=256M`, a 1536 MiB host reserve, and a **1536 MiB Node heap**. Always pass `MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536` to `run_release.sh` until `scripts/deploy.sh` has been deliberately changed and revalidated. If the preflight cannot cover 5632 MiB or existing swap use exceeds 256 MiB, do not start the build. First inspect resident RSS and stop only confirmed-unused services; Multica frontend/backend may be stopped for the deployment window and restarted after the backend build.
 
 The recurring 2026-08-03 release also established the safe release-window procedure:
 
@@ -206,7 +206,7 @@ MULTICA_MY_MINI_HOST=my-mini       # CLI installation host only
 MULTICA_REMOTE_HOST=dj             # direct deployment host
 MULTICA_REMOTE_DIR=/home/ubuntu/apps/multica
 MULTICA_REMOTE_NAME=wingeddragon
-MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=2048
+MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536
 MULTICA_WEB_BUILD_MEMORY_HIGH=4G
 MULTICA_WEB_BUILD_MEMORY_MAX=4G
 MULTICA_WEB_BUILD_SWAP_MAX=256M

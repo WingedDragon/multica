@@ -41,6 +41,7 @@ Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | Codex | `codex` | ✓ | ✓ | `$CODEX_HOME/skills/` |
 | GitHub Copilot CLI | `copilot` | ✓ | — | `.github/skills/` |
 | Cursor Agent | `cursor-agent` | ✓ | ✓ | `.cursor/skills/` |
+| DeepSeek Harness | `dsh` | ✓ | ✓ | `.dsh/skills/` |
 | DevEco Code | `deveco` | ✓ | — | `.deveco/skills/` |
 | Grok | `grok` | ✓ | ✓ | `.grok/skills/` |
 | Hermes | `hermes` | ✓ | ✓ | 실행별 `HERMES_HOME/skills/` |
@@ -67,6 +68,8 @@ Anthropic에서 제공합니다. **신규 사용자에게 첫 번째 선택지**
 
 Tencent에서 제공합니다. Claude Code 호환 CLI 에이전트입니다 — Multica는 Claude Code와 동일한 stream-json 프로토콜로 구동하므로 세션 재개가 동작하고(`--resume` 경유), MCP 구성은 `--mcp-config`로 전달됩니다. CodeBuddy는 Claude의 디렉터리를 재사용하지 않고 자체 설정 디렉터리를 사용하므로, 스킬은 `.codebuddy/skills/`에 배치되고 런타임 브리핑은 `CODEBUDDY.md`에 기록됩니다. 모델은 동적으로 탐색됩니다.
 QwenPaw만 예외입니다. Multica에서 고른 모델을 받아들이지 않으므로 선택 상자가 비활성 상태로 "런타임에서 관리"라고 표시됩니다. 모델은 QwenPaw 자체 설정에서 선택하세요. QwenPaw의 모델 목록이 비어 있는 것은 정상이며 런타임이 오프라인이라는 뜻이 아닙니다.
+
+DeepSeek Harness의 모델 카탈로그는 런타임 자체가 제공합니다(`dsh --profile multica --list-models`). 모델 ID는 `provider/model` 형식(예: `deepseek-official/deepseek-chat`)이므로 목록에서 전체 ID를 선택하세요.
 
 <Callout type="info">
 도구마다 모델 이름이 다를 수 있습니다. AI 코딩 도구를 바꾸면 기존 모델 값은 새 도구에서 유효하지 않으므로 다시 선택해야 합니다.

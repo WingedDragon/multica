@@ -12,8 +12,8 @@ import (
 )
 
 func TestRuntimeProfileOMPMigrationSQL(t *testing.T) {
-	up := readRuntimeProfileOMPMigration(t, "233_runtime_profile_add_omp.up.sql")
-	down := readRuntimeProfileOMPMigration(t, "233_runtime_profile_add_omp.down.sql")
+	up := readRuntimeProfileOMPMigration(t, "314_runtime_profile_add_omp.up.sql")
+	down := readRuntimeProfileOMPMigration(t, "314_runtime_profile_add_omp.down.sql")
 
 	for _, statement := range []string{
 		"ALTER TABLE runtime_profile DROP CONSTRAINT IF EXISTS runtime_profile_protocol_family_check;",
@@ -50,6 +50,7 @@ func TestRuntimeProfileOMPMigrationSQL(t *testing.T) {
 		}
 	}
 }
+
 
 func TestRuntimeProfile_OMPPersistsThroughCreateReadAndUpdate(t *testing.T) {
 	if testHandler == nil || testPool == nil {

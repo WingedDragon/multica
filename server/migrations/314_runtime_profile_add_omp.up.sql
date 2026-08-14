@@ -1,6 +1,6 @@
--- Add OMP (`omp`) to the built-in runtime profile protocol whitelist.
--- Kept in lockstep with agent.SupportedTypes and agent.New(). NOT VALID
--- preserves the historical-row tolerance used by the prior family additions.
+-- Add OMP (`omp`) to the built-in runtime profile protocol whitelist after
+-- DeepSeek Harness. Kept in lockstep with agent.SupportedTypes and agent.New().
+-- NOT VALID preserves the historical-row tolerance used by prior additions.
 ALTER TABLE runtime_profile DROP CONSTRAINT IF EXISTS runtime_profile_protocol_family_check;
 
 ALTER TABLE runtime_profile ADD CONSTRAINT runtime_profile_protocol_family_check
@@ -16,11 +16,15 @@ ALTER TABLE runtime_profile ADD CONSTRAINT runtime_profile_protocol_family_check
         'omp',
         'cursor',
         'kimi',
+        'reasonix',
+        'dsh',
         'kiro',
         'antigravity',
         'qoder',
+        'qoderclicn',
         'traecli',
         'deveco',
         'grok',
-        'qwen'
+        'qwen',
+        'qwenpaw'
     )) NOT VALID;

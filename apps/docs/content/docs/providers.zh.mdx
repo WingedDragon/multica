@@ -41,6 +41,7 @@ Multica 内置支持 **17 款 AI 编程工具**。它们都实现了同一套接
 | Codex | `codex` | ✓ | ✓ | `$CODEX_HOME/skills/` |
 | GitHub Copilot CLI | `copilot` | ✓ | — | `.github/skills/` |
 | Cursor Agent | `cursor-agent` | ✓ | ✓ | `.cursor/skills/` |
+| DeepSeek Harness | `dsh` | ✓ | ✓ | `.dsh/skills/` |
 | DevEco Code | `deveco` | ✓ | — | `.deveco/skills/` |
 | Grok | `grok` | ✓ | ✓ | `.grok/skills/` |
 | Hermes | `hermes` | ✓ | ✓ | 单次执行的 `HERMES_HOME/skills/` |
@@ -67,6 +68,8 @@ Anthropic 出品。**新用户首选**——功能最完整：会话恢复真用
 
 Tencent 出品。一款兼容 Claude Code 的 CLI agent——Multica 用和 Claude Code 一样的 stream-json 协议驱动它，所以会话恢复可用（通过 `--resume`），MCP 配置通过 `--mcp-config` 传入。CodeBuddy 使用自己原生的配置目录，而不是复用 Claude 的，所以 skill 放在 `.codebuddy/skills/`，运行时说明写入 `CODEBUDDY.md`。模型为动态发现。
 QwenPaw 是唯一的例外：它不接受在 Multica 侧选择的模型，因此选择框不可用，显示为"由运行时管理"。请改在 QwenPaw 自身的配置里选择模型。它的模型列表为空属于正常情况，并不表示运行时离线。
+
+DeepSeek Harness 的模型目录由运行时自身提供（`dsh --profile multica --list-models`）。它的模型 id 采用 `provider/model` 形式（例如 `deepseek-official/deepseek-chat`），请从列表中选择完整 id。
 
 <Callout type="info">
 不同工具可能使用不同的模型名称。更换 AI 编程工具后，原有的模型值在新工具中无效，需要重新选择。

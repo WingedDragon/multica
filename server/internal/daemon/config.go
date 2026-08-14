@@ -94,7 +94,7 @@ type Config struct {
 	CLIVersion                     string                // multica CLI version (e.g. "0.1.13")
 	LaunchedBy                     string                // "desktop" when spawned by the Electron app, empty for standalone
 	Profile                        string                // profile name (empty = default)
-	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, reasonix, kiro, antigravity, qoder, qoderclicn, traecli, grok, qwen, qwenpaw (plus built-in runtime identities from agent.BuiltinRuntimes, e.g. omp)
+	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro, antigravity, qoder, qoderclicn, traecli, grok, qwen, qwenpaw (plus built-in runtime identities from agent.BuiltinRuntimes, e.g. omp)
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
 	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
@@ -231,7 +231,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// can re-run the same discovery on a live daemon (MUL-5439).
 	agents := probeAgentCLIs()
 	if len(agents) == 0 && !overrides.AllowNoAgents {
-		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, omp, cursor-agent, kimi, reasonix, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, or qwenpaw and ensure it is on PATH")
+		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, omp, cursor-agent, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, or qwenpaw and ensure it is on PATH")
 	}
 
 	claudeArgs, err := shellArgsFromEnv("MULTICA_CLAUDE_ARGS")
@@ -642,6 +642,9 @@ func shellArgsFromEnv(name string) ([]string, error) {
 // resolveAgentExecutablePath returns the executable entry point the daemon
 // should keep for an agent command. Bare command names are pinned to the path
 // resolved during startup so later PATH changes cannot redirect task launches.
+// Ordinary executables are pinned to their concrete target; entrypoints owned
+// by a name-dispatching shim keep the command name the manager needs to select
+// the right package (see discoveredExecutablePath).
 // On Windows this deliberately keeps the stable discovered junction path;
 // resolveAgentEntryWithHeal follows it for each launch so installer upgrades
 // that retarget a still-live junction take effect without a daemon restart.
@@ -789,7 +792,7 @@ func isExecutableFile(path string) bool {
 // doesn't require editing this list by hand.
 var defaultAgentCommandNames = append([]string{
 	"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
-	"pi", "cursor-agent", "copilot", "kimi", "reasonix", "kiro-cli", "codebuddy", "agy", "qodercli", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw",
+	"pi", "cursor-agent", "copilot", "kimi", "reasonix", "dsh", "kiro-cli", "codebuddy", "agy", "qodercli", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw",
 }, agent.BuiltinRuntimeCommands()...)
 
 // codexDesktopAppBundlePaths returns candidate macOS app-bundle locations for
@@ -843,8 +846,8 @@ var supportedLoginShells = map[string]struct{}{
 	"ksh":  {},
 }
 
-// resolveAgentsViaLoginShell asks the user's login shell to print the canonical
-// (symlink-resolved) absolute path to each name in `names`. It returns a map
+// resolveAgentsViaLoginShell asks the user's login shell to print an absolute,
+// invocation-safe path to each name in `names`. It returns a map
 // of name → path for whatever the shell could find, and an empty map if the
 // shell is unavailable / unsupported / times out / produces no usable output.
 //
@@ -945,7 +948,8 @@ var resolveAgentsViaLoginShell = func(names []string) map[string]string {
 //     still print the alias/function definition, and we'd rather drop it
 //     than hand back garbage),
 //  5. canonicalises the directory via `cd ... && pwd -P` so symlinked prefix
-//     dirs (fnm/nvm/volta) collapse to stable paths,
+//     dirs (fnm/nvm/volta) collapse to stable paths while the invoked command
+//     name is kept,
 //  6. if the resolved path lives in ~/.multica/hooks, searches the same
 //     shell-expanded PATH for the first executable outside that hooks dir,
 //  7. prints `<name>\t<canonical_path>` one entry per line for the caller.

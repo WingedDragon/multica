@@ -291,6 +291,12 @@ func TestLocalSkills_DiscoversACPProviderRoots(t *testing.T) {
 			wantName: "Reasonix Review",
 		},
 		{
+			provider: "dsh",
+			root:     filepath.Join(".dsh", "skills"),
+			wantPath: "~/.dsh/skills/review-helper",
+			wantName: "DSH Review",
+		},
+		{
 			provider: "qoder",
 			root:     filepath.Join(".qoder", "skills"),
 			wantPath: "~/.qoder/skills/review-helper",
@@ -328,6 +334,9 @@ func TestLocalSkills_DiscoversACPProviderRoots(t *testing.T) {
 			}
 			if tc.provider == "reasonix" {
 				t.Setenv("REASONIX_HOME", "")
+			}
+			if tc.provider == "dsh" {
+				t.Setenv("DSH_HOME", "")
 			}
 
 			writeTestLocalSkill(t, filepath.Join(home, tc.root), "review-helper", map[string]string{

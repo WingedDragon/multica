@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -105,6 +106,20 @@ func TestNewMigrationPrefixesStartAfterLegacyRange(t *testing.T) {
 		}
 		if n <= maxLegacyMigrationPrefix && !isKnownLegacyPrefix(prefix) {
 			t.Errorf("migration prefix %s is in the frozen legacy range 001-%03d: %v; new migrations must start at %03d", prefix, maxLegacyMigrationPrefix, stems, maxLegacyMigrationPrefix+1)
+		}
+	}
+}
+
+func TestOMPRuntimeProfileMigrationPreservesDSH(t *testing.T) {
+	path := filepath.Join(realMigrationsDir(t), "314_runtime_profile_add_omp.up.sql")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	for _, family := range []string{"omp", "dsh"} {
+		if !strings.Contains(string(contents), "'"+family+"'") {
+			t.Errorf("OMP migration does not accept %q", family)
 		}
 	}
 }

@@ -1,5 +1,6 @@
--- Restore the pre-233 whitelist (with Qwen Code, without OMP). NOT VALID
--- keeps rollback compatible with historical rows the prior migrations allowed.
+-- Add the DeepSeek Harness runtime bridge as a first-party protocol
+-- family. NOT VALID preserves historical-row tolerance while enforcing the
+-- expanded whitelist for new rows.
 ALTER TABLE runtime_profile DROP CONSTRAINT IF EXISTS runtime_profile_protocol_family_check;
 
 ALTER TABLE runtime_profile ADD CONSTRAINT runtime_profile_protocol_family_check
@@ -14,11 +15,15 @@ ALTER TABLE runtime_profile ADD CONSTRAINT runtime_profile_protocol_family_check
         'pi',
         'cursor',
         'kimi',
+        'reasonix',
+        'dsh',
         'kiro',
         'antigravity',
         'qoder',
+        'qoderclicn',
         'traecli',
         'deveco',
         'grok',
-        'qwen'
+        'qwen',
+        'qwenpaw'
     )) NOT VALID;

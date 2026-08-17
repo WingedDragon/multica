@@ -87,6 +87,7 @@ export { RUNTIME_PROFILE_PROTOCOL_FAMILIES } from "./agent";
 export type {
   Workspace,
   WorkspaceRepo,
+  WorkspaceMcpServer,
   Member,
   MemberRole,
   User,
@@ -103,6 +104,12 @@ export type {
   PluginInstallationListResponse,
   PluginReleaseRequest,
   PluginBindingRequest,
+  PluginRemoteMCPConfig,
+  RemoteMCPConfigRequest,
+  RemoteMCPDiscoveryResponse,
+  RemoteMCPOAuthStartRequest,
+  RemoteMCPOAuthStartResponse,
+  RemoteMCPTool,
 } from "./plugin";
 export type {
   InboxItem,

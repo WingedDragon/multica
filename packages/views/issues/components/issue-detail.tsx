@@ -118,6 +118,7 @@ import {
   useViewStateWriter,
 } from "../../platform";
 import { cn } from "@multica/ui/lib/utils";
+import { PAGE_GUTTER } from "../../layout/page-header";
 
 import { ProgressRing } from "./progress-ring";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
@@ -985,7 +986,7 @@ export function IssueNotFound({
   return (
     <div className="flex flex-1 min-h-0 flex-col">
       {leading && (
-        <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">{leading}</div>
+        <div className={cn("flex h-12 shrink-0 items-center gap-2 border-b", PAGE_GUTTER)}>{leading}</div>
       )}
       <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-body text-muted-foreground">
         <p>{t(($) => $.detail.not_found)}</p>
@@ -1015,7 +1016,7 @@ export function IssueDetailSkeleton({ leading }: { leading?: ReactNode } = {}) {
       {/* The way back is real from the first frame, not once the issue lands:
           a host that gave up its own bar for `leadingAction` has nothing else
           to offer while this skeleton owns the screen. */}
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+      <div className={cn("flex h-12 shrink-0 items-center gap-2 border-b", PAGE_GUTTER)}>
         {leading ?? (
           <>
             <Skeleton className="h-4 w-16" />

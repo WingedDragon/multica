@@ -243,11 +243,12 @@ grep -Fq 'ssh -o RequestTTY=no "$REMOTE_HOST"' "$SCRIPT_DIR/run_release.sh"
 ! grep -Fq 'ssh "$REMOTE_JUMP" "ssh $REMOTE_HOST' "$SCRIPT_DIR/run_release.sh"
 
 
-# The deployment window must stop only services that were running, clear stale
-# swap before the guarded build, and restore every stopped service on all exits.
-grep -Fq 'trap restore_release_services EXIT' "$SCRIPT_DIR/run_release.sh"
+# The removed LiteLLM container must never influence a release window. The
+# proven configuration reserves 1.5 GiB for the host while giving the Webpack
+# build its 1792 MiB V8 heap under the existing cgroup protections.
+grep -Fq 'WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-1792}"' "$SCRIPT_DIR/run_release.sh"
+! grep -Fq 'litellm' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'sudo systemctl stop multica-frontend multica-backend' "$SCRIPT_DIR/run_release.sh"
-grep -Fq 'sudo docker stop litellm' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'sudo swapoff -a' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'sudo swapon -a' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'sudo systemctl start multica-backend' "$SCRIPT_DIR/run_release.sh"
@@ -262,10 +263,9 @@ grep -Fq 'EXPECTED_VERSION=' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'commit: $EXPECTED_COMMIT' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'does not match release $EXPECTED_VERSION' "$SCRIPT_DIR/run_release.sh"
 
-# Explicitly lowering Node's old-space limit for a protected retry must reach
-# deploy.sh on dj; without propagation the remote always uses its 2048 MiB
-# default and repeats the same cgroup OOM.
-remote_override_log="$TMP/remote-override.log"
+# The complete protected-build budget, including the proven defaults, must be
+# forwarded to deploy.sh. A release retry may override one or all controls.
+remote_override_log="$TMP/remote-defaults.log"
 : >"$remote_override_log"
 PATH="$FAKE_BIN:$PATH" \
 HOME="$HOME_DIR" \
@@ -275,7 +275,35 @@ MULTICA_UPSTREAM_SYNC_STRATEGY=merge \
 MULTICA_SKIP_CLI_INSTALL=1 \
 MULTICA_SKIP_PACKAGE=1 \
 MULTICA_SKIP_INSTALL=1 \
-MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536 \
+"$SCRIPT_DIR/run_release.sh" >/dev/null
+grep -Fq 'MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1792' "$remote_override_log"
+grep -Fq 'MULTICA_WEB_BUILD_MEMORY_HIGH=4G' "$remote_override_log"
+grep -Fq 'MULTICA_WEB_BUILD_MEMORY_MAX=4608M' "$remote_override_log"
+grep -Fq 'MULTICA_WEB_BUILD_SWAP_MAX=256M' "$remote_override_log"
+grep -Fq 'MULTICA_WEB_BUILD_HOST_RESERVE_MB=1536' "$remote_override_log"
+grep -Fq 'MULTICA_BUILD_DIAGNOSTICS_DIR=/var/tmp/multica-selfhost-release' "$remote_override_log"
+
+override_log="$TMP/remote-override-values.log"
+: >"$override_log"
+PATH="$FAKE_BIN:$PATH" \
+HOME="$HOME_DIR" \
+MULTICA_REPO="$REPO" \
+MULTICA_TEST_LOG="$override_log" \
+MULTICA_UPSTREAM_SYNC_STRATEGY=merge \
+MULTICA_SKIP_CLI_INSTALL=1 \
+MULTICA_SKIP_PACKAGE=1 \
+MULTICA_SKIP_INSTALL=1 \
+MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=2048 \
+MULTICA_WEB_BUILD_MEMORY_HIGH=4352M \
+MULTICA_WEB_BUILD_MEMORY_MAX=5G \
+MULTICA_WEB_BUILD_SWAP_MAX=384M \
+MULTICA_WEB_BUILD_HOST_RESERVE_MB=1024 \
+MULTICA_BUILD_DIAGNOSTICS_DIR=/tmp/multica-build-diagnostics \
 "$SCRIPT_DIR/run_release.sh" >/dev/null
 
-grep -Fq 'MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536 bash -s' "$remote_override_log"
+grep -Fq 'MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=2048' "$override_log"
+grep -Fq 'MULTICA_WEB_BUILD_MEMORY_HIGH=4352M' "$override_log"
+grep -Fq 'MULTICA_WEB_BUILD_MEMORY_MAX=5G' "$override_log"
+grep -Fq 'MULTICA_WEB_BUILD_SWAP_MAX=384M' "$override_log"
+grep -Fq 'MULTICA_WEB_BUILD_HOST_RESERVE_MB=1024' "$override_log"
+grep -Fq 'MULTICA_BUILD_DIAGNOSTICS_DIR=/tmp/multica-build-diagnostics' "$override_log"

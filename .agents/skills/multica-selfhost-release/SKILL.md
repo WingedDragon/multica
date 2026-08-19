@@ -67,25 +67,24 @@ The native OMP merge was integrated in `4b009c11b8c4b707e4d7e2cd898e53a3b2d09255
 
 When resolving future `upstream/main` conflicts, retain these native semantics even if upstream changes the Pi-compatible adapter. A post-merge repair creates a new final HEAD, so rebuild every release artifact from that commit.
 
-## Resolved Incident: Selfhost Build Host Pressure (2026-07-20)
+## Resolved Incident: Selfhost Build Host Pressure
 
-The original outage was host-wide memory pressure, not proof that a build limit was absent. A cgroup `MemoryMax` only caps the build; it does not reserve memory for SSH, the reverse proxy, or unrelated resident services. The original `MemoryMax=5G` plus `MemorySwapMax=512M` budget was too large for a 7.5 GiB host already running OpenClaw, LiteLLM, Open Design, Hermes, and other services. Reclaim pressure made SSH and public HTTPS unresponsive before the user force-restarted `dj`, so that boot contains no conclusive kernel OOM record.
+The build is isolated because a cgroup `MemoryMax` caps the build but does not reserve capacity for SSH, the reverse proxy, or resident services. Keep the resource guard immediately before `systemd-run`; do not bypass its post-install availability or swap checks.
 
-The protected retries established the safe operating boundary:
+The verified release configuration as of 2026-08-17 is:
 
-- The resource guard runs immediately before `systemd-run`, after dependency installation and migrations. During this release it refused two builds when post-install `MemAvailable` fell to 4396 MiB and 4484 MiB even though an earlier check had passed at 4718 MiB. Do not bypass this second check.
-- `openclaw-gateway.service` was a user-level enabled unit and therefore restarted with `dj`; it used roughly 0.75-0.94 GiB. The unused gateway and the system-level `claw-visual.service` were disabled and stopped. `fwupd.service` was also stopped for the release window after confirming that it had no active work.
-- With webpack memory optimizations enabled, a retry at `MemoryMax=3G` still reached exactly 3 GiB and was isolated by a memory-cgroup OOM at 15:15:43 CST. It ran for 5m43s and consumed 4m38s CPU without taking down the host. Evidence: `/var/tmp/multica-selfhost-release/cgroup-20260720T071000Z.log` and the kernel journal.
-- On 2026-08-13, the identical `4G` / `256M` cgroup budget with a 2048 MiB Node heap hit the memory cgroup limit during webpack after 1m49s (`node` anonymous RSS: 4098408 KiB). The guarded retry with `MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536` completed the Next.js build in 1m58s; backend/frontend restarted and the public HTTPS smoke test returned HTTP 200.
+- `MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1792`
+- `MULTICA_WEB_BUILD_MEMORY_HIGH=4G`
+- `MULTICA_WEB_BUILD_MEMORY_MAX=4608M`
+- `MULTICA_WEB_BUILD_SWAP_MAX=256M`
+- `MULTICA_WEB_BUILD_HOST_RESERVE_MB=1536`
+- `MULTICA_WEB_BUILD_MAX_SWAP_USED_MB=256`
 
-The default safe budget is `MemoryHigh=4G`, `MemoryMax=4G`, `MemorySwapMax=256M`, a 1536 MiB host reserve, and a **1536 MiB Node heap**. Always pass `MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536` to `run_release.sh` until `scripts/deploy.sh` has been deliberately changed and revalidated. If the preflight cannot cover 5632 MiB or existing swap use exceeds 256 MiB, do not start the build. First inspect resident RSS and stop only confirmed-unused services; Multica frontend/backend may be stopped for the deployment window and restarted after the backend build.
+This configuration built `2f44ca05b` successfully after removing the retired LiteLLM container, and it must be the default in `run_release.sh`. The `litellm` container has been removed permanently; do not inspect, stop, start, or restore it during release windows.
 
-The recurring 2026-08-03 release also established the safe release-window procedure:
+The deployment window records only whether `multica-backend` and `multica-frontend` were active, installs its `EXIT` trap before stopping either, resets stale swap with `sudo swapoff -a && sudo swapon -a`, then allows `deploy.sh` to enforce the resource guard. The trap restores only the services that were active before the attempt.
 
-- LiteLLM runs as the Docker container `litellm`, not a systemd unit. Stop it with `sudo docker stop litellm` only when it was running, and restore it on every exit with `sudo docker start litellm`.
-- Record whether `multica-backend`, `multica-frontend`, and `litellm` were active before stopping them. Install an `EXIT` trap before the first stop so failed preflight, TypeScript, Webpack, or backend builds restore the original running services.
-- Stop the Multica frontend/backend and LiteLLM for the protected build window. Reset stale swap with `sudo swapoff -a && sudo swapon -a`, then let `deploy.sh` run its mandatory post-install resource guard. Never lower or bypass the 5632 MiB availability threshold.
-- A container restart policy may bring LiteLLM back. Check its actual Docker running state immediately before the guarded build; if it restarted and causes the preflight to fail, stop it again without weakening the guard.
+If the preflight cannot cover the configured `MemoryMax` plus the 1536 MiB host reserve, or used swap exceeds 256 MiB, do not start the build. Inspect confirmed resident processes or reduce the build footprint; do not weaken the guard merely to start a build.
 
 Repeatable verification:
 
@@ -158,12 +157,12 @@ scp server/bin/multica my-mini:~/.local/bin/multica.upload
 ssh my-mini 'zsh -lc "chmod 0755 ~/.local/bin/multica.upload && codesign --force --sign - ~/.local/bin/multica.upload && mv ~/.local/bin/multica.upload ~/.local/bin/multica && codesign --verify --strict ~/.local/bin/multica && ~/.local/bin/multica version"'
 ```
 
-Update and deploy remote through direct local `ssh dj` in a protected release window. Preserve pre-release service state and restore it with an `EXIT` trap; use `scripts/run_release.sh` for the exact implementation rather than copying a partial inline command. The core sequence is:
+Update and deploy remote through direct local `ssh dj` in a protected release window. Preserve the pre-release Multica service state and restore it with an `EXIT` trap; use `scripts/run_release.sh` for the exact implementation rather than copying a partial inline command. The core sequence is:
 
 1. Fast-forward the remote checkout to the pinned final `HEAD` and verify the SHA.
-2. Record active services, install the cleanup trap, stop Multica services and the `litellm` Docker container.
-3. Reset stale swap, run `./scripts/deploy.sh`, and allow its resource guard to refuse unsafe builds.
-4. Restore every service that was active before the release, whether deployment succeeds or fails.
+2. Record `multica-backend` and `multica-frontend` state, install the cleanup trap, then stop those services.
+3. Reset stale swap, run `./scripts/deploy.sh` with the proven build budget, and allow its resource guard to refuse unsafe builds.
+4. Restore every Multica service that was active before the release, whether deployment succeeds or fails.
 
 Build and install locally:
 
@@ -206,9 +205,9 @@ MULTICA_MY_MINI_HOST=my-mini       # CLI installation host only
 MULTICA_REMOTE_HOST=dj             # direct deployment host
 MULTICA_REMOTE_DIR=/home/ubuntu/apps/multica
 MULTICA_REMOTE_NAME=wingeddragon
-MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1536
+MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1792
 MULTICA_WEB_BUILD_MEMORY_HIGH=4G
-MULTICA_WEB_BUILD_MEMORY_MAX=4G
+MULTICA_WEB_BUILD_MEMORY_MAX=4608M
 MULTICA_WEB_BUILD_SWAP_MAX=256M
 MULTICA_WEB_BUILD_HOST_RESERVE_MB=1536
 MULTICA_WEB_BUILD_MAX_SWAP_USED_MB=256

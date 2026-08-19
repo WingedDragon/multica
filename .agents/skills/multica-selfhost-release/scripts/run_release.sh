@@ -16,8 +16,13 @@ EXPECTED_HEAD=""
 EXPECTED_COMMIT=""
 EXPECTED_VERSION=""
 
-WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-}"
-
+WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-1792}"
+WEB_BUILD_MEMORY_HIGH="${MULTICA_WEB_BUILD_MEMORY_HIGH:-4G}"
+WEB_BUILD_MEMORY_MAX="${MULTICA_WEB_BUILD_MEMORY_MAX:-4608M}"
+WEB_BUILD_SWAP_MAX="${MULTICA_WEB_BUILD_SWAP_MAX:-256M}"
+WEB_BUILD_HOST_RESERVE_MB="${MULTICA_WEB_BUILD_HOST_RESERVE_MB:-1536}"
+WEB_BUILD_MAX_SWAP_USED_MB="${MULTICA_WEB_BUILD_MAX_SWAP_USED_MB:-256}"
+BUILD_DIAGNOSTICS_DIR="${MULTICA_BUILD_DIAGNOSTICS_DIR:-/var/tmp/multica-selfhost-release}"
 CLI_BIN="$REPO/server/bin/multica"
 assert_release_head() {
   local actual
@@ -173,7 +178,6 @@ if [ "$SKIP_DEPLOY" != "1" ]; then
 set -euo pipefail
 backend_was_active=0
 frontend_was_active=0
-litellm_was_running=0
 
 restore_release_services() {
   status=$?
@@ -183,9 +187,6 @@ restore_release_services() {
   fi
   if [ "$frontend_was_active" = "1" ]; then
     sudo systemctl start multica-frontend >/dev/null 2>&1 || true
-  fi
-  if [ "$litellm_was_running" = "1" ]; then
-    sudo docker start litellm >/dev/null 2>&1 || true
   fi
   exit "$status"
 }
@@ -216,14 +217,8 @@ fi
 
 systemctl is-active --quiet multica-backend && backend_was_active=1
 systemctl is-active --quiet multica-frontend && frontend_was_active=1
-if sudo docker inspect -f "{{.State.Running}}" litellm 2>/dev/null | grep -qx true; then
-  litellm_was_running=1
-fi
 
 sudo systemctl stop multica-frontend multica-backend
-if [ "$litellm_was_running" = "1" ]; then
-  sudo docker stop litellm >/dev/null
-fi
 sudo swapoff -a
 sudo swapon -a
 
@@ -232,7 +227,7 @@ git status --short --branch
 git rev-parse HEAD
 systemctl is-active multica-backend multica-frontend
 '
-  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=$(printf '%q' "$WEB_BUILD_MAX_OLD_SPACE_SIZE_MB") bash -s" <<<"$remote_script"
+  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=$(printf '%q' "$WEB_BUILD_MAX_OLD_SPACE_SIZE_MB") MULTICA_WEB_BUILD_MEMORY_HIGH=$(printf '%q' "$WEB_BUILD_MEMORY_HIGH") MULTICA_WEB_BUILD_MEMORY_MAX=$(printf '%q' "$WEB_BUILD_MEMORY_MAX") MULTICA_WEB_BUILD_SWAP_MAX=$(printf '%q' "$WEB_BUILD_SWAP_MAX") MULTICA_WEB_BUILD_HOST_RESERVE_MB=$(printf '%q' "$WEB_BUILD_HOST_RESERVE_MB") MULTICA_WEB_BUILD_MAX_SWAP_USED_MB=$(printf '%q' "$WEB_BUILD_MAX_SWAP_USED_MB") MULTICA_BUILD_DIAGNOSTICS_DIR=$(printf '%q' "$BUILD_DIAGNOSTICS_DIR") bash -s" <<<"$remote_script"
 fi
 
 if [ "$SKIP_PACKAGE" != "1" ]; then

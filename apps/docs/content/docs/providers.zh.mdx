@@ -1,11 +1,11 @@
 ---
 title: AI 编程工具对照
-description: Multica 支持 17 款 AI 编程工具；它们实现同一套接口，但能力细节差异很大。
+description: Multica 支持 19 款 AI 编程工具；它们实现同一套接口，但能力细节差异很大。
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Multica 内置支持 **17 款 AI 编程工具**。它们都实现了同一套接口——排队、派发、执行、结果回传，所以你可以从 Multica 的同一个看板上指挥任意一款。**但它们在能力细节上差异很大**：会话恢复是否真用、是否支持 MCP、skill 文件该放在哪里、模型怎么选。这一页是完整对照。
+Multica 内置支持 **19 款 AI 编程工具**。它们都实现了同一套接口——排队、派发、执行、结果回传，所以你可以从 Multica 的同一个看板上指挥任意一款。**但它们在能力细节上差异很大**：会话恢复是否真用、是否支持 MCP、skill 文件该放在哪里、模型怎么选。这一页是完整对照。
 
 创建智能体时挑选工具的指引见 [创建和配置智能体](/agents-create)。
 
@@ -30,6 +30,7 @@ Multica 内置支持 **17 款 AI 编程工具**。它们都实现了同一套接
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | 动态发现 |
 | **Trae CLI** | ByteDance | ✅（ACP `session/load`）| ✅ | `.traecli/skills/` | 动态发现 |
 | **Grok** | xAI | ✅（ACP `session/load`）| ✅ | `.grok/skills/` | 动态发现（ACP `session/new`）|
+| **MiniMax Code** | MiniMax | —（0.1.2 未声明会话加载）| ✅ | `.minimax/skills/` | 由运行时管理 |
 
 ## 每款工具的定位
 
@@ -47,6 +48,7 @@ Multica 内置支持 **17 款 AI 编程工具**。它们都实现了同一套接
 | Hermes | `hermes` | ✓ | ✓ | 单次执行的 `HERMES_HOME/skills/` |
 | Kimi CLI | `kimi` | ✓ | ✓ | `.kimi/skills/` |
 | Kiro CLI | `kiro-cli` | ✓ | ✓ | `.kiro/skills/` |
+| MiniMax Code | `mcode` | — | ✓ | `.minimax/skills/` |
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
 | Pi | `pi` | ✓ | — | `.pi/skills/` |
@@ -67,7 +69,7 @@ Anthropic 出品。**新用户首选**——功能最完整：会话恢复真用
 ### CodeBuddy
 
 Tencent 出品。一款兼容 Claude Code 的 CLI agent——Multica 用和 Claude Code 一样的 stream-json 协议驱动它，所以会话恢复可用（通过 `--resume`），MCP 配置通过 `--mcp-config` 传入。CodeBuddy 使用自己原生的配置目录，而不是复用 Claude 的，所以 skill 放在 `.codebuddy/skills/`，运行时说明写入 `CODEBUDDY.md`。模型为动态发现。
-QwenPaw 是唯一的例外：它不接受在 Multica 侧选择的模型，因此选择框不可用，显示为"由运行时管理"。请改在 QwenPaw 自身的配置里选择模型。它的模型列表为空属于正常情况，并不表示运行时离线。
+QwenPaw 和 MiniMax Code 是例外：它们不接受在 Multica 侧选择的模型，因此选择框不可用，显示为"由运行时管理"。请改在工具自身的配置里选择模型。模型列表为空属于正常情况，并不表示运行时离线。
 
 DeepSeek Harness 的模型目录由运行时自身提供（`dsh --profile multica --list-models`）。它的模型 id 采用 `provider/model` 形式（例如 `deepseek-official/deepseek-chat`），请从列表中选择完整 id。
 
@@ -77,7 +79,7 @@ DeepSeek Harness 的模型目录由运行时自身提供（`dsh --profile multic
 
 ### Codex
 
-OpenAI 出品。使用 JSON-RPC 2.0 协议，状态化更强，approve 机制更细（手动批准 `exec_command` 和 `patch_apply`）。MCP 配置会写入单次任务的 `$CODEX_HOME/config.toml`。**会话恢复可用**——Multica 通过 Codex app-server 的 `thread/resume` 续接；如果已保存的 thread 不存在或过期，会回退到新 thread，让任务继续执行。
+OpenAI 出品。使用 JSON-RPC 2.0 协议，状态化更强，approve 机制更细（手动批准 `exec_command` 和 `patch_apply`）。MCP 配置会写入单次任务的 `$CODEX_HOME/config.toml`。**会话恢复可用**——Multica 通过 Codex app-server 的 `thread/resume` 续接；如果已保存的 thread 不存在或过期，会回退到新 thread，让任务继续执行。MiniMax Code 0.1.2 尚未通过 ACP 声明会话加载能力，因此后续执行会新建 MCode 会话。
 
 ### Copilot
 
@@ -141,13 +143,18 @@ ByteDance 官方 TRAE CLI（`traecli`，搭配 Trae IDE，**不是**开源的 `b
 
 xAI 的 Grok Build CLI（`grok`）。Multica 通过 `grok --no-auto-update agent --always-approve stdio` 接入 ACP。`initialize` 返回后，Multica 从 CLI 公布的认证方式中选择 `xai.api_key`（已设置 `XAI_API_KEY` 时优先）或 `cached_token`，等待 `authenticate` 成功后才创建或加载会话；没有可用方式时会明确失败。会话续接走 ACP `session/load`，模型从 `session/new` 动态发现并通过 `session/set_model` 切换。`grok-4.5` 的 reasoning effort 只提供官方支持的 `low`、`medium`、`high`。MCP 配置通过 ACP `mcpServers` 传入。Skill 文件写入 `.grok/skills/`；用户 skill 从 `$GROK_HOME/skills/`（默认 `~/.grok/skills/`）和通用目录 `~/.agents/skills/` 发现。
 
+
+### MiniMax Code
+
+MiniMax 出品，ACP 原生编码智能体（`mcode` CLI）。MCP 配置通过 ACP `mcpServers` 传入，skill 写入 `.minimax/skills/` 供原生发现。模型选择由运行时管理：选择框不可用，显示为“由运行时管理”。MiniMax Code 0.1.2 尚未通过 ACP 声明会话加载能力，因此后续执行会新建 MCode 会话。
+
 ## 会话恢复：谁真的支持
 
 会话恢复的机制在 [执行任务](/tasks#任务能接着上次的上下文继续吗) 里讲过。**所有支持的工具都能恢复会话**——传 resume id，任务就会从上次的上下文接着继续。唯一的特例是 Pi：它的 resume id 是磁盘上的会话文件路径，而不是字符串 ID（见上文 [Pi](#pi)）。
 
 ## MCP 配置：按工具不同
 
-**17 款工具里有 12 款实际消费 `mcp_config`：Claude Code、CodeBuddy、Codex、Cursor、Hermes、Kimi、Kiro CLI、OpenCode、OpenClaw、Qoder、Trae CLI、Grok**。其他 5 款（Antigravity、Copilot、DevEco Code、Pi、OMP）会接收这个字段但**忽略**——不报错、不警告，只是配置不生效。
+**19 款工具里有 13 款实际消费 `mcp_config`：Claude Code、CodeBuddy、Codex、Cursor、Hermes、Kimi、Kiro CLI、OpenCode、OpenClaw、Qoder、Trae CLI、Grok、MiniMax Code**。其他 5 款（Antigravity、Copilot、DevEco Code、Pi、OMP）会接收这个字段但**忽略**——不报错、不警告，只是配置不生效。
 
 各工具的接入方式不同：Claude Code 和 CodeBuddy 通过 `--mcp-config` 加 `--strict-mcp-config` 接收；Codex 会把 daemon 管理的 `mcp_servers` block 写入单次任务的 `$CODEX_HOME/config.toml`；Cursor 会写入 `.cursor/mcp.json`，并把项目 approval 写到单次任务的 `CURSOR_DATA_DIR`；Hermes、Kimi、Kiro CLI、Qoder、Trae CLI、Grok 通过 ACP `mcpServers` 接收；OpenCode 通过 `OPENCODE_CONFIG_CONTENT` 环境变量内联接收；OpenClaw 通过 Multica 的单次任务配置 wrapper 接收 `mcp.servers`。OpenCode 这条路径**不会**改写项目里的 `opencode.json`。
 
@@ -175,6 +182,7 @@ xAI 的 Grok Build CLI（`grok`）。Multica 通过 `grok --no-auto-update agent
 | Qoder | `.qoder/skills/` | ✅ 原生 |
 | Trae CLI | `.traecli/skills/` | ✅ 原生 |
 | Grok | `.grok/skills/` | ✅ 原生 |
+| MiniMax Code | `.minimax/skills/` | ✅ 原生 |
 | Antigravity | `.agents/skills/` | ✅ 原生（沿用 Gemini CLI 的 workspace 布局——见 [Antigravity 文档](https://antigravity.google/docs/gcli-migration)）|
 | Hermes | `HERMES_HOME/skills/` （单次任务 home）| ✅ 原生（每个任务从 `~/.hermes/` 播种）|
 | OpenClaw | `.agent_context/skills/` | ⚠️ 通用 fallback |

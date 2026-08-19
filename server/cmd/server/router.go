@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -21,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/featureflags"
 	"github.com/multica-ai/multica/server/internal/handler"
@@ -42,6 +44,7 @@ import (
 	composiosdk "github.com/multica-ai/multica/server/pkg/composio"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/featureflag"
+	"github.com/multica-ai/multica/server/pkg/llm"
 )
 
 var defaultOrigins = []string{
@@ -71,6 +74,8 @@ var corsAllowedHeaders = []string{
 	"X-Client-Version",
 	"X-Client-OS",
 	"X-Client-Capabilities",
+	// Sent by the host page when it relays a plugin surface's Action API call.
+	"X-Multica-Plugin-Installation",
 }
 
 // corsExposedHeaders lists response headers browser clients are allowed to read.
@@ -174,8 +179,12 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 }
 
 type RouterOptions struct {
-	HTTPMetrics     *obsmetrics.HTTPMetrics
-	BusinessMetrics *obsmetrics.BusinessMetrics
+	HTTPMetrics         *obsmetrics.HTTPMetrics
+	BusinessMetrics     *obsmetrics.BusinessMetrics
+	ChannelLeaseMetrics *obsmetrics.ChannelLeaseMetrics
+	// ChannelLeaseRedis is a dedicated non-blocking Redis client/pool. It is
+	// required only when CHANNEL_WS_LEASE_BACKEND=redis.
+	ChannelLeaseRedis *redis.Client
 	// WecomMetrics is the WeCom adapter's health sink. Nil discards every
 	// counter, which is what a deployment with /metrics turned off gets.
 	WecomMetrics *obsmetrics.WecomMetrics
@@ -187,6 +196,115 @@ type RouterOptions struct {
 	// BatchedHeartbeatScheduler here so the caller can also drive Run/Stop;
 	// tests leave this nil and get the legacy synchronous behavior.
 	HeartbeatScheduler handler.HeartbeatScheduler
+	// LLMMaxRetries carries the parsed MULTICA_LLM_MAX_RETRIES budget. Unlike
+	// its three MULTICA_LLM_* siblings it is injected rather than read here,
+	// because an invalid value must fail the boot and only main() can exit —
+	// terminating the process from inside a router constructor would also kill
+	// any test that happened to have the variable set. nil means unset, which
+	// is what tests and NewRouter get.
+	LLMMaxRetries *llm.RetryOverride
+}
+
+func buildChannelSupervisor(
+	installations engine.InstallationStore,
+	postgresLeases engine.LeaseStore,
+	registry *channel.Registry,
+	inbound channel.InboundHandler,
+	opts RouterOptions,
+) *engine.Supervisor {
+	cfg, err := channelSupervisorConfigFromEnv(opts.ChannelLeaseMetrics)
+	if err != nil {
+		slog.Error("channel engine: invalid lease configuration; supervisor disabled", "error", err)
+		return nil
+	}
+
+	backend := strings.ToLower(strings.TrimSpace(os.Getenv("CHANNEL_WS_LEASE_BACKEND")))
+	if backend == "" {
+		backend = "postgres"
+	}
+	var leases engine.LeaseStore
+	switch backend {
+	case "postgres":
+		leases = postgresLeases
+	case "redis":
+		if opts.ChannelLeaseRedis == nil {
+			slog.Error("channel engine: Redis lease backend selected but CHANNEL_WS_LEASE_REDIS_URL/REDIS_URL is missing or invalid; supervisor disabled")
+			return nil
+		}
+		namespace := strings.TrimSpace(os.Getenv("CHANNEL_WS_LEASE_NAMESPACE"))
+		redisLeases, err := engine.NewRedisLeaseStore(opts.ChannelLeaseRedis, namespace)
+		if err != nil {
+			slog.Error("channel engine: Redis lease configuration invalid; supervisor disabled", "error", err)
+			return nil
+		}
+		readyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = redisLeases.Ready(readyCtx)
+		cancel()
+		if err != nil {
+			slog.Error("channel engine: Redis lease backend unavailable; supervisor disabled", "error", err)
+			return nil
+		}
+		leases = redisLeases
+	default:
+		slog.Error("channel engine: unsupported CHANNEL_WS_LEASE_BACKEND; supervisor disabled", "backend", backend)
+		return nil
+	}
+
+	slog.Info("channel engine: lease backend configured",
+		"backend", backend,
+		"ttl", cfg.LeaseTTL.String(),
+		"renew_interval", cfg.LeaseRenewInterval.String(),
+		"poll_interval", cfg.PollInterval.String(),
+	)
+	return engine.NewSupervisor(installations, leases, registry, inbound, cfg)
+}
+
+func channelSupervisorConfigFromEnv(leaseMetrics *obsmetrics.ChannelLeaseMetrics) (engine.Config, error) {
+	ttl, err := strictPositiveDurationEnv("CHANNEL_WS_LEASE_TTL", 180*time.Second)
+	if err != nil {
+		return engine.Config{}, err
+	}
+	renew, err := strictPositiveDurationEnv("CHANNEL_WS_LEASE_RENEW_INTERVAL", 60*time.Second)
+	if err != nil {
+		return engine.Config{}, err
+	}
+	poll, err := strictPositiveDurationEnv("CHANNEL_WS_LEASE_POLL_INTERVAL", 30*time.Second)
+	if err != nil {
+		return engine.Config{}, err
+	}
+	retry, err := strictPositiveDurationEnv("CHANNEL_WS_LEASE_ERROR_RETRY_INTERVAL", 5*time.Second)
+	if err != nil {
+		return engine.Config{}, err
+	}
+	margin, err := strictPositiveDurationEnv("CHANNEL_WS_LEASE_EXPIRY_SAFETY_MARGIN", 5*time.Second)
+	if err != nil {
+		return engine.Config{}, err
+	}
+	cfg := engine.Config{
+		LeaseTTL:                ttl,
+		LeaseRenewInterval:      renew,
+		PollInterval:            poll,
+		LeaseErrorRetryInterval: retry,
+		LeaseExpirySafetyMargin: margin,
+		LeaseMetrics:            leaseMetrics,
+		Logger:                  slog.Default(),
+	}
+	if err := cfg.Validate(); err != nil {
+		return engine.Config{}, err
+	}
+	return cfg, nil
+}
+
+func strictPositiveDurationEnv(name string, fallback time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration (got %q)", name, raw)
+	}
+	return value, nil
 }
 
 // NewRouterWithOptions builds the fully-configured Chi router and
@@ -235,6 +353,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		LLMAPIKey:                strings.TrimSpace(os.Getenv("MULTICA_LLM_API_KEY")),
 		LLMBaseURL:               strings.TrimSpace(os.Getenv("MULTICA_LLM_BASE_URL")),
 		LLMDefaultModel:          strings.TrimSpace(os.Getenv("MULTICA_LLM_DEFAULT_MODEL")),
+		LLMMaxRetries:            opts.LLMMaxRetries,
 		ServerVersion:            normalizeServerVersion(version),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
@@ -248,6 +367,22 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	h.TaskService.FeatureFlags = opts.FeatureFlags
 	h.TaskService.Metrics = opts.BusinessMetrics
 	h.IssueService.Metrics = opts.BusinessMetrics
+	entitlementClient, entitlementErr := entitlement.New(entitlement.Config{
+		Enabled:      envBool("MULTICA_ENTITLEMENT_POLICY_ENABLED", false),
+		BaseURL:      strings.TrimSpace(os.Getenv("MULTICA_ENTITLEMENT_POLICY_URL")),
+		ServiceToken: os.Getenv("MULTICA_ENTITLEMENT_SERVICE_TOKEN"),
+		Timeout:      envDuration("MULTICA_ENTITLEMENT_POLICY_TIMEOUT", 3*time.Second),
+		StaleGrace:   envNonNegativeDuration("MULTICA_ENTITLEMENT_STALE_GRACE", 15*time.Minute),
+		Observer:     opts.BusinessMetrics,
+	})
+	if entitlementErr != nil {
+		slog.Error("entitlement policy client disabled by invalid configuration", "error", entitlementErr)
+		opts.BusinessMetrics.RecordEntitlementConfigError()
+	} else if entitlementClient.Enabled() {
+		entitlementClient.SetEmergencyDisabled(envBool("MULTICA_ENTITLEMENT_EMERGENCY_DISABLED", false))
+		h.AutopilotService.Entitlements = entitlementClient
+		h.AutopilotService.QuotaMetrics = opts.BusinessMetrics
+	}
 	if opts.BusinessMetrics != nil {
 		// Wire the BusinessMetrics receiver into the cloud runtime client
 		// so every outbound Fleet/Gateway request feeds the
@@ -313,11 +448,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			Logger:  slog.Default(),
 		}
 	}
-	h.ChannelSupervisor = engine.NewSupervisor(
-		lark.NewChannelInstallationStore(queries),
+	installationStore := lark.NewChannelInstallationStore(queries)
+	h.ChannelSupervisor = buildChannelSupervisor(
+		installationStore,
+		installationStore,
 		channelRegistry,
 		channelRouter.Handle,
-		engine.Config{},
+		opts,
 	)
 
 	// Lark integration. Only wired when MULTICA_LARK_SECRET_KEY is set:
@@ -918,19 +1055,20 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		slog.Info("vcs integration disabled (MULTICA_VCS_SECRET_KEY not set)")
 	}
 
-	// Remote MCP Plugin credentials use a dedicated deployment key. Keeping
-	// this separate from VCS and channel secrets gives operators an isolated
-	// rotation and blast radius; without it configuration endpoints fail closed.
+	// Plugin secrets use a dedicated deployment key. Keeping this separate from
+	// VCS and channel secrets gives operators an isolated rotation and blast
+	// radius; without it, saving a `secret` config field fails closed rather
+	// than storing plaintext.
 	if pluginKey, err := secretbox.LoadKey("MULTICA_PLUGIN_SECRET_KEY"); err == nil {
 		box, err := secretbox.New(pluginKey)
 		if err != nil {
-			slog.Error("plugins: secretbox.New failed; Remote MCP credentials disabled", "error", err)
+			slog.Error("plugins: secretbox.New failed; Plugin secrets disabled", "error", err)
 		} else if h.PluginService != nil {
-			h.PluginService.RemoteMCPSecrets = box
-			slog.Info("Remote MCP Plugin credential encryption enabled")
+			h.PluginService.Secrets = box
+			slog.Info("Plugin secret encryption enabled")
 		}
 	} else {
-		slog.Info("Remote MCP Plugin credentials disabled (MULTICA_PLUGIN_SECRET_KEY not set)")
+		slog.Info("Plugin secrets disabled (MULTICA_PLUGIN_SECRET_KEY not set)")
 	}
 
 	if opts.HeartbeatScheduler != nil {
@@ -1077,6 +1215,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// Public API
 	r.Get("/api/config", h.GetConfig)
 	r.With(contactSalesRL).Post("/api/contact-sales", h.CreateContactSales)
+	// Public share-link preview — no auth: shows the workspace name/slug and
+	// inviter so a not-yet-logged-in visitor can see what they're joining.
+	r.Get("/api/share-links/{code}", h.GetShareLinkInfo)
 
 	// Webhook ingress for autopilots. Outside the authenticated group on
 	// purpose: the bearer token in the URL path IS the credential. Workspace
@@ -1113,9 +1254,6 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// Auth group made a missing cookie a hard 401, breaking the flow for exactly
 	// the browsers above; the other four composio endpoints stay session-gated.
 	r.Get("/api/integrations/composio/callback", h.ComposioCallback)
-	// Generic hosted Remote MCP OAuth callback. Identity and installation scope
-	// come exclusively from the encrypted, single-use state record.
-	r.With(authVerifyRL).Get("/api/plugins/remote-mcp/oauth/callback", h.CompletePluginRemoteMCPOAuth)
 
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
@@ -1144,7 +1282,6 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/runtimes/{runtimeId}/local-skills/import/{requestId}/result", h.ReportLocalSkillImportResult)
 
 		r.Get("/tasks/{taskId}/status", h.GetTaskStatus)
-		r.Get("/tasks/{taskId}/remote-mcp/{contributionId}/credential", h.ResolveTaskRemoteMCPCredential)
 		r.Post("/tasks/{taskId}/start", h.StartTask)
 		r.Post("/tasks/{taskId}/wait-local-directory", h.MarkTaskWaitingLocalDirectory)
 		r.Post("/tasks/{taskId}/progress", h.ReportTaskProgress)
@@ -1169,6 +1306,26 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(queries, patCache, cloudPATVerifier))
 		r.Use(middleware.RefreshCloudFrontCookies(cfSigner))
+
+		// Plugin Action API. Called by the HOST PAGE on the signed-in user's
+		// session after a surface asks for something over the postMessage
+		// bridge — the iframe holds no credential and never reaches these
+		// directly. Which installation is speaking arrives in a header the
+		// host sets; the workspace is derived from that installation rather
+		// than trusted from the client, and membership is then checked
+		// against it. Sits in the user-scoped group for that reason: there is
+		// no workspace in the path to gate on.
+		r.Route("/api/v1/plugin", func(r chi.Router) {
+			r.Get("/context", h.GetPluginContext)
+			r.Get("/issues/{id}", h.GetPluginIssue)
+			r.Patch("/issues/{id}", h.PatchPluginIssue)
+			r.Get("/issues/{id}/comments", h.ListPluginComments)
+			r.Post("/issues/{id}/comments", h.CreatePluginComment)
+			r.Get("/storage/{scope}", h.ListPluginStorage)
+			r.Get("/storage/{scope}/{key}", h.GetPluginStorage)
+			r.Put("/storage/{scope}/{key}", h.PutPluginStorage)
+			r.Delete("/storage/{scope}/{key}", h.DeletePluginStorage)
+		})
 
 		// --- User-scoped routes (no workspace context required) ---
 		r.Get("/api/me", h.GetMe)
@@ -1240,11 +1397,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// The payload is names and transports only; the stored
 					// entries are write-only.
 					r.Get("/mcp-servers", h.ListWorkspaceMcpServers)
+					// Installed Plugins are member-visible so a member can
+					// see what is mounted in their workspace and which scopes
+					// it holds; install / configure / remove stay admin-only.
 					r.Get("/plugins", h.ListPlugins)
-					r.Get("/plugins/private", h.ListPrivatePlugins)
-					r.Get("/plugins/private/{pluginRef}", h.GetPrivatePluginStatus)
-					r.Get("/plugins/catalog", h.ListPluginCatalog)
-					r.Get("/plugins/catalog/{pluginKey}", h.GetPluginCatalogRelease)
 				})
 				// Admin-level access
 				r.Group(func(r chi.Router) {
@@ -1263,22 +1419,23 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/mcp-servers", h.CreateWorkspaceMcpServer)
 					r.Put("/mcp-servers/{serverId}", h.UpdateWorkspaceMcpServer)
 					r.Delete("/mcp-servers/{serverId}", h.DeleteWorkspaceMcpServer)
+					r.Post("/share-links", h.CreateShareLink)
+					r.Delete("/share-links/{linkId}", h.RevokeShareLink)
+					r.Get("/share-links", h.ListShareLinks)
 					// Custom runtime profile mutations (admin-only).
 					r.Post("/runtime-profiles", h.CreateRuntimeProfile)
 					r.Patch("/runtime-profiles/{profileId}", h.UpdateRuntimeProfile)
 					r.Put("/runtime-profiles/{profileId}", h.UpdateRuntimeProfile)
 					r.Delete("/runtime-profiles/{profileId}", h.DeleteRuntimeProfile)
-					r.Post("/plugins/install", h.InstallPlugin)
-					r.Post("/plugins/private/install", h.InstallPrivatePlugin)
-					r.Post("/plugins/{installationId}/upgrade", h.UpgradePlugin)
+					// Installing a Plugin is two steps on purpose: preview
+					// parses the manifest and returns the scope list without
+					// writing anything, so the consent screen has something to
+					// show before an installation exists.
+					r.Post("/plugins/preview", h.PreviewPlugin)
+					r.Post("/plugins", h.InstallPlugin)
+					r.Put("/plugins/{installationId}/config", h.ConfigurePlugin)
 					r.Post("/plugins/{installationId}/enable", h.EnablePlugin)
 					r.Post("/plugins/{installationId}/disable", h.DisablePlugin)
-					r.Put("/plugins/{installationId}/remote-mcp/{contributionKey}/config", h.ConfigurePluginRemoteMCP)
-					r.Post("/plugins/{installationId}/remote-mcp/{contributionKey}/oauth/start", h.StartPluginRemoteMCPOAuth)
-					r.Post("/plugins/{installationId}/remote-mcp/{contributionKey}/test", h.TestPluginRemoteMCP)
-					r.Post("/plugins/{installationId}/remote-mcp/{contributionKey}/approve", h.ReviewPluginRemoteMCPTools)
-					r.Delete("/plugins/{installationId}/remote-mcp/{contributionKey}/credential", h.RevokePluginRemoteMCPCredential)
-					r.Post("/plugins/{installationId}/rollback", h.RollbackPlugin)
 					r.Delete("/plugins/{installationId}", h.UninstallPlugin)
 				})
 				// Owner-only access
@@ -1413,6 +1570,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/api/invitations/{id}", h.GetMyInvitation)
 		r.Post("/api/invitations/{id}/accept", h.AcceptInvitation)
 		r.Post("/api/invitations/{id}/decline", h.DeclineInvitation)
+		r.Post("/api/share-links/join", h.JoinByShareLink)
 
 		r.Route("/api/tokens", func(r chi.Router) {
 			r.Get("/", h.ListPersonalAccessTokens)
@@ -1584,6 +1742,19 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 			})
 
+			// Issue status catalog (MUL-6243). Reads are open to any member —
+			// every client needs the catalog to render a status. Writes are
+			// gated to workspace owner/admin inside the handlers.
+			r.Route("/api/issue-statuses", func(r chi.Router) {
+				r.Get("/", h.ListIssueStatuses)
+				r.Post("/", h.CreateIssueStatus)
+				r.Patch("/reorder", h.ReorderIssueStatuses)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Patch("/", h.UpdateIssueStatus)
+					r.Delete("/", h.ArchiveIssueStatus)
+				})
+			})
+
 			// Projects
 			r.Route("/api/projects", func(r chi.Router) {
 				r.Get("/search", h.SearchProjects)
@@ -1624,6 +1795,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Get("/", h.ListAutopilots)
 				r.Post("/", h.CreateAutopilot)
 				r.Get("/cron-preview", h.CronPreview)
+				r.Get("/usage", h.GetAutopilotQuotaUsage)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetAutopilot)
 					r.Patch("/", h.UpdateAutopilot)

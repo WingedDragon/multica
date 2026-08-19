@@ -24,28 +24,31 @@ type ompCatalogModel struct {
 	Thinking []string `json:"thinking"`
 }
 
-// discoverOMPModels runs `omp models --no-extensions --json` and converts the
-// runtime catalog into dropdown models. Disabling extensions keeps discovery
-// independent of extension startup cost and failures; selectors are passed
-// back to OMP verbatim.
-func discoverOMPModels(ctx context.Context, executablePath string) ([]Model, error) {
-	if executablePath == "" {
-		executablePath = "omp"
+// discoverOMPModels runs `omp models --no-extensions --json` through the
+// shared launch boundary (so a custom profile's prefix is honoured) and
+// converts the runtime catalog into dropdown models. Disabling extensions
+// keeps discovery independent of extension startup cost and failures;
+// selectors are passed back to OMP verbatim. Unlike the protocol-family
+// discovery fallbacks, errors propagate so callers can retain the manual
+// model-selector fallback.
+func discoverOMPModels(ctx context.Context, runtimeCmd Command) ([]Model, error) {
+	if runtimeCmd.Path == "" {
+		runtimeCmd.Path = "omp"
 	}
-	if _, err := exec.LookPath(executablePath); err != nil {
-		return nil, fmt.Errorf("find OMP executable %q: %w", executablePath, err)
+	if _, err := exec.LookPath(runtimeCmd.Path); err != nil {
+		return nil, fmt.Errorf("find OMP executable %q: %w", runtimeCmd.Path, err)
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, ompModelDiscoveryTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, executablePath, "models", "--no-extensions", "--json")
+	cmd := runtimeCmd.exec(runCtx, "models", "--no-extensions", "--json")
 	hideAgentWindow(cmd)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("run OMP model discovery with %q: %w%s", executablePath, err, ompDiscoveryStderr(stderr.String()))
+		return nil, fmt.Errorf("run OMP model discovery with %q: %w%s", runtimeCmd.Path, err, ompDiscoveryStderr(stderr.String()))
 	}
 
 	models, err := parseOMPModels([]byte(stdout.String()))

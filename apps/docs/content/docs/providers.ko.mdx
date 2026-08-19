@@ -1,11 +1,11 @@
 ---
 title: AI 코딩 도구 대조표
-description: Multica는 17개의 AI 코딩 도구를 지원합니다. 모두 동일한 인터페이스를 구현하지만, 기능 세부사항은 크게 다릅니다.
+description: Multica는 19개의 AI 코딩 도구를 지원합니다. 모두 동일한 인터페이스를 구현하지만, 기능 세부사항은 크게 다릅니다.
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 모두 동일한 인터페이스(대기열 적재, 디스패치, 실행, 결과 반환)를 구현하므로, 같은 Multica 보드에서 어느 것이든 구동할 수 있습니다. **하지만 기능 세부사항은 크게 다릅니다**: 세션 재개가 실제로 동작하는지, MCP를 지원하는지, 스킬 파일이 어디에 위치하는지, 모델을 어떻게 선택하는지. 이 페이지가 전체 대조표입니다.
+Multica는 **19개의 AI 코딩 도구**를 기본 지원합니다. 이들은 모두 동일한 인터페이스(대기열 적재, 디스패치, 실행, 결과 반환)를 구현하므로, 같은 Multica 보드에서 어느 것이든 구동할 수 있습니다. **하지만 기능 세부사항은 크게 다릅니다**: 세션 재개가 실제로 동작하는지, MCP를 지원하는지, 스킬 파일이 어디에 위치하는지, 모델을 어떻게 선택하는지. 이 페이지가 전체 대조표입니다.
 
 에이전트를 생성할 때 도구를 고르는 방법은 [에이전트 생성 및 구성](/agents-create)을 참고하세요.
 
@@ -30,6 +30,7 @@ Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | 동적 탐색 |
 | **Trae CLI** | ByteDance | ✅ (ACP `session/load`) | ✅ | `.traecli/skills/` | 동적 탐색 |
 | **Grok** | xAI | ✅ (ACP `session/load`) | ✅ | `.grok/skills/` | 동적 탐색(ACP `session/new`) |
+| **MiniMax Code** | MiniMax | —(0.1.2는 세션 로드를 알리지 않음) | ✅ | `.minimax/skills/` | 런타임에서 관리 |
 
 ## 각 도구의 용도
 
@@ -47,6 +48,7 @@ Multica는 **17개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | Hermes | `hermes` | ✓ | ✓ | 실행별 `HERMES_HOME/skills/` |
 | Kimi CLI | `kimi` | ✓ | ✓ | `.kimi/skills/` |
 | Kiro CLI | `kiro-cli` | ✓ | ✓ | `.kiro/skills/` |
+| MiniMax Code | `mcode` | — | ✓ | `.minimax/skills/` |
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
 | Pi | `pi` | ✓ | — | `.pi/skills/` |
@@ -67,7 +69,7 @@ Anthropic에서 제공합니다. **신규 사용자에게 첫 번째 선택지**
 ### CodeBuddy
 
 Tencent에서 제공합니다. Claude Code 호환 CLI 에이전트입니다 — Multica는 Claude Code와 동일한 stream-json 프로토콜로 구동하므로 세션 재개가 동작하고(`--resume` 경유), MCP 구성은 `--mcp-config`로 전달됩니다. CodeBuddy는 Claude의 디렉터리를 재사용하지 않고 자체 설정 디렉터리를 사용하므로, 스킬은 `.codebuddy/skills/`에 배치되고 런타임 브리핑은 `CODEBUDDY.md`에 기록됩니다. 모델은 동적으로 탐색됩니다.
-QwenPaw만 예외입니다. Multica에서 고른 모델을 받아들이지 않으므로 선택 상자가 비활성 상태로 "런타임에서 관리"라고 표시됩니다. 모델은 QwenPaw 자체 설정에서 선택하세요. QwenPaw의 모델 목록이 비어 있는 것은 정상이며 런타임이 오프라인이라는 뜻이 아닙니다.
+QwenPaw와 MiniMax Code는 예외입니다. Multica에서 고른 모델을 받아들이지 않으므로 선택 상자가 비활성 상태로 "런타임에서 관리"라고 표시됩니다. 모델은 각 도구의 자체 설정에서 선택하세요. 모델 목록이 비어 있는 것은 정상이며 런타임이 오프라인이라는 뜻이 아닙니다.
 
 DeepSeek Harness의 모델 카탈로그는 런타임 자체가 제공합니다(`dsh --profile multica --list-models`). 모델 ID는 `provider/model` 형식(예: `deepseek-official/deepseek-chat`)이므로 목록에서 전체 ID를 선택하세요.
 
@@ -77,7 +79,7 @@ DeepSeek Harness의 모델 카탈로그는 런타임 자체가 제공합니다(`
 
 ### Codex
 
-OpenAI에서 제공합니다. JSON-RPC 2.0을 사용하고, 상태 유지 능력이 더 강하며, 더 세밀한 승인 메커니즘(`exec_command` 및 `patch_apply`에 대한 수동 승인)을 갖추고 있습니다. MCP 구성은 작업별 `$CODEX_HOME/config.toml`에 기록됩니다. **세션 재개가 동작합니다** — Multica는 Codex app-server의 `thread/resume`으로 재개합니다. 저장된 thread가 없거나 오래된 경우에는 새 thread로 폴백해 작업을 계속 실행합니다.
+OpenAI에서 제공합니다. JSON-RPC 2.0을 사용하고, 상태 유지 능력이 더 강하며, 더 세밀한 승인 메커니즘(`exec_command` 및 `patch_apply`에 대한 수동 승인)을 갖추고 있습니다. MCP 구성은 작업별 `$CODEX_HOME/config.toml`에 기록됩니다. **세션 재개가 동작합니다** — Multica는 Codex app-server의 `thread/resume`으로 재개합니다. 저장된 thread가 없거나 오래된 경우에는 새 thread로 폴백해 작업을 계속 실행합니다. MiniMax Code 0.1.2는 ACP에서 세션 로드 기능을 알리지 않으므로 이후 실행에서는 새 MCode 세션을 시작합니다.
 
 ### Copilot
 
@@ -141,13 +143,18 @@ ByteDance의 공식 TRAE CLI(`traecli`, Trae IDE와 함께 쓰는 제품이며 �
 
 xAI의 Grok Build CLI(`grok`)입니다. Multica는 `grok --no-auto-update agent --always-approve stdio`로 ACP에 연결합니다. `initialize` 응답 후 CLI가 광고한 방식 중 `xai.api_key`(`XAI_API_KEY`가 설정된 경우 우선) 또는 `cached_token`을 선택하고, `authenticate`가 성공한 뒤에만 세션을 만들거나 불러옵니다. 사용할 수 있는 방식이 없으면 명시적으로 실패합니다. 세션 재개는 ACP `session/load`, 모델은 `session/new`에서 동적으로 탐색하고 `session/set_model`로 전환합니다. `grok-4.5`의 reasoning effort는 공식 지원 값인 `low`, `medium`, `high`만 제공합니다. MCP 구성은 ACP `mcpServers`로 전달됩니다. 스킬은 `.grok/skills/`에 기록되며, 사용자 스킬은 `$GROK_HOME/skills/`(기본값 `~/.grok/skills/`)과 공용 `~/.agents/skills/`에서 탐색됩니다.
 
+
+### MiniMax Code
+
+MiniMax 제공 ACP 네이티브 코딩 에이전트(`mcode` CLI)입니다. MCP 구성은 ACP `mcpServers`로 전달되고, 스킬은 `.minimax/skills/`에 기록되어 네이티브로 발견됩니다. 모델 선택은 런타임에서 관리하므로 선택 상자는 비활성 상태로 "런타임에서 관리"라고 표시됩니다. MiniMax Code 0.1.2는 ACP에서 세션 로드 기능을 알리지 않으므로 이후 실행에서는 새 MCode 세션을 시작합니다.
+
 ## 세션 재개: 실제로 지원하는 도구
 
 세션 재개 메커니즘은 [작업](/tasks#can-a-task-continue-from-the-previous-context)에서 다룹니다. **지원되는 모든 도구가 세션을 재개합니다** — 재개 id를 전달하면 작업이 이전 컨텍스트에서 이어집니다. 유일한 예외는 Pi로, 재개 id가 문자열 ID가 아니라 디스크상의 세션 파일 경로입니다(위의 [Pi](#pi) 참고).
 
 ## MCP 구성: 도구별 지원
 
-**17개 도구 중 `mcp_config`를 실제로 소비하는 것은 12개입니다: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Trae CLI, Grok**. 나머지 5개(Antigravity, Copilot, DevEco Code, Pi, OMP)는 이 필드를 받아들이지만 **무시합니다** — 오류도, 경고도 없으며, 구성이 그저 효과를 내지 못합니다.
+**19개 도구 중 `mcp_config`를 실제로 소비하는 것은 12개입니다: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Trae CLI, Grok**. 나머지 5개(Antigravity, Copilot, DevEco Code, Pi, OMP)는 이 필드를 받아들이지만 **무시합니다** — 오류도, 경고도 없으며, 구성이 그저 효과를 내지 못합니다.
 
 각 도구의 연결 방식은 다릅니다: Claude Code와 CodeBuddy는 `--mcp-config`와 `--strict-mcp-config`로 받고, Codex는 데몬이 관리하는 `mcp_servers` 블록을 작업별 `$CODEX_HOME/config.toml`에 기록하며, Cursor는 `.cursor/mcp.json`과 작업별 `CURSOR_DATA_DIR` 아래의 프로젝트 approval을 기록합니다. Hermes/Kimi/Kiro CLI/Qoder/Trae CLI/Grok은 ACP `mcpServers`로 받습니다. OpenCode는 `OPENCODE_CONFIG_CONTENT` 환경 변수로 인라인 구성을 받고, OpenClaw는 Multica의 작업별 config wrapper를 통해 `mcp.servers`를 받습니다. OpenCode 경로는 프로젝트의 `opencode.json`을 다시 쓰지 않습니다.
 
@@ -174,7 +181,8 @@ xAI의 Grok Build CLI(`grok`)입니다. Multica는 `grok --no-auto-update agent 
 | OMP | `.omp/skills/` | ✅ 기본 |
 | Qoder | `.qoder/skills/` | ✅ 기본 |
 | Trae CLI | `.traecli/skills/` | ✅ 기본 |
-| Grok | `.grok/skills/` | ✅ 기본 |
+| Grok | `.grok/skills/` | ✅ 네이티브 |
+| MiniMax Code | `.minimax/skills/` | ✅ 네이티브 |
 | Antigravity | `.agents/skills/` | ✅ 기본 (Gemini CLI의 워크스페이스 레이아웃을 따름 — [Antigravity 문서](https://antigravity.google/docs/gcli-migration) 참고) |
 | Hermes | `HERMES_HOME/skills/` (작업별 홈) | ✅ 기본 (작업별로 `~/.hermes/`에서 시드) |
 | OpenClaw | `.agent_context/skills/` | ⚠️ 범용 fallback |
@@ -190,4 +198,4 @@ fallback 경로를 쓰는 도구가 실제로 이 디렉터리를 읽는지는 �
 - [에이전트 생성 및 구성](/agents-create) — 에이전트에 사용할 도구를 선택하세요
 - [작업](/tasks) — 작업 생명주기와 세션 재개 메커니즘
 - [데몬과 런타임](/daemon-runtimes) — 도구가 실행되는 곳과 Multica에 연결되는 방식
-- [에이전트 런타임 설치](/install-agent-runtime) — 지원되는 17개 도구 각각의 설치 및 인증
+- [에이전트 런타임 설치](/install-agent-runtime) — 지원되는 19개 도구 각각의 설치 및 인증

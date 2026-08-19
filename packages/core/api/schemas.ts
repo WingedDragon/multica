@@ -50,6 +50,7 @@ import type {
   InboxItem,
   InboxWorkspaceUnread,
   Label,
+  MemberWithUser,
   IssueProperty,
   ListPropertiesResponse,
   IssuePropertiesResponse,
@@ -63,16 +64,20 @@ import type {
   ListLabelsResponse,
   ListGitLabMergeRequestsResponse,
   ListWebhookDeliveriesResponse,
+  IssueStatusEntry,
+  ListIssueStatusesResponse,
   NotificationPreferenceResponse,
-  PluginCatalogResponse,
   PluginInstallation,
   PluginInstallationListResponse,
+  PluginPreview,
   ResourceLabelsResponse,
   QuickAction,
   ListQuickActionsResponse,
   RuntimeModelListRequest,
   SearchIssuesResponse,
   SearchProjectsResponse,
+  ShareLink,
+  ShareLinkInfo,
   Skill,
   Squad,
   TimelineEntry,
@@ -83,122 +88,75 @@ import type {
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 import type { CreateFeedbackResponse } from "../feedback/types";
 
-export const PluginBindingSchema = z.object({
-  scope_type: z.string().default("workspace"),
-  scope_id: z.string().default(""),
-  enabled: z.boolean().default(false),
-  revision: z.number().default(0),
+export const PluginConfigFieldSchema = z.object({
+  key: z.string(),
+  type: z.string().default("string"),
+  label: z.string().default(""),
+  description: z.string().optional(),
+  required: z.boolean().default(false),
+  options: z.array(z.string()).default([]),
+  placeholder: z.string().optional(),
+  multiline: z.boolean().default(false),
 }).loose();
 
-export const RemoteMCPToolSchema = z.object({
-  name: z.string(),
-  description: z.string().optional(),
-  input_schema: z.record(z.string(), z.unknown()).default({}),
-  schema_digest: z.string().default(""),
-  risk: z.string().optional(),
-});
+export const PluginSurfaceSchema = z.object({
+  key: z.string(),
+  type: z.string().default(""),
+  name: z.string().default(""),
+  entry: z.string().default(""),
+  platforms: z.array(z.string()).default([]),
+}).loose();
 
-export const PluginRemoteMCPConfigSchema = z.object({
-  contribution_key: z.string(),
-  default_endpoint: z.string().optional(),
-  preferred_auth: z.string().optional(),
-  supported_auth: z.array(z.string()).default([]),
-  config_revision: z.number().optional(),
-  endpoint: z.string().optional(),
-  endpoint_domain: z.string().optional(),
-  auth_type: z.string().optional(),
-  auth_header: z.string().optional(),
-  public_config: z.record(z.string(), z.unknown()).optional(),
-  connection_scope: z.string().optional(),
-  connected_by: z.string().optional(),
-  credential_state: z.string().default("missing"),
-  credential_hint: z.string().optional(),
-  failure_policy: z.string().optional(),
-  approved_tools: z.array(RemoteMCPToolSchema).default([]),
-  discovered_tools: z.array(RemoteMCPToolSchema).default([]),
-  discovered_schema_digest: z.string().optional(),
-  schema_digest: z.string().optional(),
-  reviewed: z.boolean().default(false),
-  ready: z.boolean().default(false),
-});
+export const PluginHookSchema = z.object({
+  key: z.string(),
+  name: z.string().default(""),
+  description: z.string().default(""),
+  triggers: z.array(z.string()).default([]),
+  events: z.array(z.string()).default([]),
+  transport: z.string().default(""),
+}).loose();
 
-export const RemoteMCPDiscoveryResponseSchema = z.object({
-  ok: z.boolean().optional(),
-  config_revision: z.number().default(0),
-  credential_state: z.string().optional(),
-  reviewed: z.boolean().optional(),
-  discovered_tools: z.array(RemoteMCPToolSchema).default([]),
-  discovered_schema_digest: z.string().default(""),
-});
-
-export const RemoteMCPOAuthStartResponseSchema = z.object({
-  authorization_url: z.string().url(),
-});
-
-export const EMPTY_REMOTE_MCP_OAUTH_START_RESPONSE = { authorization_url: "" };
+export const PluginResourceSchema = z.object({
+  type: z.string().default(""),
+  key: z.string(),
+  entry: z.string().default(""),
+}).loose();
 
 export const PluginInstallationSchema = z.object({
   id: z.string(),
   plugin_key: z.string().default(""),
-  display_name: z.string().default(""),
-  desired_version: z.string().default(""),
-  active_version: z.string().optional(),
-  enabled: z.boolean().default(false),
-  desired_generation: z.number().default(0),
-  active_generation: z.number().default(0),
-  lifecycle_status: z.string().default("error"),
-  health_state: z.string().optional(),
-  health_reason: z.string().optional(),
+  name: z.string().default(""),
   description: z.string().optional(),
-  publisher: z.string().default(""),
-  publisher_type: z.string().default(""),
-  trust_tier: z.string().default(""),
-  source_kind: z.string().default("bundled"),
-  source_ref: z.string().default(""),
-  uploader_id: z.string().optional(),
-  manifest_digest: z.string().default(""),
-  archive_digest: z.string().default(""),
-  artifact_digest: z.string().default(""),
-  signature_verified: z.boolean().default(false),
-  requested_capabilities: z.array(z.string()).default([]),
-  available_versions: z.array(z.string()).default([]),
-  contributions: z.array(z.string()).default([]),
-  contribution_details: z.array(z.object({
-    key: z.string(),
-    type: z.string().default(""),
-    name: z.string().default(""),
-    description: z.string().default(""),
-    entry_path: z.string().default(""),
-    entry_digest: z.string().default(""),
-  }).loose()).default([]),
-  bindings: z.array(PluginBindingSchema).default([]),
-  remote_mcp: z.array(PluginRemoteMCPConfigSchema).default([]),
+  version: z.string().default(""),
+  source_url: z.string().default(""),
+  enabled: z.boolean().default(false),
+  granted_scopes: z.array(z.string()).default([]),
+  config_schema: z.array(PluginConfigFieldSchema).default([]),
+  config: z.record(z.string(), z.unknown()).default({}),
+  configured_secrets: z.array(z.string()).default([]),
+  surfaces: z.array(PluginSurfaceSchema).default([]),
+  hooks: z.array(PluginHookSchema).default([]),
+  resources: z.array(PluginResourceSchema).default([]),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
 }).loose();
 
 export const EMPTY_PLUGIN_INSTALLATION: PluginInstallation = {
   id: "",
   plugin_key: "",
-  display_name: "",
-  desired_version: "",
+  name: "",
+  version: "",
+  source_url: "",
   enabled: false,
-  desired_generation: 0,
-  active_generation: 0,
-  lifecycle_status: "error",
-  publisher: "",
-  publisher_type: "",
-  trust_tier: "",
-  source_kind: "bundled",
-  source_ref: "",
-  manifest_digest: "",
-  archive_digest: "",
-  artifact_digest: "",
-  signature_verified: false,
-  requested_capabilities: [],
-  available_versions: [],
-  contributions: [],
-  contribution_details: [],
-  bindings: [],
-  remote_mcp: [],
+  granted_scopes: [],
+  config_schema: [],
+  config: {},
+  configured_secrets: [],
+  surfaces: [],
+  hooks: [],
+  resources: [],
+  created_at: "",
+  updated_at: "",
 };
 
 export const PluginInstallationListResponseSchema = z.object({
@@ -209,53 +167,32 @@ export const EMPTY_PLUGIN_INSTALLATION_LIST: PluginInstallationListResponse = {
   plugins: [],
 };
 
-export const PluginCatalogContributionSchema = z.object({
-  key: z.string(),
-  type: z.string().default(""),
+export const PluginManifestSummarySchema = z.object({
+  key: z.string().default(""),
   name: z.string().default(""),
-  description: z.string().default(""),
-  entry_path: z.string().default(""),
-  entry_digest: z.string().default(""),
+  description: z.string().optional(),
+  version: z.string().default(""),
+  author: z.object({
+    name: z.string().default(""),
+    url: z.string().optional(),
+  }).loose().default({ name: "" }),
 }).loose();
 
-export const PluginCatalogReleaseSchema = z.object({
-  plugin_key: z.string(),
-  name: z.string().default(""),
-  description: z.string().default(""),
-  version: z.string(),
-  publisher: z.string().default(""),
-  publisher_type: z.string().default(""),
-  trust_tier: z.string().default(""),
-  source_kind: z.string().default("bundled"),
-  source_ref: z.string().default(""),
-  requested_capabilities: z.array(z.string()).default([]),
-  host_api: z.string().default(""),
-  required_daemon_features: z.array(z.string()).default([]),
-  signature_key_id: z.string().default(""),
-  signature_verified: z.boolean().default(false),
-  manifest_digest: z.string().default(""),
-  archive_digest: z.string().default(""),
-  artifact_digest: z.string().default(""),
-  compatible: z.boolean().default(false),
-  compatibility_reason: z.string().optional(),
-  contributions: z.array(PluginCatalogContributionSchema).default([]),
-  installation: PluginInstallationSchema.optional(),
+export const PluginPreviewSchema = z.object({
+  manifest: PluginManifestSummarySchema,
+  scopes: z.array(z.string()).default([]),
+  config_schema: z.array(PluginConfigFieldSchema).default([]),
+  installed: z.boolean().default(false),
+  installed_version: z.string().optional(),
+  added_scopes: z.array(z.string()).default([]),
 }).loose();
 
-export const PluginCatalogResponseSchema = z.object({
-  releases: z.array(PluginCatalogReleaseSchema).default([]),
-  diagnostics: z.array(z.object({
-    source_ref: z.string().default(""),
-    code: z.string().default("unknown"),
-    message: z.string().default(""),
-  }).loose()).default([]),
-  supported: z.boolean().optional().default(true),
-}).loose();
-
-export const EMPTY_PLUGIN_CATALOG: PluginCatalogResponse = {
-  releases: [],
-  diagnostics: [],
-  supported: false,
+export const EMPTY_PLUGIN_PREVIEW: PluginPreview = {
+  manifest: { key: "", name: "", version: "", author: { name: "" } },
+  scopes: [],
+  config_schema: [],
+  installed: false,
+  added_scopes: [],
 };
 
 export const GitHubInstallationSchema = z.object({
@@ -400,11 +337,59 @@ export const EMPTY_LIST_LABELS_RESPONSE: ListLabelsResponse = {
   total: 0,
 };
 
-export const ResourceLabelsResponseSchema = z
-  .object({
-    labels: z.array(LabelSchema).default([]),
-  })
-  .loose();
+// Issue status catalog (MUL-6243). `category` is parsed as a plain string
+// rather than an enum: a newer server could in principle report a category this
+// build does not know, and failing the whole catalog parse would leave the UI
+// with no statuses at all. Consumers fall back to rendering by `color`/`name`
+// when they do not recognize a category.
+export const IssueStatusEntrySchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  key: z.string(),
+  name: z.string(),
+  description: z.string().optional().default(""),
+  category: z.string(),
+  color: z.string().optional().default("#6b7280"),
+  is_system: z.boolean().optional().default(false),
+  position: z.number().optional().default(0),
+  archived_at: z.string().nullable().optional().default(null),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+export const EMPTY_ISSUE_STATUS_ENTRY: IssueStatusEntry = {
+  id: "",
+  workspace_id: "",
+  key: "",
+  name: "",
+  description: "",
+  category: "backlog",
+  color: "#6b7280",
+  is_system: false,
+  position: 0,
+  archived_at: null,
+  created_at: "",
+  updated_at: "",
+};
+
+export const ListIssueStatusesResponseSchema = z.object({
+  statuses: z.array(IssueStatusEntrySchema).default([]),
+  categories: z.array(z.string()).default([]),
+  total: z.number().default(0),
+}).loose();
+
+// The fallback carries the 7 built-ins' keys as categories, so a client talking
+// to a server that predates this endpoint still has the canonical list.
+export const EMPTY_LIST_ISSUE_STATUSES_RESPONSE: ListIssueStatusesResponse = {
+  statuses: [],
+  categories: ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"],
+  total: 0,
+};
+
+export const ResourceLabelsResponseSchema = z.object({
+  labels: z.array(LabelSchema).default([]),
+  issue_revision: z.number().int().positive().optional(),
+}).loose();
 
 export const EMPTY_RESOURCE_LABELS_RESPONSE: ResourceLabelsResponse = {
   labels: [],
@@ -607,11 +592,10 @@ export const IssuePropertyValuesSchema = z.preprocess(
     .default({}),
 );
 
-export const IssuePropertiesResponseSchema = z
-  .object({
-    properties: IssuePropertyValuesSchema,
-  })
-  .loose();
+export const IssuePropertiesResponseSchema = z.object({
+  properties: IssuePropertyValuesSchema,
+  issue_revision: z.number().int().positive().optional(),
+}).loose();
 
 export const EMPTY_ISSUE_PROPERTIES_RESPONSE: IssuePropertiesResponse = {
   properties: {},
@@ -637,6 +621,14 @@ export interface AppConfigResponse {
    * Settings → Integrations "Git providers" section. */
   vcs_integration_available?: boolean;
   feature_flags?: Record<string, boolean>;
+  /** Whether this server understands local_directory `execution_mode` and
+   * gates worktree mode at save time. Absent on every server that predates this
+   * capability signal, which includes the ones that silently DROPPED an unknown
+   * `execution_mode` and answered 201 — the resource then ran in place while
+   * the user was promised isolation (#7113). Servers between that fix and this
+   * signal do validate but cannot say so, and are treated as unable: the client
+   * has no way to tell them apart, and only one of the two answers is safe. */
+  local_worktree_supported?: boolean;
   server_version?: string;
 }
 
@@ -777,25 +769,24 @@ export const EMPTY_ATTACHMENT: Attachment = {
 // wasn't updated in lock-step. `.loose()` removes that synchronisation
 // hazard — the schema validates the shape it knows about and leaves the
 // rest alone.
-const TimelineEntrySchema = z
-  .object({
-    type: z.string(),
-    id: z.string(),
-    actor_type: z.string(),
-    actor_id: z.string(),
-    created_at: z.string(),
-    action: z.string().optional(),
-    details: z.record(z.string(), z.unknown()).optional(),
-    content: z.string().optional(),
-    parent_id: z.string().nullable().optional(),
-    updated_at: z.string().optional(),
-    comment_type: z.string().optional(),
-    reactions: z.array(ReactionSchema).optional(),
-    attachments: z.array(AttachmentSchema).optional(),
-    source_task_id: z.string().nullable().optional(),
-    coalesced_count: z.number().optional(),
-  })
-  .loose();
+const TimelineEntrySchema = z.object({
+  type: z.string(),
+  id: z.string(),
+  actor_type: z.string(),
+  actor_id: z.string(),
+  created_at: z.string(),
+  action: z.string().optional(),
+  details: z.record(z.string(), z.unknown()).optional(),
+  content: z.string().optional(),
+  parent_id: z.string().nullable().optional(),
+  updated_at: z.string().optional(),
+  revision: z.number().int().positive().optional(),
+  comment_type: z.string().optional(),
+  reactions: z.array(ReactionSchema).optional(),
+  attachments: z.array(AttachmentSchema).optional(),
+  source_task_id: z.string().nullable().optional(),
+  coalesced_count: z.number().optional(),
+}).loose();
 
 // /timeline returns a flat array of TimelineEntry, oldest first. The
 // previously cursor-paginated wrapper was removed (#1929) — at observed data
@@ -836,6 +827,7 @@ export const AppConfigSchema = z.object({
   workspace_creation_disabled: BooleanWithDefaultSchema(false).optional(),
   vcs_integration_available: BooleanWithDefaultSchema(false).optional(),
   feature_flags: FeatureFlagsSchema,
+  local_worktree_supported: BooleanWithDefaultSchema(false),
   server_version: OptionalStringSchema,
 }).loose();
 
@@ -848,6 +840,9 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   daemon_app_url: "",
   workspace_creation_disabled: false,
   vcs_integration_available: false,
+  // Fail closed: an unreadable config must not look like a server that
+  // validates execution_mode.
+  local_worktree_supported: false,
   feature_flags: {},
 };
 
@@ -878,22 +873,23 @@ export const EMPTY_CREATE_FEEDBACK_RESPONSE: CreateFeedbackResponse = {
   created_at: "",
 };
 
-export const CommentSchema = z
-  .object({
-    id: z.string(),
-    issue_id: z.string(),
-    author_type: z.string(),
-    author_id: z.string(),
-    content: z.string(),
-    type: z.string(),
-    parent_id: z.string().nullable(),
-    reactions: z.array(ReactionSchema).default([]),
-    attachments: z.array(AttachmentSchema).default([]),
-    created_at: z.string(),
-    updated_at: z.string(),
-    source_task_id: z.string().nullable().optional(),
-  })
-  .loose();
+export const CommentSchema = z.object({
+  id: z.string(),
+  issue_id: z.string(),
+  author_type: z.string(),
+  author_id: z.string(),
+  content: z.string(),
+  type: z.string(),
+  parent_id: z.string().nullable(),
+  reactions: z.array(ReactionSchema).default([]),
+  attachments: z.array(AttachmentSchema).default([]),
+  created_at: z.string(),
+  updated_at: z.string(),
+  revision: z.number().int().positive().optional(),
+  source_task_id: z.string().nullable().optional(),
+  // Set only on comments a quick action produced (MUL-5465). Server-only.
+  quick_action_id: z.string().nullable().optional(),
+}).loose();
 
 export const CommentsListSchema = z.array(CommentSchema);
 export const EMPTY_COMMENT: Comment = {
@@ -977,38 +973,46 @@ const IssueMetadataSchema = z
   .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
   .default({});
 
-export const IssueSchema = z
-  .object({
-    id: z.string(),
-    workspace_id: z.string(),
-    number: z.number(),
-    identifier: z.string(),
-    title: z.string(),
-    description: z.string().nullable(),
-    status: z.string(),
-    priority: z.string(),
-    assignee_type: z.string().nullable(),
-    assignee_id: z.string().nullable(),
-    creator_type: z.string(),
-    creator_id: z.string(),
-    parent_issue_id: z.string().nullable(),
-    project_id: z.string().nullable(),
-    position: z.number(),
-    // Older backends predate `stage`; default to null so a missing field parses
-    // cleanly into the non-optional Issue.stage (number | null).
-    stage: z.number().nullable().default(null),
-    start_date: z.string().nullable(),
-    due_date: z.string().nullable(),
-    metadata: IssueMetadataSchema,
-    // Older backends predate custom properties; default {} so consumers never
-    // nil-guard issue.properties.
-    properties: IssuePropertyValuesSchema,
-    reactions: z.array(z.unknown()).optional(),
-    labels: z.array(z.unknown()).optional(),
-    created_at: z.string(),
-    updated_at: z.string(),
-  })
-  .loose();
+export const IssueSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  number: z.number(),
+  identifier: z.string(),
+  title: z.string(),
+  description: z.string().nullable(),
+  status: z.string(),
+  // The canonical status whose platform behavior `status` carries — equal to
+  // `status` for the 7 built-ins, and the inherited category for a custom
+  // status. Optional because only endpoints that resolve it emit it, so
+  // consumers must fall back to `status` rather than treat "" as a category.
+  // (MUL-6243)
+  status_category: z.string().optional(),
+  priority: z.string(),
+  assignee_type: z.string().nullable(),
+  assignee_id: z.string().nullable(),
+  creator_type: z.string(),
+  creator_id: z.string(),
+  parent_issue_id: z.string().nullable(),
+  project_id: z.string().nullable(),
+  position: z.number(),
+  // Older backends predate `stage`; default to null so a missing field parses
+  // cleanly into the non-optional Issue.stage (number | null).
+  stage: z.number().nullable().default(null),
+  start_date: z.string().nullable(),
+  due_date: z.string().nullable(),
+  metadata: IssueMetadataSchema,
+  // Older backends predate custom properties; default {} so consumers never
+  // nil-guard issue.properties.
+  properties: IssuePropertyValuesSchema,
+  reactions: z.array(z.unknown()).optional(),
+  labels: z.array(z.unknown()).optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  revision: z.number().int().positive().optional(),
+  // Optional for compatibility with older self-hosted backends; a current
+  // backend emits null until its historical backfill reaches the issue.
+  last_activity_at: z.string().nullable().optional(),
+}).loose();
 
 export const ListIssuesResponseSchema = z
   .object({
@@ -1897,38 +1901,38 @@ export interface DuplicateIssueErrorBody {
 // the rule used by every other endpoint here.
 // ---------------------------------------------------------------------------
 
-const WebhookDeliverySchema = z
-  .object({
-    id: z.string(),
-    workspace_id: z.string(),
-    autopilot_id: z.string(),
-    trigger_id: z.string(),
-    provider: z.string(),
-    event: z.string(),
-    dedupe_key: z.string().nullable(),
-    dedupe_source: z.string().nullable(),
-    signature_status: z.string(),
-    status: z.string(),
-    attempt_count: z.number().default(0),
-    // Older servers predate the durable dispatch queue. Defaults preserve
-    // compatibility while the UI rolls out alongside the new worker.
-    dispatch_attempts: z.number().default(0),
-    available_at: z.string().default(""),
-    content_type: z.string().nullable(),
-    response_status: z.number().nullable(),
-    autopilot_run_id: z.string().nullable(),
-    replayed_from_delivery_id: z.string().nullable(),
-    error: z.string().nullable(),
-    received_at: z.string(),
-    last_attempt_at: z.string(),
-    created_at: z.string(),
-    // Detail-only fields. The list endpoint omits them; the detail endpoint
-    // populates raw_body / selected_headers / response_body.
-    selected_headers: z.record(z.string(), z.unknown()).nullable().optional(),
-    raw_body: z.string().nullable().optional(),
-    response_body: z.string().nullable().optional(),
-  })
-  .loose();
+const WebhookDeliverySchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  autopilot_id: z.string(),
+  trigger_id: z.string(),
+  provider: z.string(),
+  event: z.string(),
+  dedupe_key: z.string().nullable(),
+  dedupe_source: z.string().nullable(),
+  signature_status: z.string(),
+  status: z.string(),
+  attempt_count: z.number().default(0),
+  // Older servers predate the durable dispatch queue. Defaults preserve
+  // compatibility while the UI rolls out alongside the new worker.
+  dispatch_attempts: z.number().default(0),
+  available_at: z.string().default(""),
+  content_type: z.string().nullable(),
+  response_status: z.number().nullable(),
+  autopilot_run_id: z.string().nullable(),
+  replayed_from_delivery_id: z.string().nullable(),
+  error: z.string().nullable(),
+  reason_code: z.string().nullable().default(null),
+  replay_idempotency_key: z.string().nullable().default(null),
+  received_at: z.string(),
+  last_attempt_at: z.string(),
+  created_at: z.string(),
+  // Detail-only fields. The list endpoint omits them; the detail endpoint
+  // populates raw_body / selected_headers / response_body.
+  selected_headers: z.record(z.string(), z.unknown()).nullable().optional(),
+  raw_body: z.string().nullable().optional(),
+  response_body: z.string().nullable().optional(),
+}).loose();
 
 export const ListWebhookDeliveriesResponseSchema = z
   .object({
@@ -2019,6 +2023,17 @@ export const AutopilotRunSchema = z
   })
   .loose();
 
+export const AutopilotQuotaUsageSchema = z.object({
+  action: z.enum(["off", "observe", "enforce"]).default("off"),
+  used: z.number().nullable().default(null),
+  reserved: z.number().nullable().default(null),
+  limit: z.number().nullable().default(null),
+  period_start: z.string().nullable().default(null),
+  period_end: z.string().nullable().default(null),
+  reset_at: z.string().nullable().default(null),
+  blocked_counts: z.record(z.string(), z.number().int().nonnegative()).nullable().catch(null).default(null),
+}).loose();
+
 export const FALLBACK_AUTOPILOT_RUN: AutopilotRun = {
   id: "",
   autopilot_id: "",
@@ -2068,6 +2083,8 @@ export const EMPTY_WEBHOOK_DELIVERY: WebhookDelivery = {
   autopilot_run_id: null,
   replayed_from_delivery_id: null,
   error: null,
+  reason_code: null,
+  replay_idempotency_key: null,
   received_at: "",
   last_attempt_at: "",
   created_at: "",
@@ -2927,6 +2944,7 @@ export const DingTalkInstallationSchema = z.object({
   installed_at: z.string().default(""),
   created_at: z.string().default(""),
   updated_at: z.string().default(""),
+  bound_dingtalk_user_ids: z.array(z.string()).catch([]).default([]),
 }).loose();
 
 export const EMPTY_DINGTALK_INSTALLATION: DingTalkInstallation = {
@@ -2938,6 +2956,7 @@ export const EMPTY_DINGTALK_INSTALLATION: DingTalkInstallation = {
   installed_at: "",
   created_at: "",
   updated_at: "",
+  bound_dingtalk_user_ids: [],
 };
 
 export const ListDingTalkInstallationsResponseSchema = z.object({
@@ -3112,4 +3131,85 @@ export const EMPTY_WORKSPACE_MCP_SERVER: WorkspaceMcpServer = {
   transport: "unknown",
   created_at: "",
   updated_at: "",
+};
+
+// Share links. Introduced with the workspace share-link invite flow; schemas
+// mirror the API responses so malformed payloads fall back to safe defaults.
+export const ShareLinkSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  code: z.string(),
+  created_by: z.string(),
+  role: z.string(),
+  expires_at: z.string().nullable().optional().default(null),
+  max_uses: z.number().nullable().optional().default(null),
+  use_count: z.number().optional().default(0),
+  is_active: z.boolean().optional().default(true),
+  created_at: z.string().optional().default(""),
+  creator_name: z.string().optional().default(""),
+  creator_email: z.string().optional().default(""),
+}).loose();
+
+export const EMPTY_SHARE_LINK: ShareLink = {
+  id: "",
+  workspace_id: "",
+  code: "",
+  created_by: "",
+  role: "member",
+  expires_at: null,
+  max_uses: null,
+  use_count: 0,
+  is_active: false,
+  created_at: "",
+};
+
+export const ShareLinkListResponseSchema = z.array(ShareLinkSchema).default([]);
+
+export const ShareLinkInfoSchema = z.object({
+  workspace_name: z.string().optional().default(""),
+  workspace_slug: z.string().optional().default(""),
+  creator_name: z.string().optional().default(""),
+  role: z.string().optional().default("member"),
+}).loose();
+
+export const EMPTY_SHARE_LINK_INFO: ShareLinkInfo = {
+  workspace_name: "",
+  workspace_slug: "",
+  role: "member",
+};
+
+export const MemberWithUserSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  user_id: z.string(),
+  role: z.string(),
+  created_at: z.string().optional().default(""),
+  name: z.string().optional().default(""),
+  email: z.string().optional().default(""),
+  avatar_url: z.string().nullable().optional().default(null),
+}).loose();
+
+export const JoinShareLinkResponseSchema = z.object({
+  member: MemberWithUserSchema,
+  workspace_id: z.string(),
+  workspace_slug: z.string().optional().default(""),
+}).loose();
+
+export const EMPTY_JOIN_SHARE_LINK_RESPONSE: {
+  member: MemberWithUser;
+  workspace_id: string;
+  workspace_slug: string;
+} = {
+  member: {
+    id: "",
+    workspace_id: "",
+    user_id: "",
+    role: "member",
+    created_at: "",
+    name: "",
+    email: "",
+    avatar_url: null,
+  },
+  workspace_id: "",
+  workspace_slug: "",
 };

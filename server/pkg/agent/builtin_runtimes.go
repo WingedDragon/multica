@@ -63,10 +63,11 @@ type BuiltinRuntime struct {
 	ModelDiscovery ModelDiscoveryFunc
 }
 
-// ModelDiscoveryFunc discovers available models for a runtime identity. It
-// receives the context and resolved executable path; ListModels propagates an
-// error so callers can retain their manual model-selector fallback.
-type ModelDiscoveryFunc func(ctx context.Context, executablePath string) ([]Model, error)
+// ModelDiscoveryFunc discovers available models for a runtime identity.
+// It receives the context and the resolved command — executable plus the
+// runtime's launch prefix — and returns a model catalog. Errors propagate so
+// callers can retain their manual model-selector fallback.
+type ModelDiscoveryFunc func(ctx context.Context, runtimeCmd Command) ([]Model, error)
 
 // BuiltinRuntimes is the registry of automatically detected runtime
 // identities. Each entry is probed independently so a host with both Pi and
@@ -154,6 +155,7 @@ func NewRuntime(runtimeID string, cfg Config) (Backend, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown runtime identity: %q", runtimeID)
 	}
+	cfg.provider = runtimeID
 	backend, err := New(desc.ProtocolFamily, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("runtime %q (family %q): %w", runtimeID, desc.ProtocolFamily, err)

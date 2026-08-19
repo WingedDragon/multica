@@ -237,18 +237,22 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	}
 
 	timeout := opts.Timeout
+	runCtx, cancel := runContext(ctx, timeout)
 	sessionID := opts.ResumeSessionID
 	var args []string
-	var argv0 string
-	var cmdArgs []string
 
+	// OMP runs its native invocation (`omp -p --mode json --session-dir <dir>
+	// [--resume <id>] [flags] <prompt>`) through the shared launch boundary so
+	// a custom profile's launch prefix applies; Pi keeps its --session <path>
+	// protocol and platform invocation chooser.
+	var cmd *exec.Cmd
 	if mode == piRuntimeModeOMPCompatible {
 		sessionDir, err := ompSessionDir()
 		if err != nil {
 			return nil, fmt.Errorf("omp session directory: %w", err)
 		}
 		args = buildOMPArgs(prompt, sessionDir, opts, b.cfg.Logger)
-		argv0, cmdArgs = execName, args
+		cmd = b.cfg.commandAt(execName).exec(runCtx, args...)
 	} else {
 		// Pi's --session flag expects a file path where events are appended.
 		// The path doubles as our opaque session identifier: we return it as
@@ -266,14 +270,10 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		}
 		sessionID = sessionPath
 		args = buildPiArgs(sessionPath, opts, b.cfg.Logger)
-		argv0, cmdArgs = choosePiInvocation(execName, lookedUp, args, b.cfg.Logger)
+		cmd, _, _ = b.cfg.commandAt(execName).execVia(runCtx, choosePiInvocation, lookedUp, args, b.cfg.Logger)
 	}
-
-	runCtx, cancel := runContext(ctx, timeout)
-
-	cmd := exec.CommandContext(runCtx, argv0, cmdArgs...)
 	hideAgentWindow(cmd)
-	b.cfg.Logger.Info("agent command", "exec", argv0, "args", cmdArgs)
+	b.cfg.logAgentCommand(cmd, newAgentCommandLogArgs(args))
 	cmd.WaitDelay = 10 * time.Second
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
@@ -339,6 +339,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		var output strings.Builder
 		finalStatus := "completed"
 		var finalError string
+		var lastTurnError string
 		usage := make(map[string]TokenUsage)
 
 		// Pi message_update events can be large (they embed the full message
@@ -369,6 +370,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			case "turn_start":
 				output.Reset()
 				textBuffer.Reset()
+				lastTurnError = ""
 
 			case "message_update":
 				if evt.AssistantMessageEvent == nil {
@@ -406,7 +408,11 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 				})
 
 			case "turn_end":
-				if msg := decodePiMessage(evt.Message); msg != nil && msg.Usage != nil {
+				msg := decodePiMessage(evt.Message)
+				if msg == nil {
+					continue
+				}
+				if msg.Usage != nil {
 					model := msg.Model
 					if model == "" {
 						model = opts.Model
@@ -420,6 +426,16 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 					u.CacheReadTokens += msg.Usage.CacheRead
 					u.CacheWriteTokens += msg.Usage.CacheWrite
 					usage[model] = u
+				}
+				// A turn Pi ends on an error is only terminal when nothing
+				// follows it. Pi emits the same stopReason before an automatic
+				// retry, and turn_start clears this, so a later successful turn
+				// leaves nothing behind.
+				if msg.StopReason == "error" {
+					lastTurnError = msg.ErrorMessage
+					if lastTurnError == "" {
+						lastTurnError = backendName + " ended the turn with an error"
+					}
 				}
 
 			case "error":
@@ -465,6 +481,12 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		} else if writeErr != nil && finalStatus == "completed" {
 			finalStatus = "failed"
 			finalError = fmt.Sprintf("%s prompt write failed: %v", backendName, writeErr)
+		} else if lastTurnError != "" && finalStatus == "completed" {
+			// Pi exits 0 after a turn it could not complete and did not retry,
+			// and emits neither an `error` event nor `auto_retry_end`. Without
+			// this the run reports success with no output.
+			finalStatus = "failed"
+			finalError = lastTurnError
 		}
 		resumeRejected := mode == piRuntimeModeOMPCompatible && ompResumeWasRejected(opts.ResumeSessionID, finalStatus == "failed", finalError)
 
@@ -543,6 +565,12 @@ type piMessage struct {
 	Role  string   `json:"role,omitempty"`
 	Model string   `json:"model,omitempty"`
 	Usage *piUsage `json:"usage,omitempty"`
+
+	// turn_end carries the terminal state of the turn. Pi sets StopReason to
+	// "error" for a provider call it could not complete, whether or not it
+	// goes on to retry, and puts the provider's message in ErrorMessage.
+	StopReason   string `json:"stopReason,omitempty"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
 }
 
 type piUsage struct {

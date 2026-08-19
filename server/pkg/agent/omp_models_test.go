@@ -142,7 +142,7 @@ func TestDiscoverOMPModels_ReturnsCommandErrors(t *testing.T) {
 	fake := filepath.Join(t.TempDir(), "omp")
 	writeTestExecutable(t, fake, []byte("#!/bin/sh\necho 'catalog unavailable' >&2\nexit 3\n"))
 
-	_, err := discoverOMPModels(context.Background(), fake)
+	_, err := discoverOMPModels(context.Background(), Command{Path: fake})
 	if err == nil {
 		t.Fatal("discoverOMPModels succeeded, want command error")
 	}
@@ -165,7 +165,7 @@ func TestDiscoverOMPModels_DisablesExtensions(t *testing.T) {
 	writeTestExecutable(t, fake, []byte(script))
 	t.Setenv("OMP_ARGV_FILE", argvPath)
 
-	models, err := discoverOMPModels(context.Background(), fake)
+	models, err := discoverOMPModels(context.Background(), Command{Path: fake})
 	if err != nil {
 		t.Fatalf("discoverOMPModels: %v", err)
 	}
@@ -194,8 +194,8 @@ func TestListModels_OMPIsolatedByExecutablePath(t *testing.T) {
 
 	resetCache := func() {
 		modelCacheMu.Lock()
-		delete(modelCache, discoveryCacheKey("omp", first))
-		delete(modelCache, discoveryCacheKey("omp", second))
+		delete(modelCache, discoveryCacheKey("omp", Command{Path: first}))
+		delete(modelCache, discoveryCacheKey("omp", Command{Path: second}))
 		delete(modelCache, "pi")
 		modelCacheMu.Unlock()
 	}
@@ -208,11 +208,11 @@ func TestListModels_OMPIsolatedByExecutablePath(t *testing.T) {
 	modelCacheMu.Unlock()
 	t.Cleanup(resetCache)
 
-	firstModels, err := ListModels(context.Background(), "omp", first)
+	firstModels, err := ListModels(context.Background(), "omp", Command{Path: first})
 	if err != nil {
 		t.Fatalf("ListModels first: %v", err)
 	}
-	secondModels, err := ListModels(context.Background(), "omp", second)
+	secondModels, err := ListModels(context.Background(), "omp", Command{Path: second})
 	if err != nil {
 		t.Fatalf("ListModels second: %v", err)
 	}

@@ -265,6 +265,36 @@ const VirtuosoList = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElem
   },
 );
 const LIST_COMPONENTS: Components<TraceRow> = { List: VirtuosoList };
+const COPY_FEEDBACK_DURATION_MS = 2000;
+
+function useCopyFeedback() {
+  const [copied, setCopied] = useState(false);
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (resetTimerRef.current !== null) {
+        clearTimeout(resetTimerRef.current);
+        resetTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const showCopied = useCallback(() => {
+    if (!mountedRef.current) return;
+    setCopied(true);
+    if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = setTimeout(() => {
+      resetTimerRef.current = null;
+      if (mountedRef.current) setCopied(false);
+    }, COPY_FEEDBACK_DURATION_MS);
+  }, []);
+
+  return [copied, showCopied] as const;
+}
 
 export function AgentTranscriptDialog({
   open,
@@ -280,9 +310,9 @@ export function AgentTranscriptDialog({
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
   const [query, setQuery] = useState("");
   const [elapsed, setElapsed] = useState("");
-  const [copied, setCopied] = useState(false);
-  const [copiedWorkdir, setCopiedWorkdir] = useState(false);
-  const [copiedBranch, setCopiedBranch] = useState(false);
+  const [copied, showCopied] = useCopyFeedback();
+  const [copiedWorkdir, showCopiedWorkdir] = useCopyFeedback();
+  const [copiedBranch, showCopiedBranch] = useCopyFeedback();
   const [agentInfo, setAgentInfo] = useState<Agent | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<AgentRuntime | null>(null);
   const sortDirection = useTranscriptViewStore((s) => s.sortDirection);
@@ -388,20 +418,25 @@ export function AgentTranscriptDialog({
   // why the pairing is positional.
   const steps = useMemo(() => buildSteps(items), [items]);
 
+  // A facet reads as what its rows look like: the glyph the rows carry, and the
+  // name the rows print. The first step of a kind stands in for the glyph. The
+  // `tool:` prefix stays in the key (it is what gets persisted) but never
+  // reaches the menu — the rows say `Bash`, so the facet says `Bash` too.
   const filterOptions = useMemo(() => {
-    const options = new Map<string, string>();
+    const options = new Map<string, { label: string; step: TraceStep }>();
     for (const step of steps) {
       const key = stepFilterKey(step);
       if (options.has(key)) continue;
-      options.set(
-        key,
-        step.kind === "call"
-          ? key
-          : traceEventLabel({ type: step.item.type, tool: step.item.tool }),
-      );
+      options.set(key, {
+        label:
+          step.kind === "call"
+            ? step.tool || t(($) => $.transcript.kind_tool)
+            : traceEventLabel({ type: step.item.type, tool: step.item.tool }),
+        step,
+      });
     }
-    return Array.from(options.entries()).sort((a, b) => a[1].localeCompare(b[1]));
-  }, [steps]);
+    return Array.from(options.entries()).sort((a, b) => a[1].label.localeCompare(b[1].label));
+  }, [steps, t]);
 
   const filterOptionKeys = useMemo(
     () => new Set(filterOptions.map(([value]) => value)),
@@ -581,10 +616,9 @@ export function AgentTranscriptDialog({
     if (!task.relative_work_dir) return;
     void copyText(task.relative_work_dir).then((ok) => {
       if (!ok) return;
-      setCopiedWorkdir(true);
-      setTimeout(() => setCopiedWorkdir(false), 2000);
+      showCopiedWorkdir();
     });
-  }, [task.relative_work_dir]);
+  }, [task.relative_work_dir, showCopiedWorkdir]);
 
   // Worktree-mode runs deliver a branch instead of edits in the working copy,
   // so copying the name is the fastest path to `git diff <branch>`.
@@ -592,10 +626,9 @@ export function AgentTranscriptDialog({
     if (!task.branch_name) return;
     void copyText(task.branch_name).then((ok) => {
       if (!ok) return;
-      setCopiedBranch(true);
-      setTimeout(() => setCopiedBranch(false), 2000);
+      showCopiedBranch();
     });
-  }, [task.branch_name]);
+  }, [task.branch_name, showCopiedBranch]);
 
   const handleCopyAll = useCallback(() => {
     // Copy the full body of each event (not the truncated row summary), with
@@ -620,10 +653,9 @@ export function AgentTranscriptDialog({
     const text = events.map((event) => redactSecrets(traceEventCopyText(event))).join("\n\n");
     void copyText(text).then((ok) => {
       if (!ok) return;
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      showCopied();
     });
-  }, [displayRows]);
+  }, [displayRows, showCopied]);
 
   const handleToggleGroup = useCallback((seq: number) => {
     setExpandedGroups((prev) => {
@@ -1009,13 +1041,19 @@ export function AgentTranscriptDialog({
                 )}
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-auto">
-                {filterOptions.map(([value, label]) => (
+                {filterOptions.map(([value, option]) => (
                   <DropdownMenuCheckboxItem
                     key={value}
                     checked={selectedFilterKeys.includes(value)}
                     onCheckedChange={() => toggleFilterKey(value)}
                   >
-                    {label}
+                    <span className="flex items-center gap-1.5">
+                      <StepIcon
+                        step={option.step}
+                        className="h-3 w-3 shrink-0 text-muted-foreground"
+                      />
+                      {option.label}
+                    </span>
                   </DropdownMenuCheckboxItem>
                 ))}
                 {selectedFilterKeys.length > 0 && (
@@ -1120,8 +1158,6 @@ export function AgentTranscriptDialog({
                 itemContent={(_, row) => (
                   <TranscriptRow
                     row={row}
-                    agentName={agentName || agentInfo?.name || ""}
-                    agentId={task.agent_id}
                     runStartMs={runStartMs}
                     isLive={isLive}
                     selectedSeq={selectedSeq}
@@ -1234,8 +1270,6 @@ function RunOutcomeRow({
 
 interface TranscriptRowProps {
   row: TraceRow;
-  agentName: string;
-  agentId?: string;
   runStartMs?: number;
   isLive: boolean;
   selectedSeq: number | null;
@@ -1289,30 +1323,26 @@ function DurationCell({ ms, pending }: { ms?: number; pending?: boolean }) {
  * This is the layer inversion the redesign turns on: the report used to look
  * exactly like a `Read`, so the one thing worth reading was the hardest thing
  * to find. Prose is content and stays open; tool calls are evidence and fold.
+ *
+ * Identity is deliberately absent here. A transcript is one run by one agent —
+ * `TraceMessageStep` carries no per-step actor, so an avatar and name on the
+ * row would be the same two values repeated for every step, and the header
+ * already states them. Repeating them cost a semibold 12px line above 12px
+ * body text, which on a run of short steps made the row's heaviest element its
+ * least informative one.
+ *
+ * What the row does keep is its kind: the same `StepIcon` column every other
+ * row carries, so "Agent" in the filter has something to point at. Kind, not
+ * identity — the glyph says "the agent's own words", which is what the facet
+ * selects, and it says it in 12px without a repeated string.
  */
-function ProseRow({
-  row,
-  agentName,
-  agentId,
-  runStartMs,
-}: TranscriptRowProps & { row: TraceMessageStep }) {
+function ProseRow({ row, runStartMs }: TranscriptRowProps & { row: TraceMessageStep }) {
   return (
     <div className="group flex items-start gap-2 px-4 py-2.5">
       <OffsetCell startedAt={row.startedAt} runStartMs={runStartMs} />
       <span aria-hidden className="mt-1 w-0.5 self-stretch rounded-full bg-success" />
-      <div className="mt-0.5 shrink-0">
-        {agentId ? (
-          <ActorAvatar actorType="agent" actorId={agentId} size="sm" />
-        ) : (
-          <div className="flex h-5 w-5 items-center justify-center rounded-full bg-info/10 text-info">
-            <Bot className="h-3 w-3" />
-          </div>
-        )}
-      </div>
+      <StepIcon step={row} className="mt-1 h-3 w-3 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1 pr-2">
-        {agentName && (
-          <div className="mb-0.5 text-caption font-semibold">{agentName}</div>
-        )}
         <RichContent
           content={row.item.content ?? ""}
           density="compact"
@@ -1515,7 +1545,7 @@ function StepInspector({
   onClose: () => void;
 }) {
   const { t } = useT("agents");
-  const [copied, setCopied] = useState(false);
+  const [copied, showCopied] = useCopyFeedback();
 
   const at = timeMs(step.startedAt);
   const offset = at !== undefined && runStartMs !== undefined ? formatOffset(at - runStartMs) : null;
@@ -1533,10 +1563,9 @@ function StepInspector({
     }
     void copyText(redactSecrets(parts.join("\n\n"))).then((ok) => {
       if (!ok) return;
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      showCopied();
     });
-  }, [call, message]);
+  }, [call, message, showCopied]);
 
   const title =
     call

@@ -2066,7 +2066,7 @@ func TestModelSelectorMustBeProviderQualifiedIsAnExecutionContract(t *testing.T)
 		{"opencode", true, "run --model resolves strictly through provider/model"},
 		{"deveco", true, "opencode fork with the same --model contract"},
 		{"pi", false, "pi's own resolver accepts bare and slash-shaped ids"},
-		{"omp", false, "pi-family fork, inherits pi's resolver"},
+		{"omp", false, "native OMP accepts complete selectors through its own runtime contract"},
 		{"claude", false, "bare model ids, no provider segment to miss"},
 		{"codex", false, "bare model ids"},
 		{"copilot", false, "bare model ids under a display-name provider"},
@@ -2085,20 +2085,20 @@ func TestModelSelectorMustBeProviderQualifiedIsAnExecutionContract(t *testing.T)
 	}
 }
 
-// omp is a built-in runtime identity rather than a protocol family, so the
-// predicate must resolve it through its descriptor. This is what keeps "add a
-// fork" a descriptor entry instead of a change here.
-func TestModelSelectorContractFollowsProtocolFamily(t *testing.T) {
+// OMP owns an independent protocol family. Keeping this assertion beside the
+// selector contract prevents stale Pi-compatible metadata from silently
+// routing native OMP model handling through Pi again.
+func TestOMPModelSelectorContractUsesNativeProtocolFamily(t *testing.T) {
 	t.Parallel()
 
 	desc, ok := BuiltinRuntimeByID("omp")
 	if !ok {
 		t.Fatal("omp is no longer a built-in runtime identity; this test needs a new subject")
 	}
-	if desc.ProtocolFamily != "pi" {
-		t.Fatalf("omp protocol family = %q, want pi", desc.ProtocolFamily)
+	if desc.ProtocolFamily != "omp" {
+		t.Fatalf("omp protocol family = %q, want omp", desc.ProtocolFamily)
 	}
-	if ModelSelectorMustBeProviderQualified("omp") != ModelSelectorMustBeProviderQualified(desc.ProtocolFamily) {
-		t.Error("omp does not inherit its selector contract from the pi protocol family")
+	if ModelSelectorMustBeProviderQualified("omp") {
+		t.Error("native OMP must not require daemon-side provider qualification")
 	}
 }

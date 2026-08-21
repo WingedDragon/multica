@@ -59,6 +59,7 @@ Multica는 **19개의 AI 코딩 도구**를 기본 지원합니다. 이들은 �
 | QwenPaw | `qwenpaw` | ✓ | ✓ | 실행별 워크스페이스 `skills/` |
 | Reasonix | `reasonix` | ✓ | ✓ | `.reasonix/skills/` |
 | Trae CLI | `traecli` | ✓ | ✓ | `.traecli/skills/` |
+| Dim | `dim` | ✓ | ✓ | — |
 
 Google에서 제공합니다. CLI 바이너리 이름은 `agy`입니다. Google의 Antigravity 서비스와 연동되며 Gemini 기반의 기본 모델을 함께 제공합니다. **세션 재개가 동작합니다** — `--conversation <id>`를 통해서이며, stdout이 구조화된 이벤트 스트림이 아니라 일반 텍스트이기 때문에 데몬이 CLI의 로그 파일에서 conversation UUID를 캡처합니다. **모델 선택이 동작합니다** — `--model` flag(agy 1.0.6에서 추가)를 통해서이며, 데몬이 `agy models`로 카탈로그를 열거하고 선택된 값을 그대로 전달합니다. 이 값들은 `provider/model` slug가 아니라 `Claude Opus 4.6 (Thinking)` 같은 사람이 읽는 표시 이름이라는 점에 유의하세요. 또한 agy는 인식할 수 없는 값을 받으면 조용히 빈 실행을 하므로, 직접 입력하기보다 발견된 목록에서 선택하는 것을 권장합니다. 스킬은 `.agents/skills/`에 들어갑니다(CLI가 Gemini CLI의 워크스페이스 스킬 레이아웃을 그대로 따릅니다 — [Antigravity 마이그레이션 문서](https://antigravity.google/docs/gcli-migration) 참고).
 

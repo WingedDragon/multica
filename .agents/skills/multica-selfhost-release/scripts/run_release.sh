@@ -16,14 +16,9 @@ EXPECTED_HEAD=""
 EXPECTED_COMMIT=""
 EXPECTED_VERSION=""
 
-WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-1792}"
-WEB_BUILD_MEMORY_HIGH="${MULTICA_WEB_BUILD_MEMORY_HIGH:-4G}"
-WEB_BUILD_MEMORY_MAX="${MULTICA_WEB_BUILD_MEMORY_MAX:-4608M}"
-WEB_BUILD_SWAP_MAX="${MULTICA_WEB_BUILD_SWAP_MAX:-256M}"
-WEB_BUILD_HOST_RESERVE_MB="${MULTICA_WEB_BUILD_HOST_RESERVE_MB:-1536}"
-WEB_BUILD_MAX_SWAP_USED_MB="${MULTICA_WEB_BUILD_MAX_SWAP_USED_MB:-256}"
-BUILD_DIAGNOSTICS_DIR="${MULTICA_BUILD_DIAGNOSTICS_DIR:-/var/tmp/multica-selfhost-release}"
+WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-4096}"
 CLI_BIN="$REPO/server/bin/multica"
+WEB_ARTIFACT=""
 assert_release_head() {
   local actual
   actual="$(git rev-parse HEAD)"
@@ -44,6 +39,51 @@ build_cli() {
     cd "$REPO/server"
     go build -ldflags "-X main.version=$version -X main.commit=$commit -X main.date=$date" -o bin/multica ./cmd/multica
   )
+}
+
+build_web_artifact() {
+  echo "==> Build web artifact locally"
+  local artifact_dir
+  local build_status=0
+
+  if [ -n "$(git status --porcelain -- apps/web/next-env.d.ts)" ]; then
+    echo "apps/web/next-env.d.ts was dirty before the release build; refusing to overwrite user work." >&2
+    exit 2
+  fi
+
+  set +e
+  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB}" \
+    pnpm --filter @multica/web typecheck
+  build_status=$?
+  if [ "$build_status" -eq 0 ]; then
+    NODE_ENV=production \
+      NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${WEB_BUILD_MAX_OLD_SPACE_SIZE_MB}" \
+      MULTICA_WEB_TYPECHECK_ALREADY_PASSED=1 \
+      pnpm --filter @multica/web build
+    build_status=$?
+  fi
+  set -e
+  git restore apps/web/next-env.d.ts >/dev/null 2>&1 || true
+  if [ "$build_status" -ne 0 ]; then
+    return "$build_status"
+  fi
+
+  for file in BUILD_ID routes-manifest.json prerender-manifest.json; do
+    if [ ! -s "$REPO/apps/web/.next/$file" ]; then
+      echo "Missing web build artifact: apps/web/.next/$file" >&2
+      exit 3
+    fi
+  done
+
+  artifact_dir="$(mktemp -d)"
+  WEB_ARTIFACT="$artifact_dir/multica-web-$EXPECTED_COMMIT.tar.gz"
+  COPYFILE_DISABLE=1 tar -C "$REPO/apps/web" -czf "$WEB_ARTIFACT" .next
+}
+
+cleanup_web_artifact() {
+  if [ -n "$WEB_ARTIFACT" ]; then
+    rm -rf "$(dirname "$WEB_ARTIFACT")"
+  fi
 }
 
 install_local_cli() {
@@ -173,15 +213,40 @@ if [ "$SKIP_CLI_INSTALL" != "1" ]; then
 fi
 
 if [ "$SKIP_DEPLOY" != "1" ]; then
+  assert_release_head
+  build_web_artifact
+  trap cleanup_web_artifact EXIT
+fi
+
+if [ "$SKIP_DEPLOY" != "1" ]; then
   echo "==> Remote deploy: direct ssh $REMOTE_HOST:$REMOTE_DIR"
+  remote_artifact="/tmp/multica-web-$EXPECTED_COMMIT.tar.gz"
+  scp -o RequestTTY=no "$WEB_ARTIFACT" "$REMOTE_HOST:$remote_artifact"
   remote_script='
 set -euo pipefail
 backend_was_active=0
 frontend_was_active=0
+release_complete=0
+release_root=""
+web_previous="apps/web/.next.previous"
+bin_previous="server/bin.previous"
 
+artifacts_installed=0
+web_had_previous=0
 restore_release_services() {
   status=$?
   trap - EXIT
+  if [ "$release_complete" != "1" ] && [ "$artifacts_installed" = "1" ]; then
+    rm -rf apps/web/.next
+    if [ "$web_had_previous" = "1" ] && [ -d "$web_previous" ]; then
+      mv "$web_previous" apps/web/.next
+    fi
+    if [ -d "$bin_previous" ]; then
+      cp -p "$bin_previous/server" server/bin/server 2>/dev/null || true
+      cp -p "$bin_previous/multica" server/bin/multica 2>/dev/null || true
+      cp -p "$bin_previous/migrate" server/bin/migrate 2>/dev/null || true
+    fi
+  fi
   if [ "$backend_was_active" = "1" ]; then
     sudo systemctl start multica-backend >/dev/null 2>&1 || true
   fi
@@ -215,19 +280,76 @@ if [ "$(git rev-parse HEAD)" != "$EXPECTED_HEAD" ]; then
   exit 6
 fi
 
+export PATH="$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"
+pnpm install --frozen-lockfile
+
+release_root="$(mktemp -d "$REMOTE_DIR/.release-$EXPECTED_COMMIT.XXXXXX")"
+tar -xzf "$REMOTE_ARTIFACT" -C "$release_root"
+for file in BUILD_ID routes-manifest.json prerender-manifest.json; do
+  test -s "$release_root/.next/$file"
+done
+
+mkdir -p "$release_root/bin"
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+COMMIT="$(git rev-parse --short HEAD)"
+DATE="$(date -u "+%Y-%m-%dT%H:%M:%SZ")"
+(
+  cd server
+  go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "$release_root/bin/server" ./cmd/server
+  go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT -X main.date=$DATE" -o "$release_root/bin/multica" ./cmd/multica
+  go build -o "$release_root/bin/migrate" ./cmd/migrate
+)
+
 systemctl is-active --quiet multica-backend && backend_was_active=1
 systemctl is-active --quiet multica-frontend && frontend_was_active=1
-
 sudo systemctl stop multica-frontend multica-backend
-sudo swapoff -a
-sudo swapon -a
 
-./scripts/deploy.sh
+(
+  set -a
+  source ./.env
+  set +a
+  cd server
+  "$release_root/bin/migrate" up
+)
+
+rm -rf "$web_previous" "$bin_previous"
+mkdir -p "$bin_previous"
+for binary in server multica migrate; do
+  if [ -f "server/bin/$binary" ]; then
+    cp -p "server/bin/$binary" "$bin_previous/$binary"
+  fi
+done
+if [ -d apps/web/.next ]; then
+  web_had_previous=1
+  mv apps/web/.next "$web_previous"
+fi
+mv "$release_root/.next" apps/web/.next
+install -m 0755 "$release_root/bin/server" server/bin/server
+install -m 0755 "$release_root/bin/multica" server/bin/multica
+install -m 0755 "$release_root/bin/migrate" server/bin/migrate
+artifacts_installed=1
+sudo systemctl start multica-backend multica-frontend
+systemctl is-active --quiet multica-backend
+systemctl is-active --quiet multica-frontend
+curl --noproxy "*" --max-time 20 --fail --silent --show-error "$PUBLIC_URL/" >/dev/null
+auth_probe_body="$(mktemp)"
+auth_probe_status="$(curl --noproxy "*" --max-time 20 --silent --show-error \
+  -o "$auth_probe_body" -w "%{http_code}" -H "Content-Type: application/json" \
+  -X POST "$PUBLIC_URL/auth/send-code" --data "{}")"
+if [ "$auth_probe_status" != "400" ] || ! grep -Fq '"email is required"' "$auth_probe_body"; then
+  echo "Remote auth smoke failed: expected HTTP 400 email validation, got $auth_probe_status" >&2
+  cat "$auth_probe_body" >&2
+  rm -f "$auth_probe_body"
+  exit 4
+fi
+rm -f "$auth_probe_body"
+release_complete=1
+rm -rf "$web_previous" "$bin_previous"
 git status --short --branch
 git rev-parse HEAD
-systemctl is-active multica-backend multica-frontend
 '
-  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=$(printf '%q' "$WEB_BUILD_MAX_OLD_SPACE_SIZE_MB") MULTICA_WEB_BUILD_MEMORY_HIGH=$(printf '%q' "$WEB_BUILD_MEMORY_HIGH") MULTICA_WEB_BUILD_MEMORY_MAX=$(printf '%q' "$WEB_BUILD_MEMORY_MAX") MULTICA_WEB_BUILD_SWAP_MAX=$(printf '%q' "$WEB_BUILD_SWAP_MAX") MULTICA_WEB_BUILD_HOST_RESERVE_MB=$(printf '%q' "$WEB_BUILD_HOST_RESERVE_MB") MULTICA_WEB_BUILD_MAX_SWAP_USED_MB=$(printf '%q' "$WEB_BUILD_MAX_SWAP_USED_MB") MULTICA_BUILD_DIAGNOSTICS_DIR=$(printf '%q' "$BUILD_DIAGNOSTICS_DIR") bash -s" <<<"$remote_script"
+  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") EXPECTED_COMMIT=$(printf '%q' "$EXPECTED_COMMIT") REMOTE_ARTIFACT=$(printf '%q' "$remote_artifact") PUBLIC_URL=$(printf '%q' 'https://multica.zxyh.club') bash -s" <<<"$remote_script"
+  trap - EXIT
 fi
 
 if [ "$SKIP_PACKAGE" != "1" ]; then

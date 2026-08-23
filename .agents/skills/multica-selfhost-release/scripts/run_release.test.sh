@@ -21,6 +21,8 @@ echo "git $*" >>"$MULTICA_TEST_LOG"
 case "$*" in
   "rev-parse --abbrev-ref HEAD") echo "feature/selfhost-cli-update" ;;
   "status --porcelain") ;;
+  "status --porcelain -- apps/web/next-env.d.ts") ;;
+  "restore apps/web/next-env.d.ts") ;;
   "fetch upstream main --tags") ;;
   "ls-remote --exit-code --heads origin feature/selfhost-cli-update")
     if [ -n "${MULTICA_TEST_LS_REMOTE_EXIT:-}" ]; then
@@ -74,6 +76,22 @@ BIN
 chmod 0755 "$out"
 SH
 
+cat >"$FAKE_BIN/pnpm" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "pnpm $*" >>"$MULTICA_TEST_LOG"
+case "$*" in
+  "--filter @multica/web typecheck") ;;
+  "--filter @multica/web build")
+    mkdir -p apps/web/.next
+    printf 'build-id\n' >apps/web/.next/BUILD_ID
+    printf '{}\n' >apps/web/.next/routes-manifest.json
+    printf '{}\n' >apps/web/.next/prerender-manifest.json
+    ;;
+  *) echo "unexpected pnpm $*" >&2; exit 9 ;;
+esac
+SH
+
 cat >"$FAKE_BIN/brew" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -96,6 +114,24 @@ cat >"$FAKE_BIN/scp" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "scp $*" >>"$MULTICA_TEST_LOG"
+SH
+
+cat >"$FAKE_BIN/tar" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "tar $*" >>"$MULTICA_TEST_LOG"
+archive=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-czf" ]; then
+    archive="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [ -n "$archive" ]; then
+  : >"$archive"
+fi
 SH
 
 cat >"$FAKE_BIN/ssh" <<'SH'
@@ -242,17 +278,27 @@ grep -Fq 'MY_MINI_HOST="${MULTICA_MY_MINI_HOST:-${MULTICA_REMOTE_JUMP:-my-mini}}
 grep -Fq 'ssh -o RequestTTY=no "$REMOTE_HOST"' "$SCRIPT_DIR/run_release.sh"
 ! grep -Fq 'ssh "$REMOTE_JUMP" "ssh $REMOTE_HOST' "$SCRIPT_DIR/run_release.sh"
 
+# Web compilation runs natively on this Mac, uploads only the .next artifact,
+# and leaves Linux-native dependencies and backend builds on dj.
+grep -Fq 'pnpm --filter @multica/web typecheck' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'MULTICA_WEB_TYPECHECK_ALREADY_PASSED=1' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'pnpm --filter @multica/web build' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'COPYFILE_DISABLE=1 tar' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'BUILD_ID routes-manifest.json prerender-manifest.json' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'apps/web/.next.previous' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'pnpm install --frozen-lockfile' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'go build -ldflags' "$SCRIPT_DIR/run_release.sh"
+! grep -Fq './scripts/deploy.sh' "$SCRIPT_DIR/run_release.sh"
 
-# The removed LiteLLM container must never influence a release window. The
-# proven configuration reserves 1.5 GiB for the host while giving the Webpack
-# build its 1792 MiB V8 heap under the existing cgroup protections.
-grep -Fq 'WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-1792}"' "$SCRIPT_DIR/run_release.sh"
+
+# The remote build-pressure workaround is obsolete: Webpack runs natively on
+# this Mac, while dj only installs Linux dependencies and builds Go binaries.
+grep -Fq 'WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-4096}"' "$SCRIPT_DIR/run_release.sh"
 ! grep -Fq 'litellm' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'sudo systemctl stop multica-frontend multica-backend' "$SCRIPT_DIR/run_release.sh"
-grep -Fq 'sudo swapoff -a' "$SCRIPT_DIR/run_release.sh"
-grep -Fq 'sudo swapon -a' "$SCRIPT_DIR/run_release.sh"
-grep -Fq 'sudo systemctl start multica-backend' "$SCRIPT_DIR/run_release.sh"
-grep -Fq 'sudo systemctl start multica-frontend' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'sudo systemctl start multica-backend multica-frontend' "$SCRIPT_DIR/run_release.sh"
+! grep -Fq 'sudo swapoff -a' "$SCRIPT_DIR/run_release.sh"
+! grep -Fq 'systemd-run' "$SCRIPT_DIR/run_release.sh"
 
 # Every artifact and deployment must remain pinned to the HEAD selected after
 # synchronization; a later fix commit requires rerunning the whole workflow.
@@ -263,47 +309,23 @@ grep -Fq 'EXPECTED_VERSION=' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'commit: $EXPECTED_COMMIT' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'does not match release $EXPECTED_VERSION' "$SCRIPT_DIR/run_release.sh"
 
-# The complete protected-build budget, including the proven defaults, must be
-# forwarded to deploy.sh. A release retry may override one or all controls.
-remote_override_log="$TMP/remote-defaults.log"
-: >"$remote_override_log"
+# A deploy run builds and uploads the local artifact. The fake SSH endpoint
+# records the pinned remote script without changing the test host.
+artifact_log="$TMP/local-artifact.log"
+: >"$artifact_log"
 PATH="$FAKE_BIN:$PATH" \
 HOME="$HOME_DIR" \
 MULTICA_REPO="$REPO" \
-MULTICA_TEST_LOG="$remote_override_log" \
+MULTICA_TEST_LOG="$artifact_log" \
 MULTICA_UPSTREAM_SYNC_STRATEGY=merge \
 MULTICA_SKIP_CLI_INSTALL=1 \
 MULTICA_SKIP_PACKAGE=1 \
 MULTICA_SKIP_INSTALL=1 \
 "$SCRIPT_DIR/run_release.sh" >/dev/null
-grep -Fq 'MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1792' "$remote_override_log"
-grep -Fq 'MULTICA_WEB_BUILD_MEMORY_HIGH=4G' "$remote_override_log"
-grep -Fq 'MULTICA_WEB_BUILD_MEMORY_MAX=4608M' "$remote_override_log"
-grep -Fq 'MULTICA_WEB_BUILD_SWAP_MAX=256M' "$remote_override_log"
-grep -Fq 'MULTICA_WEB_BUILD_HOST_RESERVE_MB=1536' "$remote_override_log"
-grep -Fq 'MULTICA_BUILD_DIAGNOSTICS_DIR=/var/tmp/multica-selfhost-release' "$remote_override_log"
-
-override_log="$TMP/remote-override-values.log"
-: >"$override_log"
-PATH="$FAKE_BIN:$PATH" \
-HOME="$HOME_DIR" \
-MULTICA_REPO="$REPO" \
-MULTICA_TEST_LOG="$override_log" \
-MULTICA_UPSTREAM_SYNC_STRATEGY=merge \
-MULTICA_SKIP_CLI_INSTALL=1 \
-MULTICA_SKIP_PACKAGE=1 \
-MULTICA_SKIP_INSTALL=1 \
-MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=2048 \
-MULTICA_WEB_BUILD_MEMORY_HIGH=4352M \
-MULTICA_WEB_BUILD_MEMORY_MAX=5G \
-MULTICA_WEB_BUILD_SWAP_MAX=384M \
-MULTICA_WEB_BUILD_HOST_RESERVE_MB=1024 \
-MULTICA_BUILD_DIAGNOSTICS_DIR=/tmp/multica-build-diagnostics \
-"$SCRIPT_DIR/run_release.sh" >/dev/null
-
-grep -Fq 'MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=2048' "$override_log"
-grep -Fq 'MULTICA_WEB_BUILD_MEMORY_HIGH=4352M' "$override_log"
-grep -Fq 'MULTICA_WEB_BUILD_MEMORY_MAX=5G' "$override_log"
-grep -Fq 'MULTICA_WEB_BUILD_SWAP_MAX=384M' "$override_log"
-grep -Fq 'MULTICA_WEB_BUILD_HOST_RESERVE_MB=1024' "$override_log"
-grep -Fq 'MULTICA_BUILD_DIAGNOSTICS_DIR=/tmp/multica-build-diagnostics' "$override_log"
+grep -Fq 'pnpm --filter @multica/web typecheck' "$artifact_log"
+grep -Fq 'pnpm --filter @multica/web build' "$artifact_log"
+grep -Fq 'tar -C' "$artifact_log"
+grep -Fq 'scp -o RequestTTY=no' "$artifact_log"
+grep -Fq 'dj:/tmp/multica-web-abc1234.tar.gz' "$artifact_log"
+grep -Fq 'EXPECTED_HEAD=abc1234deadbeef' "$artifact_log"
+grep -Fq 'REMOTE_ARTIFACT=/tmp/multica-web-abc1234.tar.gz' "$artifact_log"

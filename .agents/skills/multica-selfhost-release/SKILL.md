@@ -11,8 +11,8 @@ Use this skill for the recurring self-hosted Multica release path:
 2. Inspect the branch lifecycle and published state, then choose merge, rebase, or no-op for `upstream/main`.
 3. Push normally after merge/no-op; use `--force-with-lease` only when rebasing an already-published branch.
 4. Build the current branch's `multica` CLI, uninstall Homebrew `multica`, and install the binary to `~/.local/bin/multica` locally and on `my-mini`.
-5. Update `dj:~/apps/multica` through direct local `ssh dj`.
-6. Run remote `./scripts/deploy.sh`.
+5. Build and typecheck the web app natively on this Mac; package only `apps/web/.next` with macOS metadata disabled.
+6. Update `dj:~/apps/multica` through direct local `ssh dj`, install Linux dependencies, run migrations, build Linux Go binaries, and atomically replace the uploaded `.next` artifact.
 7. Run local `./scripts/package.sh`.
 8. Replace local `/Applications/Multica.app` with the generated app bundle.
 9. Verify remote services and local app/CLI version/config.
@@ -67,35 +67,20 @@ The native OMP merge was integrated in `4b009c11b8c4b707e4d7e2cd898e53a3b2d09255
 
 When resolving future `upstream/main` conflicts, retain these native semantics even if upstream changes the Pi-compatible adapter. A post-merge repair creates a new final HEAD, so rebuild every release artifact from that commit.
 
-## Resolved Incident: Selfhost Build Host Pressure
+## Local Web Artifact Deployment
 
-The build is isolated because a cgroup `MemoryMax` caps the build but does not reserve capacity for SSH, the reverse proxy, or resident services. Keep the resource guard immediately before `systemd-run`; do not bypass its post-install availability or swap checks.
+Build the web app natively on this Mac. This is the default because the verified native build completes in about one minute, while Webpack on the constrained self-host and Linux/amd64 emulation on Apple Silicon can stall or consume more than 4 GiB.
 
-The verified release configuration as of 2026-08-17 is:
+- Run `pnpm --filter @multica/web typecheck`, then build with `MULTICA_WEB_TYPECHECK_ALREADY_PASSED=1`.
+- Restore generated `apps/web/next-env.d.ts` immediately after the build so the pinned release version never gains a false `-dirty` suffix.
+- Package only `apps/web/.next` with `COPYFILE_DISABLE=1`; never upload local `node_modules` or a Darwin-native standalone bundle.
+- Require non-empty `BUILD_ID`, `routes-manifest.json`, and `prerender-manifest.json` before upload and after extraction.
+- Keep `pnpm install --frozen-lockfile` on `dj`; the running Next service needs Linux/x86_64 native dependencies from the remote `node_modules`.
+- Build backend, CLI, and migration binaries on `dj` so they target Linux/x86_64.
+- Stage web and Go artifacts before stopping services. During the short release window, run migrations, preserve the previous `.next` and binaries, replace them, restart both services, and roll back artifacts if any later step fails.
+- Bind the archive name and every verification to the pinned final commit. A later commit requires rebuilding all artifacts.
 
-- `MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1792`
-- `MULTICA_WEB_BUILD_MEMORY_HIGH=4G`
-- `MULTICA_WEB_BUILD_MEMORY_MAX=4608M`
-- `MULTICA_WEB_BUILD_SWAP_MAX=256M`
-- `MULTICA_WEB_BUILD_HOST_RESERVE_MB=1536`
-- `MULTICA_WEB_BUILD_MAX_SWAP_USED_MB=256`
-
-This configuration built `2f44ca05b` successfully after removing the retired LiteLLM container, and it must be the default in `run_release.sh`. The `litellm` container has been removed permanently; do not inspect, stop, start, or restore it during release windows.
-
-The deployment window records only whether `multica-backend` and `multica-frontend` were active, installs its `EXIT` trap before stopping either, resets stale swap with `sudo swapoff -a && sudo swapon -a`, then allows `deploy.sh` to enforce the resource guard. The trap restores only the services that were active before the attempt.
-
-If the preflight cannot cover the configured `MemoryMax` plus the 1536 MiB host reserve, or used swap exceeds 256 MiB, do not start the build. Inspect confirmed resident processes or reduce the build footprint; do not weaken the guard merely to start a build.
-
-Repeatable verification:
-
-```bash
-ssh dj 'cd /home/ubuntu/apps/multica && ./scripts/check-build-resources.sh'
-ssh dj 'tail -n 30 /var/tmp/multica-selfhost-release/cgroup-*.log; systemctl is-active multica-backend multica-frontend'
-ssh dj 'test -s /home/ubuntu/apps/multica/apps/web/.next/BUILD_ID && test -s /home/ubuntu/apps/multica/apps/web/.next/routes-manifest.json && test -s /home/ubuntu/apps/multica/apps/web/.next/prerender-manifest.json'
-curl --noproxy '*' --max-time 20 -I https://multica.zxyh.club/
-```
-
-The deploy script refuses to start the frontend build unless `MemAvailable` can cover `MemoryMax` plus the host reserve and existing swap usage is below its threshold. It uses the stable `multica-web-build.service` unit with `MemoryHigh`, `MemoryMax`, `MemorySwapMax`, and `OOMPolicy=kill`, and samples cgroup counters into `/var/tmp/multica-selfhost-release/cgroup-*.log` throughout the build so diagnostics survive an SSH disconnect or reboot.
+Do not substitute Bun or a `linux/amd64` Docker build on this Apple Silicon host. Bun does not replace Next/Webpack, and QEMU makes this CPU-heavy build slower. The checked-in `Dockerfile.web` remains for image deployments, not this systemd self-host path.
 
 ## Standard Workflow
 
@@ -157,12 +142,13 @@ scp server/bin/multica my-mini:~/.local/bin/multica.upload
 ssh my-mini 'zsh -lc "chmod 0755 ~/.local/bin/multica.upload && codesign --force --sign - ~/.local/bin/multica.upload && mv ~/.local/bin/multica.upload ~/.local/bin/multica && codesign --verify --strict ~/.local/bin/multica && ~/.local/bin/multica version"'
 ```
 
-Update and deploy remote through direct local `ssh dj` in a protected release window. Preserve the pre-release Multica service state and restore it with an `EXIT` trap; use `scripts/run_release.sh` for the exact implementation rather than copying a partial inline command. The core sequence is:
+Update and deploy remote through direct local `ssh dj`; use `run_release.sh` for the exact implementation rather than copying a partial inline command. The core sequence is:
 
-1. Fast-forward the remote checkout to the pinned final `HEAD` and verify the SHA.
-2. Record `multica-backend` and `multica-frontend` state, install the cleanup trap, then stop those services.
-3. Reset stale swap, run `./scripts/deploy.sh` with the proven build budget, and allow its resource guard to refuse unsafe builds.
-4. Restore every Multica service that was active before the release, whether deployment succeeds or fails.
+1. Build and validate `.next` locally, restore `next-env.d.ts`, and create a commit-pinned archive.
+2. Fast-forward the remote checkout to the pinned final `HEAD`; run remote `pnpm install --frozen-lockfile`.
+3. Extract and validate the uploaded web artifact; build Linux Go binaries in a staging directory.
+4. Record service state, install the rollback trap, stop services, run migrations, then replace `.next` and binaries.
+5. Restart and verify both services. On failure, restore previous artifacts and the pre-release service state.
 
 Build and install locally:
 
@@ -205,13 +191,7 @@ MULTICA_MY_MINI_HOST=my-mini       # CLI installation host only
 MULTICA_REMOTE_HOST=dj             # direct deployment host
 MULTICA_REMOTE_DIR=/home/ubuntu/apps/multica
 MULTICA_REMOTE_NAME=wingeddragon
-MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=1792
-MULTICA_WEB_BUILD_MEMORY_HIGH=4G
-MULTICA_WEB_BUILD_MEMORY_MAX=4608M
-MULTICA_WEB_BUILD_SWAP_MAX=256M
-MULTICA_WEB_BUILD_HOST_RESERVE_MB=1536
-MULTICA_WEB_BUILD_MAX_SWAP_USED_MB=256
-MULTICA_BUILD_DIAGNOSTICS_DIR=/var/tmp/multica-selfhost-release
+MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB=4096
 MULTICA_SKIP_DEPLOY=1
 MULTICA_SKIP_PACKAGE=1
 MULTICA_SKIP_INSTALL=1

@@ -12,17 +12,19 @@ import (
 )
 
 type fakeOctoChatSession struct {
-	appendIn     engine.AppendInput
-	mediaIn      engine.BindMediaInput
-	pendingFresh pgtype.UUID
+	appendIn       engine.AppendInput
+	mediaIn        engine.BindMediaInput
+	pendingFresh   pgtype.UUID
+	pendingFreshID string
 }
 
 func (f *fakeOctoChatSession) EnsureSession(_ context.Context, _ engine.EnsureSessionInput) (pgtype.UUID, error) {
 	return testUUID(42), nil
 }
 
-func (f *fakeOctoChatSession) MarkPendingFresh(_ context.Context, sessionID pgtype.UUID) error {
+func (f *fakeOctoChatSession) MarkPendingFresh(_ context.Context, sessionID pgtype.UUID, messageID string) error {
 	f.pendingFresh = sessionID
+	f.pendingFreshID = messageID
 	return nil
 }
 
@@ -41,11 +43,14 @@ func TestOctoSessionBinderMarksPendingFresh(t *testing.T) {
 	binder := sessionBinder{session: session}
 	sessionID := testUUID(91)
 
-	if err := binder.MarkPendingFresh(context.Background(), sessionID); err != nil {
+	if err := binder.MarkPendingFresh(context.Background(), sessionID, "message-91"); err != nil {
 		t.Fatalf("MarkPendingFresh: %v", err)
 	}
 	if session.pendingFresh != sessionID {
 		t.Fatalf("pending fresh session = %v, want %v", session.pendingFresh, sessionID)
+	}
+	if session.pendingFreshID != "message-91" {
+		t.Fatalf("pending fresh message = %q, want %q", session.pendingFreshID, "message-91")
 	}
 }
 

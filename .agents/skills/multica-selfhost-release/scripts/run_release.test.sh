@@ -298,6 +298,7 @@ grep -Fq 'WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZ
 ! grep -Fq 'litellm' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'sudo systemctl stop multica-frontend multica-backend' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'sudo systemctl start multica-backend multica-frontend' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'curl --noproxy "*" --retry 10 --retry-all-errors --retry-delay 1 --max-time 20 --fail --silent --show-error "$PUBLIC_URL/"' "$SCRIPT_DIR/run_release.sh"
 ! grep -Fq 'sudo swapoff -a' "$SCRIPT_DIR/run_release.sh"
 ! grep -Fq 'systemd-run' "$SCRIPT_DIR/run_release.sh"
 

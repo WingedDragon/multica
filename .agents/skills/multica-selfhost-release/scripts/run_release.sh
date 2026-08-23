@@ -331,7 +331,7 @@ artifacts_installed=1
 sudo systemctl start multica-backend multica-frontend
 systemctl is-active --quiet multica-backend
 systemctl is-active --quiet multica-frontend
-curl --noproxy "*" --max-time 20 --fail --silent --show-error "$PUBLIC_URL/" >/dev/null
+curl --noproxy "*" --retry 10 --retry-all-errors --retry-delay 1 --max-time 20 --fail --silent --show-error "$PUBLIC_URL/" >/dev/null
 auth_probe_body="$(mktemp)"
 auth_probe_status="$(curl --noproxy "*" --max-time 20 --silent --show-error \
   -o "$auth_probe_body" -w "%{http_code}" -H "Content-Type: application/json" \

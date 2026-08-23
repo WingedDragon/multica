@@ -876,10 +876,6 @@ export function useRealtimeSync(
         const wsId = getCurrentWsId();
         if (wsId) qc.invalidateQueries({ queryKey: dingtalkKeys.installations(wsId) });
       },
-      dingtalk_group_route: () => {
-        const wsId = getCurrentWsId();
-        if (wsId) qc.invalidateQueries({ queryKey: dingtalkKeys.groupRoutes(wsId) });
-      },
       vcs_connection: () => {
         const wsId = getCurrentWsId();
         if (wsId) qc.invalidateQueries({ queryKey: ["vcs", wsId] });
@@ -1578,6 +1574,8 @@ export function useRealtimeSync(
               old,
               payload.task_id,
               "waiting_local_directory",
+              undefined,
+              payload.wait_reason,
             ),
         );
         invalidateChatMessageQueries(qc, payload.chat_session_id);

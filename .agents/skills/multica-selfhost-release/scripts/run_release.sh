@@ -280,7 +280,7 @@ if [ "$(git rev-parse HEAD)" != "$EXPECTED_HEAD" ]; then
   exit 6
 fi
 
-export PATH="$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"
+export PATH="$HOME/.nvm/versions/node/v24.14.0/bin:$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"
 pnpm install --frozen-lockfile
 
 release_root="$(mktemp -d "$REMOTE_DIR/.release-$EXPECTED_COMMIT.XXXXXX")"

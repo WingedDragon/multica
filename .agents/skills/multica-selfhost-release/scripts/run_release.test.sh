@@ -287,6 +287,7 @@ grep -Fq 'COPYFILE_DISABLE=1 tar' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'BUILD_ID routes-manifest.json prerender-manifest.json' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'apps/web/.next.previous' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'pnpm install --frozen-lockfile' "$SCRIPT_DIR/run_release.sh"
+grep -Fq 'export PATH="$HOME/.nvm/versions/node/v24.14.0/bin:$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"' "$SCRIPT_DIR/run_release.sh"
 grep -Fq 'go build -ldflags' "$SCRIPT_DIR/run_release.sh"
 ! grep -Fq './scripts/deploy.sh' "$SCRIPT_DIR/run_release.sh"
 

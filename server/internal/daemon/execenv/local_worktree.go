@@ -688,9 +688,9 @@ func copyUntrackedFiles(gitRoot, worktreePath string, logger *slog.Logger) (copi
 // multicaSidecarDirNames are the directories Prepare writes into a workdir. A
 // task running in_place on the same directory leaves these present as
 // untracked files for the length of its run, so a concurrent worktree snapshot
-// sees them. CLAUDE.md / AGENTS.md are deliberately absent: those are
-// ordinarily the user's own tracked files, and the runtime only injects a
-// marker block into them, which CleanupRuntimeConfig removes.
+// sees them. CLAUDE.md / AGENTS.md / .omp/AGENTS.md are deliberately absent:
+// those are ordinarily the user's own (tracked) context files, and the runtime
+// only injects a marker block into them, which CleanupRuntimeConfig removes.
 var multicaSidecarDirNames = []string{
 	".agent_context",
 	".multica",

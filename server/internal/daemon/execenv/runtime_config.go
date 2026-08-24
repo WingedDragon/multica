@@ -167,7 +167,7 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 // For OpenClaw: writes {workDir}/AGENTS.md  (skills discovered natively from {workDir}/skills/ via per-task openclaw-config.json that pins agents.defaults.workspace)
 // For Hermes:   writes {workDir}/AGENTS.md  (skills discovered natively from a per-task HERMES_HOME/skills seeded by the daemon; see hermes_home.go)
 // For Pi:       writes {workDir}/AGENTS.md  (skills discovered natively from .pi/skills/)
-// For Oh-My-Pi (omp): writes {workDir}/AGENTS.md  (omp is a pi fork; skills discovered from .omp/skills/)
+// For Oh-My-Pi (omp): writes {workDir}/.omp/AGENTS.md  (OMP's native project context location — the standalone root AGENTS.md is only picked up by OMP's lowest-priority `agents-md` discovery provider, which user configs commonly disable; skills discovered from .omp/skills/)
 // For Cursor:   writes {workDir}/AGENTS.md  (skills discovered natively from .cursor/skills/)
 // For Kimi:        writes {workDir}/AGENTS.md  (Kimi Code CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
 // For Reasonix:    writes {workDir}/AGENTS.md  (Reasonix reads AGENTS.md and .reasonix/skills/ natively)
@@ -184,6 +184,13 @@ func InjectRuntimeConfig(workDir, provider string, ctx TaskContextForEnv) (strin
 	if path == "" {
 		// Unknown provider — skip config injection, prompt-only mode.
 		return content, nil
+	}
+	// Nested targets such as omp's .omp/AGENTS.md need their parent
+	// directory; root-level targets resolve to workDir itself, which
+	// always exists. CleanupRuntimeConfig rmdirs the directory it finds
+	// empty again (see removeRuntimeConfigDirIfUnused).
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return content, fmt.Errorf("create runtime config dir for %s: %w", provider, err)
 	}
 	return content, writeRuntimeConfigFile(path, content)
 }
@@ -212,7 +219,16 @@ func runtimeConfigPath(workDir, provider string) string {
 		return filepath.Join(workDir, "CODEBUDDY.md")
 	case "qwen":
 		return filepath.Join(workDir, "QWEN.md")
-	case "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "omp", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw", "mcode", "dim":
+	case "omp":
+		// OMP's native provider reads project context only from the nearest
+		// non-empty .omp/ directory's AGENTS.md (highest discovery priority).
+		// A standalone root AGENTS.md is served by the separate `agents-md`
+		// provider at priority 10, which user configs commonly disable via
+		// disabledProviders — verified against omp 18.0.4: with `agents-md`
+		// disabled the root brief is never loaded, while .omp/AGENTS.md is
+		// loaded in both `-p` print mode and interactive sessions.
+		return filepath.Join(workDir, ".omp", "AGENTS.md")
+	case "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw", "mcode", "dim":
 		return filepath.Join(workDir, "AGENTS.md")
 	default:
 		return ""
@@ -380,6 +396,7 @@ func CleanupRuntimeConfig(workDir, provider string) error {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("remove runtime config %s: %w", path, err)
 		}
+		removeRuntimeConfigDirIfUnused(workDir, path)
 		return nil
 	}
 	// File pre-existed (possibly empty, possibly whitespace-only,
@@ -388,6 +405,21 @@ func CleanupRuntimeConfig(workDir, provider string) error {
 	// user's original file was empty; we still write it (zero-byte file)
 	// so the file's existence is preserved.
 	return os.WriteFile(path, []byte(remainder), 0o644)
+}
+
+// removeRuntimeConfigDirIfUnused removes the directory InjectRuntimeConfig
+// created to host a nested runtime config file (e.g. omp's .omp/AGENTS.md)
+// when deleting the brief leaves it empty, so a local_directory workdir
+// round-trips to its exact pre-task directory listing. Best effort: a
+// directory that still holds other content — user files, sidecar skills the
+// manifest removes in a separate pass — stays in place, and the workdir
+// itself is never touched because root-level config files resolve to it.
+func removeRuntimeConfigDirIfUnused(workDir, path string) {
+	dir := filepath.Dir(path)
+	if filepath.Clean(dir) == filepath.Clean(workDir) {
+		return
+	}
+	_ = os.Remove(dir) // ENOTEMPTY / ErrNotExist: someone else owns it now
 }
 
 // buildMetaSkillContent generates the meta skill markdown that teaches the

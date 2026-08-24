@@ -991,7 +991,7 @@ func TestInjectRuntimeConfigPreservesUserContent(t *testing.T) {
 		{"openclaw", "AGENTS.md"},
 		{"hermes", "AGENTS.md"},
 		{"pi", "AGENTS.md"},
-		{"omp", "AGENTS.md"},
+		{"omp", filepath.Join(".omp", "AGENTS.md")},
 		{"cursor", "AGENTS.md"},
 		{"kimi", "AGENTS.md"},
 		{"reasonix", "AGENTS.md"},
@@ -1008,6 +1008,9 @@ func TestInjectRuntimeConfigPreservesUserContent(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, tc.filename)
 			const userContent = "# User-authored file\n\ndon't touch this\n"
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("seed dir: %v", err)
+			}
 			if err := os.WriteFile(path, []byte(userContent), 0o644); err != nil {
 				t.Fatalf("seed: %v", err)
 			}
@@ -1058,6 +1061,124 @@ func TestRuntimeConfigPathDistinguishesCodebuddyFromClaude(t *testing.T) {
 	}
 	if claudePath == codebuddyPath {
 		t.Fatal("claude and codebuddy must not share a runtime config path")
+	}
+}
+
+// OMP's native discovery provider reads project context only from the
+// nearest non-empty .omp/ directory's AGENTS.md (priority 100). The
+// standalone root AGENTS.md is owned by the separate `agents-md` provider
+// (priority 10), which user configs commonly disable via disabledProviders —
+// verified empirically against omp 18.0.4: with `agents-md` disabled the
+// root brief never loads, while .omp/AGENTS.md loads in `-p` print mode.
+// These tests pin the daemon's write/cleanup cycle to OMP's native path.
+func TestOMPInjectUsesNativeOmpAgentsMdPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	if got := runtimeConfigPath(dir, "omp"); got != filepath.Join(dir, ".omp", "AGENTS.md") {
+		t.Fatalf("omp runtime config path = %q, want .omp/AGENTS.md", got)
+	}
+
+	ctx := TaskContextForEnv{
+		IssueID:            "11111111-2222-3333-4444-555555555555",
+		ProjectID:          "22222222-3333-4444-5555-666666666666",
+		ProjectTitle:       "OMP Project",
+		ProjectDescription: "Project description the OMP runtime must see.",
+	}
+	if _, err := InjectRuntimeConfig(dir, "omp", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig: %v", err)
+	}
+
+	// The brief — including the project description — must land in the
+	// native path, and the root AGENTS.md must not be created (OMP would
+	// only see it through a lower-priority provider users may disable).
+	got, err := os.ReadFile(filepath.Join(dir, ".omp", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read .omp/AGENTS.md: %v", err)
+	}
+	s := string(got)
+	for _, want := range []string{
+		runtimeMarkerBegin,
+		runtimeMarkerEnd,
+		"## Project Context",
+		"OMP Project",
+		"Project description the OMP runtime must see.",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf(".omp/AGENTS.md missing %q", want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Errorf("root AGENTS.md must not be written for omp, stat err=%v", err)
+	}
+}
+
+func TestOMPCleanupRemovesBriefAndEmptyOmpDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	if _, err := InjectRuntimeConfig(dir, "omp", TaskContextForEnv{
+		IssueID: "11111111-2222-3333-4444-555555555555",
+	}); err != nil {
+		t.Fatalf("InjectRuntimeConfig: %v", err)
+	}
+	if err := CleanupRuntimeConfig(dir, "omp"); err != nil {
+		t.Fatalf("CleanupRuntimeConfig: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".omp", "AGENTS.md")); !os.IsNotExist(err) {
+		t.Errorf(".omp/AGENTS.md must be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".omp")); !os.IsNotExist(err) {
+		t.Errorf(".omp/ dir created solely for the brief must be removed, stat err=%v", err)
+	}
+}
+
+func TestOMPCleanupPreservesUserOmpContent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// The user already owns a .omp/ directory: a hand-authored skill and a
+	// config.yml. Inject must preserve the user's AGENTS.md content and
+	// Cleanup must restore it byte-exactly, leaving the directory alive.
+	if err := os.MkdirAll(filepath.Join(dir, ".omp", "skills", "my-own"), 0o755); err != nil {
+		t.Fatalf("seed .omp/skills: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".omp", "skills", "my-own", "SKILL.md"), []byte("# user skill\n"), 0o644); err != nil {
+		t.Fatalf("seed skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".omp", "config.yml"), []byte("symbolPreset: nerd\n"), 0o644); err != nil {
+		t.Fatalf("seed config.yml: %v", err)
+	}
+	const userBrief = "# User instructions\n\nKeep these.\n"
+	if err := os.WriteFile(filepath.Join(dir, ".omp", "AGENTS.md"), []byte(userBrief), 0o644); err != nil {
+		t.Fatalf("seed user AGENTS.md: %v", err)
+	}
+
+	if _, err := InjectRuntimeConfig(dir, "omp", TaskContextForEnv{
+		IssueID: "11111111-2222-3333-4444-555555555555",
+	}); err != nil {
+		t.Fatalf("InjectRuntimeConfig: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, ".omp", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read injected: %v", err)
+	}
+	if !strings.HasPrefix(string(got), userBrief) {
+		t.Errorf("user content must stay verbatim at the top of .omp/AGENTS.md, got:\n%s", got)
+	}
+
+	if err := CleanupRuntimeConfig(dir, "omp"); err != nil {
+		t.Fatalf("CleanupRuntimeConfig: %v", err)
+	}
+	restored, err := os.ReadFile(filepath.Join(dir, ".omp", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read after cleanup: %v", err)
+	}
+	if string(restored) != userBrief {
+		t.Errorf("user AGENTS.md not restored byte-exactly:\n%s", restored)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".omp")); err != nil {
+		t.Errorf("user-owned .omp/ dir must survive cleanup: %v", err)
 	}
 }
 
@@ -1369,7 +1490,7 @@ func TestCleanupRuntimeConfigByProvider(t *testing.T) {
 		{"openclaw", "AGENTS.md"},
 		{"hermes", "AGENTS.md"},
 		{"pi", "AGENTS.md"},
-		{"omp", "AGENTS.md"},
+		{"omp", filepath.Join(".omp", "AGENTS.md")},
 		{"cursor", "AGENTS.md"},
 		{"kimi", "AGENTS.md"},
 		{"reasonix", "AGENTS.md"},
@@ -1386,6 +1507,9 @@ func TestCleanupRuntimeConfigByProvider(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, tc.filename)
 			const userContent = "# User file\n\ndon't touch this\n"
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("seed dir: %v", err)
+			}
 			if err := os.WriteFile(path, []byte(userContent), 0o644); err != nil {
 				t.Fatalf("seed: %v", err)
 			}

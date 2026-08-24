@@ -477,7 +477,22 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			finalError = "execution cancelled"
 		} else if waitErr != nil && finalStatus == "completed" {
 			finalStatus = "failed"
-			finalError = withAgentStderr(fmt.Sprintf("%s exited with error: %v", backendName, waitErr), backendName, stderrBuf.Tail())
+			// Prefer the turn's provider message over the process exit code.
+			// Pi (and pi-print-clean-exit) exits 1 after stopReason=error, so
+			// Wait() wins this branch and used to drop lastTurnError. The
+			// classifier then saw only "exit status 1" and filed the run as
+			// non-retryable process_failure — even when the turn was a
+			// transient LiteLLM/OpenAI "Connection error." / "Request timed
+			// out." Keep the exit status as a suffix so a genuine crash is
+			// still visible (same shape as the OpenCode empty-step+exit
+			// composite).
+			var exitErr string
+			if lastTurnError != "" {
+				exitErr = fmt.Sprintf("%s; %s exited with error: %v", lastTurnError, backendName, waitErr)
+			} else {
+				exitErr = fmt.Sprintf("%s exited with error: %v", backendName, waitErr)
+			}
+			finalError = withAgentStderr(exitErr, backendName, stderrBuf.Tail())
 		} else if writeErr != nil && finalStatus == "completed" {
 			finalStatus = "failed"
 			finalError = fmt.Sprintf("%s prompt write failed: %v", backendName, writeErr)

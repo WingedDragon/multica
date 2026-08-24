@@ -107,6 +107,13 @@ describe("runtimeDisplayLabel", () => {
         provider: "mcode",
       }),
     ).toBe("box (MiniMax Code)");
+    expect(
+      runtimeDisplayLabel({
+        name: "ZeroClaw (host)",
+        custom_name: "box",
+        provider: "zeroclaw",
+      }),
+    ).toBe("box (ZeroClaw)");
   });
 
   it("uses OMP as the provider display name", () => {

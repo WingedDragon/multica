@@ -1,12 +1,4 @@
-export type {
-  Issue,
-  IssueStatus,
-  IssuePriority,
-  IssueAssigneeType,
-  IssueMetadata,
-  IssueMetadataValue,
-  IssueReaction,
-} from "./issue";
+export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction, SourceContextAttachment, SourceContextAuthor, SourceContextIssueSnapshot, SourceContextCommentSnapshot, SourceContextSnapshot, SourceContextLimitUsage, SourceContextPreview, SourceContextAuthorState, IssueSourceContext } from "./issue";
 export type {
   IssueStatusCategory,
   IssueStatusEntry,
@@ -346,6 +338,7 @@ export type {
   WorkspaceSubscriptionInterval,
   WorkspaceSubscriptionEntitlements,
   WorkspaceSubscriptionSummary,
+  WorkspaceSeatCapacity,
   WorkspaceSeatPurchaseSummary,
   WorkspaceSubscriptionPrice,
   WorkspaceSubscriptionPrices,

@@ -300,7 +300,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	stderrBuf := newStderrTail(newLogWriter(b.cfg.Logger, "["+backendName+":stderr] "), agentStderrTailBytes)
 	cmd.Stderr = stderrBuf
 
-	if err := cmd.Start(); err != nil {
+	if err := startOwnedProcessTree(cmd, b.cfg.Logger); err != nil {
 		closeStdin()
 		cancel()
 		return nil, fmt.Errorf("start %s: %w", backendName, err)
@@ -463,6 +463,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		}
 
 		waitErr := cmd.Wait()
+		releaseProcessGroup(cmd)
 		duration := time.Since(startTime)
 
 		// Wait closes the process pipes, so a prompt write still blocked when the

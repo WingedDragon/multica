@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -187,6 +188,48 @@ func parseTrustedProxies(raw string) []netip.Prefix {
 	return out
 }
 
+// codexCapacityRetryCount resolves the capacity retry budget the Handler runs
+// with. main() injects the validated value; NewRouter and tests leave it nil
+// and get the service default.
+func codexCapacityRetryCount(opts RouterOptions) int32 {
+	if opts.CodexCapacityRetryCount != nil {
+		return *opts.CodexCapacityRetryCount
+	}
+	return service.DefaultCodexCapacityRetryCount
+}
+
+// parseCodexCapacityRetryCount turns the raw MULTICA_CODEX_CAPACITY_RETRY_COUNT
+// value into the deployment-wide number of additional retries for Codex's exact
+// selected-model capacity error. An empty value yields the service default.
+//
+// Like parseLLMMaxRetries (MUL-6364) this returns an error instead of warning
+// and falling back to the default. The reason is stronger here: capacity
+// retries fire with zero delay, and each attempt writes a task row, launches a
+// runtime and calls the provider again, so an unnoticed value is not merely
+// "not what the operator asked for" — above the ceiling it is an effectively
+// unbounded task chain. Failing the boot makes a typo'd knob visible instead of
+// leaving a server that looks configured and is not.
+func parseCodexCapacityRetryCount(raw string) (int32, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return service.DefaultCodexCapacityRetryCount, nil
+	}
+	// Parsed at 64 bits so an out-of-int32 value reports the ceiling error
+	// rather than a shape error: "must be at most 20" tells the operator what
+	// to do, "must be an integer" does not.
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("must be an integer, got %q", raw)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("must not be negative, got %d", value)
+	}
+	if value > int64(service.MaxCodexCapacityRetryCount) {
+		return 0, fmt.Errorf("must be at most %d, got %d", service.MaxCodexCapacityRetryCount, value)
+	}
+	return int32(value), nil
+}
+
 // normalizeServerVersion maps the unstamped "dev" default (main.go's
 // `version` var, unchanged when the binary wasn't built with
 // -X main.version=<tag>) to an empty string. handler.Config.ServerVersion
@@ -239,6 +282,14 @@ type RouterOptions struct {
 	// any test that happened to have the variable set. nil means unset, which
 	// is what tests and NewRouter get.
 	LLMMaxRetries *llm.RetryOverride
+	// CodexCapacityRetryCount carries the parsed
+	// MULTICA_CODEX_CAPACITY_RETRY_COUNT budget, injected for the same reason as
+	// LLMMaxRetries above: a value over service.MaxCodexCapacityRetryCount must
+	// fail the boot, and only main() can exit. nil means unset, which is what
+	// tests and NewRouter get — they fall back to
+	// service.DefaultCodexCapacityRetryCount. A non-nil zero is meaningful and
+	// distinct from unset: it disables the dedicated capacity policy.
+	CodexCapacityRetryCount *int32
 }
 
 func buildChannelSupervisor(
@@ -343,6 +394,22 @@ func strictPositiveDurationEnv(name string, fallback time.Duration) (time.Durati
 	return value, nil
 }
 
+func seatCapacityExecutor(cloudURL string) seatcapacity.Executor {
+	executor, err := seatcapacity.New(seatcapacity.Config{
+		BaseURL: cloudURL,
+	})
+	if err == nil {
+		return executor
+	}
+	// A Cloud-connected deployment with malformed connection settings must not
+	// silently restore unlimited membership. The fail-closed executor returns
+	// 503 until the operator repairs the Cloud URL; it is deliberately
+	// ineligible for recovery-worker startup so queued intents keep their retry
+	// budget while configuration is broken.
+	slog.Error("subscription seat capacity executor unavailable", "error", err)
+	return seatcapacity.NewUnavailable(err)
+}
+
 // NewRouterWithOptions builds the fully-configured Chi router and
 // returns the *handler.Handler it was constructed from. Callers that
 // need to drive background lifecycle on services attached to the
@@ -382,8 +449,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		PublicURL:                strings.TrimRight(strings.TrimSpace(os.Getenv("MULTICA_PUBLIC_URL")), "/"),
 		AppURL:                   appURLFromEnv(),
 		TrustedProxies:           parseTrustedProxies(os.Getenv("MULTICA_TRUSTED_PROXIES")),
-		CloudRuntimeFleetURL:     cloudRuntimeFleetURLFromEnv(),
-		CloudRuntimeFleetTimeout: envDuration("MULTICA_CLOUD_FLEET_TIMEOUT", 35*time.Second),
+		CloudURL:                 strings.TrimSpace(os.Getenv("MULTICA_CLOUD_URL")),
+		CloudTimeout:             35 * time.Second,
 		AttachmentDownloadMode:   os.Getenv("ATTACHMENT_DOWNLOAD_MODE"),
 		AttachmentDownloadURLTTL: envDuration("ATTACHMENT_DOWNLOAD_URL_TTL", 30*time.Minute),
 		AttachmentFrameAncestors: origins,
@@ -392,6 +459,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		LLMBaseURL:               strings.TrimSpace(os.Getenv("MULTICA_LLM_BASE_URL")),
 		LLMDefaultModel:          strings.TrimSpace(os.Getenv("MULTICA_LLM_DEFAULT_MODEL")),
 		LLMMaxRetries:            opts.LLMMaxRetries,
+		CodexCapacityRetryCount:  codexCapacityRetryCount(opts),
 		ServerVersion:            normalizeServerVersion(version),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
@@ -406,47 +474,24 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	h.TaskService.Metrics = opts.BusinessMetrics
 	h.IssueService.Metrics = opts.BusinessMetrics
 	entitlementClient, entitlementErr := entitlement.New(entitlement.Config{
-		Enabled:      envBool("MULTICA_ENTITLEMENT_POLICY_ENABLED", false),
-		BaseURL:      strings.TrimSpace(os.Getenv("MULTICA_ENTITLEMENT_POLICY_URL")),
-		ServiceToken: os.Getenv("MULTICA_ENTITLEMENT_SERVICE_TOKEN"),
-		Timeout:      envDuration("MULTICA_ENTITLEMENT_POLICY_TIMEOUT", 3*time.Second),
-		StaleGrace:   envNonNegativeDuration("MULTICA_ENTITLEMENT_STALE_GRACE", 15*time.Minute),
-		Observer:     opts.BusinessMetrics,
+		BaseURL:  signupConfig.CloudURL,
+		Observer: opts.BusinessMetrics,
 	})
 	if entitlementErr != nil {
-		slog.Error("entitlement policy client disabled by invalid configuration", "error", entitlementErr)
+		slog.Error("entitlement policy client disabled by malformed Multica Cloud URL", "error", entitlementErr)
 		opts.BusinessMetrics.RecordEntitlementConfigError()
 	} else if entitlementClient.Enabled() {
-		entitlementClient.SetEmergencyDisabled(envBool("MULTICA_ENTITLEMENT_EMERGENCY_DISABLED", false))
 		h.Entitlements = entitlementClient
 		h.AutopilotService.Entitlements = entitlementClient
 		h.AutopilotService.QuotaMetrics = opts.BusinessMetrics
 	}
-	capacityEnforcementEnabled := envBool("MULTICA_SUBSCRIPTION_CAPACITY_ENABLED", false)
-	// Settlement remains independently enabled during an enforcement rollback
-	// so existing confirm/release intents keep draining. Enforcement always
-	// implies settlement; operators only need the separate flag when pausing
-	// new capacity admission.
-	capacityWorkerEnabled := capacityEnforcementEnabled || envBool("MULTICA_SUBSCRIPTION_CAPACITY_WORKER_ENABLED", false)
-	capacityClient, capacityErr := seatcapacity.New(seatcapacity.Config{
-		Enabled:      capacityWorkerEnabled,
-		BaseURL:      strings.TrimSpace(os.Getenv("MULTICA_SUBSCRIPTION_CAPACITY_URL")),
-		ServiceToken: os.Getenv("MULTICA_SUBSCRIPTION_CAPACITY_SERVICE_TOKEN"),
-		Timeout:      envDuration("MULTICA_SUBSCRIPTION_CAPACITY_TIMEOUT", 3*time.Second),
-	})
-	if capacityErr != nil {
-		// Explicit enablement with malformed config must not silently restore
-		// unlimited membership. The fail-closed executor returns 503 until the
-		// operator repairs the service URL or credential.
-		slog.Error("subscription seat capacity executor unavailable", "error", capacityErr)
-		h.SeatCapacity = seatcapacity.NewUnavailable(capacityErr)
-	} else {
-		h.SeatCapacity = capacityClient
-	}
-	h.SeatCapacityEnforcementEnabled = capacityEnforcementEnabled
+	// Cloud Runtime and strict seat capacity are one managed deployment. Reuse
+	// the same base URL so Billing cannot be readable while invitation writes
+	// silently skip Cloud's authoritative seat policy.
+	h.SeatCapacity = seatCapacityExecutor(signupConfig.CloudURL)
 	capacityLocker := seatcapacity.NewWorkspaceLocker(pool)
 	h.SeatCapacityLocker = capacityLocker
-	if capacityWorkerEnabled && h.SeatCapacity.Enabled() {
+	if seatcapacity.CanRunWorker(h.SeatCapacity) {
 		h.SeatCapacityWorker = seatcapacity.NewWorker(queries, h.SeatCapacity, capacityLocker, seatcapacity.WorkerConfig{
 			Metrics: opts.SeatCapacityMetrics,
 		})
@@ -496,7 +541,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// connection of its own outside the per-installation supervisor. The Router
 	// is the single shared inbound handler injected into every Channel.
 	channelRegistry := channel.NewRegistry()
-	channelRouter := engine.NewRouter(h.IssueService, h.TaskService, queries, engine.RouterConfig{Logger: slog.Default()})
+	channelRouter := engine.NewRouter(h.IssueService, h.TaskService, queries, engine.RouterConfig{
+		Logger: slog.Default(), Lifecycle: h,
+	})
 	// Debounce the per-session run trigger so a burst of messages collapses
 	// into one agent run instead of one per message (MUL-2968).
 	channelRouter.EnableRunBatching(engine.DefaultChatRunBatchWindow)
@@ -747,8 +794,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// The bind link (/slack/bind) is a web-app page, so it must use the
 				// app URL (MULTICA_APP_URL ?? FRONTEND_ORIGIN), NOT MULTICA_PUBLIC_URL
 				// (the backend/API URL). Mirrors the Lark replier (appURLFromEnv).
-				AppURL: appURLFromEnv(),
-				Logger: slog.Default(),
+				AppURL:  appURLFromEnv(),
+				Queries: queries,
+				Logger:  slog.Default(),
 			})
 			// Typing indicator (MUL-3874): a 👀 reaction on the user's message
 			// while the agent works, cleared when the run finishes or fails.
@@ -779,16 +827,14 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// agent asks, instead of force-assembling it on every inbound.
 			h.SlackHistory = slack.NewHistory(queries, box.Open, slog.Default())
 
-			// `/issue` slash command (MUL-3908): a real Slack slash command,
-			// delivered over the same Socket Mode connection. It is a quick-create
-			// entry point — the invoker's natural-language description is enqueued as
-			// a quick-create task (no chat session or chat run) and the agent authors
-			// the well-formed issue in the background — reusing the shared TaskService
-			// + binding service. The invoker gets a private ephemeral acknowledgement
-			// and a Multica notification when the issue lands.
+			// `/issue`, `/new`, and `/clear` are real Slack slash commands delivered
+			// over the same Socket Mode connection. `/issue` enqueues quick-create;
+			// the two session controls reuse the shared route/context and task
+			// services. Every outcome receives a private ephemeral acknowledgement.
 			slackSlash := slack.NewSlashCommandProcessor(slack.SlashCommandConfig{
 				Queries: queries,
 				Tasks:   h.TaskService,
+				Control: slack.NewSlackDMControlStarter(queries, pool, h.TaskService, h),
 				Binding: slackBindingSvc,
 				AppURL:  appURLFromEnv(),
 				Logger:  slog.Default(),
@@ -848,9 +894,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			channelRouter.Register(dingtalk.TypeDingTalk, dingtalk.NewDingTalkResolverSet(queries, pool, replier, ack, media, botNames))
 			dingtalk.NewOutbound(queries, box.Open, dingtalkClient, slog.Default()).Register(bus)
 			dingtalk.RegisterDingTalk(channelRegistry, dingtalk.ChannelDeps{
-				Decrypt: box.Open,
-				Client:  dingtalkClient,
-				Logger:  slog.Default(),
+				Decrypt:  box.Open,
+				Client:   dingtalkClient,
+				BotNames: botNames,
+				Logger:   slog.Default(),
 			})
 			installSvc, installErr := dingtalk.NewInstallService(queries, pool, box, slog.Default())
 			if installErr != nil {
@@ -1231,13 +1278,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	h.MembershipCache = auth.NewMembershipCache(rdb)
 
 	// Cloud PAT verifier: validates mcn_ tokens against Multica Cloud
-	// Fleet. Returns nil when no Fleet URL is configured — the Auth /
+	// Fleet. Returns nil when no Cloud URL is configured — the Auth /
 	// DaemonAuth middlewares treat nil as "mcn_ not supported" and
 	// reject with 401, instead of falling through to mul_/JWT paths.
-	// Reuses MULTICA_CLOUD_FLEET_URL (the same URL the cloud-runtime
-	// proxy uses) so a deployment doesn't need a second config knob.
+	// Reuses MULTICA_CLOUD_URL (the same URL the cloud-runtime proxy uses) so a
+	// deployment has one authoritative multica-cloud connection.
 	cloudPATVerifier := auth.NewCloudPATVerifier(auth.CloudPATVerifierConfig{
-		FleetBaseURL: signupConfig.CloudRuntimeFleetURL,
+		FleetBaseURL: signupConfig.CloudURL,
 		Redis:        rdb,
 	})
 
@@ -2460,13 +2507,6 @@ func splitAndTrim(s string) []string {
 		}
 	}
 	return res
-}
-
-func cloudRuntimeFleetURLFromEnv() string {
-	if url := strings.TrimSpace(os.Getenv("MULTICA_CLOUD_FLEET_URL")); url != "" {
-		return url
-	}
-	return strings.TrimSpace(os.Getenv("MULTICA_FLEET_URL"))
 }
 
 // composioStateSecret resolves the HMAC key for the connect-state. Prefers an

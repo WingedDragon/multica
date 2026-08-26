@@ -44,16 +44,17 @@ func discoverOMPModels(ctx context.Context, runtimeCmd Command) ([]Model, error)
 
 	cmd := runtimeCmd.exec(runCtx, "models", "--no-extensions", "--json")
 	hideAgentWindow(cmd)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
+	var stderr tailBuffer
+	stderr.max = probeStderrSampleBytes
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("run OMP model discovery with %q: %w%s", runtimeCmd.Path, err, ompDiscoveryStderr(stderr.String()))
+	stdout, err := outputOwned(cmd, runtimeCmd.logger)
+	if err != nil {
+		return nil, fmt.Errorf("run OMP model discovery with %q: %w%s", runtimeCmd.Path, err, ompDiscoveryStderr(string(stderr.Bytes())))
 	}
 
-	models, err := parseOMPModels([]byte(stdout.String()))
+	models, err := parseOMPModels(stdout)
 	if err != nil {
-		return nil, fmt.Errorf("parse OMP model catalog: %w%s", err, ompDiscoveryStderr(stderr.String()))
+		return nil, fmt.Errorf("parse OMP model catalog: %w%s", err, ompDiscoveryStderr(string(stderr.Bytes())))
 	}
 	return models, nil
 }

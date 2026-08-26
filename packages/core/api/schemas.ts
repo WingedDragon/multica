@@ -15,6 +15,7 @@ import type {
   ChatMessage,
   ChatDraftRestoresResponse,
   ChatPendingTask,
+  ChatSession,
   PrioritizeQueuedChatTaskResponse,
   SendChatMessageResponse,
   StartMikaOnboardingResponse,
@@ -772,6 +773,9 @@ export interface AppConfigResponse {
    * signal do validate but cannot say so, and are treated as unable: the client
    * has no way to tell them apart, and only one of the two answers is safe. */
   local_worktree_supported?: boolean;
+  /** Whether agent create/update persists `starter_prompts`. Older servers
+   * silently ignored the unknown field, so absent must be treated as false. */
+  agent_starter_prompts_supported?: boolean;
   server_version?: string;
 }
 
@@ -971,6 +975,7 @@ export const AppConfigSchema = z.object({
   vcs_integration_available: BooleanWithDefaultSchema(false).optional(),
   feature_flags: FeatureFlagsSchema,
   local_worktree_supported: BooleanWithDefaultSchema(false),
+  agent_starter_prompts_supported: BooleanWithDefaultSchema(false),
   server_version: OptionalStringSchema,
 }).loose();
 
@@ -986,6 +991,8 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   // Fail closed: an unreadable config must not look like a server that
   // validates execution_mode.
   local_worktree_supported: false,
+  // Fail closed: old servers returned success while dropping the field.
+  agent_starter_prompts_supported: false,
   feature_flags: {},
 };
 
@@ -1851,6 +1858,60 @@ export const CancelTaskResponseSchema = AgentTaskSchema.extend({
   ),
 }).loose();
 
+const ChatLastMessageSchema = z.object({
+  content: z.string().default(""),
+  role: z.enum(["user", "assistant"]).catch("assistant"),
+  created_at: z.string().default(""),
+  failure_reason: z.string().nullable().optional(),
+  message_kind: z.enum([
+    "message",
+    "no_response",
+    "onboarding_kickoff",
+    "onboarding_opening",
+  ]).optional().catch(undefined),
+}).loose();
+
+const ChatChannelSourceSchema = z.object({
+  channel_type: z.string().default(""),
+  installation_id: z.string().default(""),
+  route_revision: z.number().default(0),
+}).loose();
+
+export const ChatSessionSchema: z.ZodType<ChatSession> = z.object({
+  id: z.string(),
+  workspace_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  creator_id: z.string().default(""),
+  project_id: z.string().nullable().optional(),
+  title: z.string().default(""),
+  status: z.enum(["active", "archived"]).catch("active"),
+  has_unread: z.boolean().default(false),
+  unread_count: z.number().optional(),
+  last_message: ChatLastMessageSchema.nullable().optional().catch(undefined),
+  pinned: z.boolean().optional(),
+  channel_source: ChatChannelSourceSchema.optional().catch(undefined),
+  is_current_channel_route: z.boolean().optional().catch(undefined),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const EMPTY_CHAT_SESSION: ChatSession = {
+  id: "",
+  workspace_id: "",
+  agent_id: "",
+  creator_id: "",
+  title: "",
+  status: "active",
+  has_unread: false,
+  created_at: "",
+  updated_at: "",
+};
+export const ChatSessionListSchema = z
+  .array(ChatSessionSchema.catch(EMPTY_CHAT_SESSION))
+  .transform((sessions) => sessions.filter((session) => session.id !== ""))
+  .default([]);
+export const EMPTY_CHAT_SESSION_LIST: ChatSession[] = [];
+
 // Deferred-cancellation draft restores
 // (`GET /api/chat/sessions/{id}/draft-restores`, #5219) feed the composer
 // directly: `content` becomes the draft text, `attachments` re-bind on
@@ -1970,6 +2031,14 @@ export const StoredAgentDraftSchema = z.object({
   name: z.string().catch(""),
   description: z.string().catch(""),
   instructions: z.string().catch(""),
+  starter_prompts: z
+    .array(
+      z.object({
+        label: z.string().catch(""),
+        prompt: z.string().catch(""),
+      }),
+    )
+    .catch([]),
   avatar_url: z.string().nullable().catch(null),
   model: z.string().catch(""),
   thinking_level: z.string().catch(""),

@@ -271,7 +271,6 @@ func jwtSecretBootError(jwtSecret, appEnv string) error {
 
 func main() {
 	logger.Init()
-
 	// Warn about missing configuration
 	if err := jwtSecretBootError(os.Getenv("JWT_SECRET"), os.Getenv("APP_ENV")); err != nil {
 		slog.Error(
@@ -552,6 +551,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Same posture for the Codex capacity retry budget: a value above the
+	// ceiling would let one capacity failure spawn an unbounded task chain, so
+	// the boot stops rather than quietly restoring the default.
+	codexCapacityRetries, err := parseCodexCapacityRetryCount(os.Getenv("MULTICA_CODEX_CAPACITY_RETRY_COUNT"))
+	if err != nil {
+		slog.Error("invalid MULTICA_CODEX_CAPACITY_RETRY_COUNT", "error", err)
+		os.Exit(1)
+	}
+
 	r, h := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
 		HTTPMetrics:         httpMetrics,
 		BusinessMetrics:     businessMetrics,
@@ -564,6 +572,8 @@ func main() {
 		FeatureFlags:        flags,
 		HeartbeatScheduler:  heartbeatScheduler,
 		LLMMaxRetries:       llmMaxRetries,
+
+		CodexCapacityRetryCount: &codexCapacityRetries,
 	})
 
 	srv := &http.Server{
@@ -607,6 +617,9 @@ func main() {
 	// work to queued_expired failures.
 	go runRuntimeSweeper(sweepCtx, pool, queries, liveness, taskSvc, bus, runtimeReconnectGrace,
 		envDuration("MULTICA_TASK_QUEUED_TTL", defaultTaskQueuedTTL))
+	// Source-context cleanup is object-store work, so it gets its own goroutine
+	// instead of a slot in the runtime sweep tick.
+	go runSourceContextSweeper(sweepCtx, taskSvc)
 	go heartbeatScheduler.Run(sweepCtx)
 	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
 	if autopilotSvc.QuotaEnabled() {

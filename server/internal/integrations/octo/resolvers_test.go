@@ -33,6 +33,10 @@ func (f *fakeOctoChatSession) AppendUserMessage(_ context.Context, in engine.App
 	return engine.AppendResult{}, nil
 }
 
+func (f *fakeOctoChatSession) StartSession(_ context.Context, _ engine.StartSessionInput) (engine.StartSessionResult, error) {
+	return engine.StartSessionResult{}, nil
+}
+
 func (f *fakeOctoChatSession) BindMediaRefs(_ context.Context, in engine.BindMediaInput) error {
 	f.mediaIn = in
 	return nil
@@ -128,7 +132,7 @@ func TestOctoSessionBinderBindMediaMapping(t *testing.T) {
 	binder := &sessionBinder{session: session}
 	ref := channel.MediaRef{Type: channel.MsgTypeImage, StorageURL: "https://cdn.example.test/image.png"}
 
-	if err := binder.BindMedia(context.Background(), engine.BindMediaParams{
+	if _, err := binder.BindMedia(context.Background(), engine.BindMediaParams{
 		MessageID:   testUUID(1),
 		SessionID:   testUUID(2),
 		WorkspaceID: testUUID(3),

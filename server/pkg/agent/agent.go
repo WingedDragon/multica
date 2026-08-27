@@ -286,10 +286,15 @@ type Config struct {
 // migration 134 to add qoder, migration 136 to add traecli, migration 175 to
 // add deveco, migration 179 to add grok, migration 202 to add qwen,
 // migration 242 to add qoderclicn, migration 253 to add qwenpaw,
-// migration 254 to add reasonix, migration 313 to add dsh, migration 327 to
-// add mcode, migration 370 to add dim, migration 403 to add zeroclaw): a
-// custom runtime profile may only
+// migration 254 to add reasonix, migration 313 to add dsh, migration 314 to
+// add omp, migration 327 to add mcode, migration 370 to add dim,
+// migration 403 to add zeroclaw): a custom runtime profile may only
 // be based on a backend Multica officially supports.
+// omp is fork-local, so every upstream rebuild of this constraint drops it;
+// migrations 362 and 438 restored it, and
+// TestSupportedTypesMatchesMigrationWhitelist now parses the newest constraint
+// migration so the next upstream rebuild fails in tests rather than in
+// production.
 // qoder and qoderclicn share the same ACP backend; keeping both provider keys
 // lets the daemon auto-detect and register the international and China-region
 // binaries independently. traecli (Trae) has a New backend, launch

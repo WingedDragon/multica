@@ -24,6 +24,7 @@ import type {
   CreateBillingPortalSessionResponse,
   WorkspaceSubscriptionEntitlements,
   WorkspaceSubscriptionSummary,
+  IssueLimitUsage,
   WorkspaceSubscriptionPrice,
   WorkspaceSubscriptionPrices,
   CreateWorkspaceSubscriptionCheckoutResponse,
@@ -87,6 +88,7 @@ import type {
   ShareLink,
   ShareLinkInfo,
   Skill,
+  SkillImportResult,
   Squad,
   TimelineEntry,
   User,
@@ -773,9 +775,9 @@ export interface AppConfigResponse {
    * signal do validate but cannot say so, and are treated as unable: the client
    * has no way to tell them apart, and only one of the two answers is safe. */
   local_worktree_supported?: boolean;
-  /** Whether agent create/update persists `starter_prompts`. Older servers
+  /** Whether agent create/update persists `conversation_starters`. Older servers
    * silently ignored the unknown field, so absent must be treated as false. */
-  agent_starter_prompts_supported?: boolean;
+  agent_conversation_starters_supported?: boolean;
   server_version?: string;
 }
 
@@ -975,7 +977,7 @@ export const AppConfigSchema = z.object({
   vcs_integration_available: BooleanWithDefaultSchema(false).optional(),
   feature_flags: FeatureFlagsSchema,
   local_worktree_supported: BooleanWithDefaultSchema(false),
-  agent_starter_prompts_supported: BooleanWithDefaultSchema(false),
+  agent_conversation_starters_supported: BooleanWithDefaultSchema(false),
   server_version: OptionalStringSchema,
 }).loose();
 
@@ -992,7 +994,7 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   // validates execution_mode.
   local_worktree_supported: false,
   // Fail closed: old servers returned success while dropping the field.
-  agent_starter_prompts_supported: false,
+  agent_conversation_starters_supported: false,
   feature_flags: {},
 };
 
@@ -1514,14 +1516,17 @@ export const ChildIssuesResponseSchema = z
   .loose();
 
 export const ChildIssueProgressResponseSchema = z.object({
-  progress: z.array(z.object({
-    parent_issue_id: z.string(),
-    total: z.number(),
-    done: z.number(),
-    visible_total: z.number().optional(),
-    visible_done: z.number().optional(),
-    hidden_total: z.number().optional(),
-  }).loose()).default([]),
+  progress: z
+    .array(
+      z
+        .object({
+          parent_issue_id: z.string(),
+          total: z.number(),
+          done: z.number(),
+        })
+        .loose(),
+    )
+    .default([]),
 }).loose();
 
 export const CloudRuntimeNodeSchema = z.object({
@@ -2031,7 +2036,7 @@ export const StoredAgentDraftSchema = z.object({
   name: z.string().catch(""),
   description: z.string().catch(""),
   instructions: z.string().catch(""),
-  starter_prompts: z
+  conversation_starters: z
     .array(
       z.object({
         label: z.string().catch(""),
@@ -2362,7 +2367,9 @@ export const AutopilotQuotaUsageSchema = z.object({
   action: z.enum(["off", "observe", "enforce"]).default("off"),
   used: z.number().nullable().default(null),
   reserved: z.number().nullable().default(null),
+  total: z.number().nullable().default(null),
   limit: z.number().nullable().default(null),
+  reached: z.boolean().nullable().default(null),
   period_start: z.string().nullable().default(null),
   period_end: z.string().nullable().default(null),
   reset_at: z.string().nullable().default(null),
@@ -3057,6 +3064,22 @@ const StripeHostedURLSchema = z.string().url().refine(
   { message: "Stripe hosted URL must use HTTPS" },
 );
 
+const WorkspaceEntitlementLimitSchema = z
+  .discriminatedUnion("mode", [
+    z
+      .object({
+        mode: z.literal("limited"),
+        limit: z.number().int().positive(),
+      })
+      .loose(),
+    z.object({ mode: z.literal("unlimited") }).loose(),
+  ])
+  .transform(
+    (value): WorkspaceSubscriptionEntitlements["limits"]["issueCount"] =>
+      value.mode === "limited"
+        ? { mode: "limited", limit: value.limit }
+        : { mode: "unlimited", limit: null },
+  );
 
 export const WorkspaceSubscriptionEntitlementsSchema = z
   .object({
@@ -3067,8 +3090,12 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
     // workspace that momentarily reports no human members readable instead of
     // failing the whole snapshot.
     seats: z.number().int().nonnegative(),
-    issue_window: z.number().int().nonnegative().nullable(),
-    autopilot_runs: z.number().int().nonnegative().nullable(),
+    limits: z
+      .object({
+        issue_count: WorkspaceEntitlementLimitSchema,
+        autopilot_runs: WorkspaceEntitlementLimitSchema,
+      })
+      .loose(),
     current_period_end: z.string().nullable().optional(),
     snapshot_expires_at: z.string().nullable().optional(),
     version: z.number().int().nonnegative(),
@@ -3080,8 +3107,10 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
       plan: value.plan,
       status: value.status,
       seats: value.seats,
-      issueWindow: value.issue_window,
-      autopilotRuns: value.autopilot_runs,
+      limits: {
+        issueCount: value.limits.issue_count,
+        autopilotRuns: value.limits.autopilot_runs,
+      },
       currentPeriodEnd: value.current_period_end ?? null,
       snapshotExpiresAt: value.snapshot_expires_at ?? null,
       version: value.version,
@@ -3099,6 +3128,7 @@ export const WorkspaceSubscriptionSummarySchema = z
         used: z.number().int().nonnegative(),
         reserved: z.number().int().nonnegative(),
         available: z.number().int().nonnegative(),
+        overcommitted: z.boolean(),
         version: z.number().int().positive(),
         pending_quantity: z.number().int().positive().nullable(),
         active_purchase: z
@@ -3116,6 +3146,11 @@ export const WorkspaceSubscriptionSummarySchema = z
     cancel_at_period_end: z.boolean(),
     grace_until: z.string().nullable(),
     has_stripe_customer: z.boolean(),
+    available_actions: z.object({
+      checkout: z.boolean(),
+      portal: z.boolean(),
+      purchase_seats: z.boolean(),
+    }).loose(),
   })
   .loose()
   .transform(
@@ -3129,6 +3164,7 @@ export const WorkspaceSubscriptionSummarySchema = z
             used: value.seat_capacity.used,
             reserved: value.seat_capacity.reserved,
             available: value.seat_capacity.available,
+            overcommitted: value.seat_capacity.overcommitted,
             version: value.seat_capacity.version,
             pendingQuantity: value.seat_capacity.pending_quantity,
             activePurchase: value.seat_capacity.active_purchase
@@ -3147,6 +3183,24 @@ export const WorkspaceSubscriptionSummarySchema = z
       cancelAtPeriodEnd: value.cancel_at_period_end,
       graceUntil: value.grace_until,
       hasStripeCustomer: value.has_stripe_customer,
+      availableActions: {
+        checkout: value.available_actions.checkout,
+        portal: value.available_actions.portal,
+        purchaseSeats: value.available_actions.purchase_seats,
+      },
+    }),
+  );
+
+export const IssueLimitUsageSchema = z
+  .object({
+    used: z.number().int().nonnegative(),
+    limit: z.number().int().positive(),
+  })
+  .loose()
+  .transform(
+    (value): IssueLimitUsage => ({
+      used: value.used,
+      limit: value.limit,
     }),
   );
 
@@ -3567,6 +3621,35 @@ export const EMPTY_SKILL: Skill = {
   created_at: "",
   updated_at: "",
   files: [],
+};
+
+export const SkillImportExistingSkillSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  created_by: z.string().optional(),
+  can_overwrite: z.boolean().optional(),
+}).loose();
+
+/**
+ * Envelope of POST /api/skills/import.
+ *
+ * `status` stays a plain string (not an enum) so a status added by a newer
+ * backend still parses and its `reason` survives to the user. `z.enum` here
+ * would fail the whole envelope on an unknown value, drop the server's reason
+ * and leave only a generic "Import failed" — the server field is a bare
+ * `string`, so it is free to grow. `skillFromImportResult` has the default
+ * branch: anything outside created/updated is treated as a failure.
+ */
+export const SkillImportResultSchema = z.object({
+  status: z.string().default("failed"),
+  reason: z.string().optional().default(""),
+  skill: SkillSchema.optional(),
+  existing_skill: SkillImportExistingSkillSchema.optional(),
+}).loose();
+
+export const EMPTY_SKILL_IMPORT_RESULT: SkillImportResult = {
+  status: "failed",
+  reason: "",
 };
 
 /**

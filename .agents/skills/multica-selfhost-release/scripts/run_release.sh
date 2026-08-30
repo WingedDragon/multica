@@ -15,6 +15,7 @@ UPSTREAM_SYNC_STRATEGY="${MULTICA_UPSTREAM_SYNC_STRATEGY:-auto}"
 EXPECTED_HEAD=""
 EXPECTED_COMMIT=""
 EXPECTED_VERSION=""
+EXPECTED_BINARY_VERSION=""
 
 WEB_BUILD_MAX_OLD_SPACE_SIZE_MB="${MULTICA_WEB_BUILD_MAX_OLD_SPACE_SIZE_MB:-4096}"
 CLI_BIN="$REPO/server/bin/multica"
@@ -202,7 +203,8 @@ echo "==> Local branch: $branch"
 sync_upstream "$branch"
 EXPECTED_HEAD="$(git rev-parse HEAD)"
 EXPECTED_COMMIT="$(git rev-parse --short HEAD)"
-EXPECTED_VERSION="$(git describe --tags --always --dirty | sed 's/^v//')"
+EXPECTED_BINARY_VERSION="$(git describe --tags --always --dirty)"
+EXPECTED_VERSION="${EXPECTED_BINARY_VERSION#v}"
 assert_release_head
 
 if [ "$SKIP_CLI_INSTALL" != "1" ]; then
@@ -290,7 +292,7 @@ for file in BUILD_ID routes-manifest.json prerender-manifest.json; do
 done
 
 mkdir -p "$release_root/bin"
-VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+VERSION="$EXPECTED_BINARY_VERSION"
 COMMIT="$(git rev-parse --short HEAD)"
 DATE="$(date -u "+%Y-%m-%dT%H:%M:%SZ")"
 (
@@ -348,7 +350,7 @@ rm -rf "$web_previous" "$bin_previous"
 git status --short --branch
 git rev-parse HEAD
 '
-  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") EXPECTED_COMMIT=$(printf '%q' "$EXPECTED_COMMIT") REMOTE_ARTIFACT=$(printf '%q' "$remote_artifact") PUBLIC_URL=$(printf '%q' 'https://multica.zxyh.club') bash -s" <<<"$remote_script"
+  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") EXPECTED_COMMIT=$(printf '%q' "$EXPECTED_COMMIT") EXPECTED_BINARY_VERSION=$(printf '%q' "$EXPECTED_BINARY_VERSION") REMOTE_ARTIFACT=$(printf '%q' "$remote_artifact") PUBLIC_URL=$(printf '%q' 'https://multica.zxyh.club') bash -s" <<<"$remote_script"
   trap - EXIT
 fi
 

@@ -138,6 +138,7 @@ cat >"$FAKE_BIN/ssh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "ssh $*" >>"$MULTICA_TEST_LOG"
+cat >>"$MULTICA_TEST_LOG"
 SH
 
 chmod 0755 "$FAKE_BIN"/*
@@ -331,3 +332,5 @@ grep -Fq 'scp -o RequestTTY=no' "$artifact_log"
 grep -Fq 'dj:/tmp/multica-web-abc1234.tar.gz' "$artifact_log"
 grep -Fq 'EXPECTED_HEAD=abc1234deadbeef' "$artifact_log"
 grep -Fq 'REMOTE_ARTIFACT=/tmp/multica-web-abc1234.tar.gz' "$artifact_log"
+grep -Fq 'EXPECTED_BINARY_VERSION=v0.0.0-test' "$artifact_log"
+grep -Fq 'VERSION="$EXPECTED_BINARY_VERSION"' "$artifact_log"

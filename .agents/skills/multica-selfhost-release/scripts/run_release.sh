@@ -78,7 +78,7 @@ build_web_artifact() {
 
   artifact_dir="$(mktemp -d)"
   WEB_ARTIFACT="$artifact_dir/multica-web-$EXPECTED_COMMIT.tar.gz"
-  COPYFILE_DISABLE=1 tar -C "$REPO/apps/web" -czf "$WEB_ARTIFACT" .next
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "$REPO/apps/web" -czf "$WEB_ARTIFACT" .next
 }
 
 cleanup_web_artifact() {

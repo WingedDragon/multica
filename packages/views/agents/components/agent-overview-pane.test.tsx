@@ -153,6 +153,7 @@ function renderPane(
     back: vi.fn(),
     pathname: "/acme/agents/agent-1",
     searchParams: new URLSearchParams(),
+    hash: "",
     getShareableUrl: (path) => path,
   };
   return render(
@@ -199,6 +200,7 @@ describe("AgentOverviewPane MCP tab visibility", () => {
     ["Kiro", "kiro"],
     ["OpenCode", "opencode"],
     ["OpenClaw", "openclaw"],
+    ["Oh My Pi", "omp"],
   ])("renders the MCP tab when the agent runs on the %s runtime", (_label, provider) => {
     renderPane([makeRuntime(provider)]);
     openCapabilities();

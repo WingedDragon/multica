@@ -13,6 +13,18 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const env = process.env.APP_ENV ?? "development";
   const isProd = env === "production";
   const isStaging = env === "staging";
+  const androidPackage = process.env.EXPO_ANDROID_PACKAGE;
+  const androidVersionCode = Number.parseInt(
+    process.env.EXPO_ANDROID_VERSION_CODE ?? "1",
+    10,
+  );
+
+  if (
+    androidPackage &&
+    (!Number.isInteger(androidVersionCode) || androidVersionCode < 1)
+  ) {
+    throw new Error("EXPO_ANDROID_VERSION_CODE must be a positive integer");
+  }
 
   return {
     ...config,
@@ -58,6 +70,12 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           ? "ai.multica.mobile.staging"
           : (process.env.EXPO_BUNDLE_IDENTIFIER_DEV ?? "ai.multica.mobile.dev"),
     },
+    android: androidPackage
+      ? {
+          package: androidPackage,
+          versionCode: androidVersionCode,
+        }
+      : undefined,
     plugins: [
       "expo-router",
       "expo-secure-store",

@@ -199,3 +199,10 @@ MULTICA_SKIP_CLI_INSTALL=1
 ```
 
 The script intentionally exits on a dirty local worktree, an invalid strategy, an indeterminate origin lookup, an origin branch with commits missing locally, or a non-fast-forward deployment checkout. Commit, integrate, or inspect deliberately first, then rerun it.
+
+## Personal Android APK
+
+For a locally built, self-signed Android release APK that targets the deployed
+self-host rather than the public Multica endpoints, read
+[`references/android-personal-apk.md`](references/android-personal-apk.md).
+This is a client-only workflow; it neither deploys nor changes the self-host.

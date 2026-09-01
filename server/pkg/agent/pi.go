@@ -237,22 +237,22 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	}
 
 	timeout := opts.Timeout
-	runCtx, cancel := runContext(ctx, timeout)
 	sessionID := opts.ResumeSessionID
-	var args []string
+	var (
+		args        []string
+		sessionLock *os.File
+	)
 
 	// OMP runs its native invocation (`omp -p --mode json --session-dir <dir>
 	// [--resume <id>] [flags] <prompt>`) through the shared launch boundary so
 	// a custom profile's launch prefix applies; Pi keeps its --session <path>
 	// protocol and platform invocation chooser.
-	var cmd *exec.Cmd
 	if mode == piRuntimeModeOMPCompatible {
 		sessionDir, err := ompSessionDir()
 		if err != nil {
 			return nil, fmt.Errorf("omp session directory: %w", err)
 		}
 		args = buildOMPArgs(prompt, sessionDir, opts, b.cfg.Logger)
-		cmd = b.cfg.commandAt(execName).exec(runCtx, args...)
 	} else {
 		// Pi's --session flag expects a file path where events are appended.
 		// The path doubles as our opaque session identifier: we return it as
@@ -261,15 +261,33 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		if sessionPath == "" {
 			p, err := newPiSessionPath()
 			if err != nil {
-				return nil, fmt.Errorf("pi session path: %w", err)
+				return nil, fmt.Errorf("%s session path: %w", backendName, err)
 			}
 			sessionPath = p
 		}
 		if err := ensurePiSessionFile(sessionPath); err != nil {
-			return nil, fmt.Errorf("pi session file: %w", err)
+			return nil, fmt.Errorf("%s session file: %w", backendName, err)
 		}
+		lockedFile, locked, err := tryLockPiSessionFile(sessionPath)
+		if err != nil {
+			return nil, fmt.Errorf("%s session lock: %w", backendName, err)
+		}
+		if !locked {
+			if opts.ResumeSessionID != "" {
+				return piSessionBusyResult(backendName, sessionPath), nil
+			}
+			return nil, fmt.Errorf("%s session file %q is already in use", backendName, sessionPath)
+		}
+		sessionLock = lockedFile
 		sessionID = sessionPath
 		args = buildPiArgs(sessionPath, opts, b.cfg.Logger)
+	}
+
+	runCtx, cancel := runContext(ctx, timeout)
+	var cmd *exec.Cmd
+	if mode == piRuntimeModeOMPCompatible {
+		cmd = b.cfg.commandAt(execName).exec(runCtx, args...)
+	} else {
 		cmd, _, _ = b.cfg.commandAt(execName).execVia(runCtx, choosePiInvocation, lookedUp, args, b.cfg.Logger)
 	}
 	hideAgentWindow(cmd)
@@ -282,6 +300,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		releasePiSessionFileLock(sessionLock)
 		cancel()
 		return nil, fmt.Errorf("%s stdout pipe: %w", backendName, err)
 	}
@@ -292,6 +311,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	// Pi has been observed to wait indefinitely when stdin never reaches EOF.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		releasePiSessionFileLock(sessionLock)
 		cancel()
 		return nil, fmt.Errorf("%s stdin pipe: %w", backendName, err)
 	}
@@ -302,6 +322,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 
 	if err := startOwnedProcessTree(cmd, b.cfg.Logger); err != nil {
 		closeStdin()
+		releasePiSessionFileLock(sessionLock)
 		cancel()
 		return nil, fmt.Errorf("start %s: %w", backendName, err)
 	}
@@ -331,6 +352,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	}()
 
 	go func() {
+		defer func() { releasePiSessionFileLock(sessionLock) }()
 		defer cancel()
 		defer close(msgCh)
 		defer close(resCh)
@@ -508,6 +530,12 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 
 		b.cfg.Logger.Info(backendName+" finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
+		// Publish the terminal result only after the transcript is available to
+		// a follow-up run. The result channel is buffered, so relying on a defer
+		// would let the receiver race ahead and spuriously treat the session as
+		// still busy after Pi had already exited.
+		releasePiSessionFileLock(sessionLock)
+		sessionLock = nil
 		resCh <- Result{
 			Status:         finalStatus,
 			Output:         output.String(),
@@ -542,6 +570,19 @@ func ompResumeWasRejected(requestedResume string, failed bool, texts ...string) 
 		}
 	}
 	return false
+}
+
+func piSessionBusyResult(label, sessionPath string) *Session {
+	msgCh := make(chan Message)
+	close(msgCh)
+	resCh := make(chan Result, 1)
+	resCh <- Result{
+		Status:                  "failed",
+		Error:                   fmt.Sprintf("%s session file %q is already in use by another execution", label, sessionPath),
+		ResumeRejectedTransient: true,
+	}
+	close(resCh)
+	return &Session{Messages: msgCh, Result: resCh}
 }
 
 // ── Pi event types ──

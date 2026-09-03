@@ -47,18 +47,18 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | DeepSeek Harness | `dsh` | ✓ | ✓ | `.dsh/skills/` |
 | DevEco Code | `deveco` | ✓ | — | `.deveco/skills/` |
 | Grok | `grok` | ✓ | ✓ | `.grok/skills/` |
-| Hermes | `hermes` | ✓ | ✓ | per-task `HERMES_HOME/skills/` |
+| Hermes | `hermes` | ✓ | ✓ | per-run `HERMES_HOME/skills/` |
 | Kimi CLI | `kimi` | ✓ | ✓ | `.kimi/skills/` |
 | Kiro CLI | `kiro-cli` | ✓ | ✓ | `.kiro/skills/` |
 | MiniMax Code | `mcode` | — | ✓ | `.minimax/skills/` |
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
 | Pi | `pi` | ✓ | — | `.pi/skills/` |
-| Oh-My-Pi | `omp` | ✓ | — | `.omp/skills/` |
+| OMP | `omp` | ✓ | — | `.omp/skills/` |
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
 | Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
-| QwenPaw | `qwenpaw` | ✓ | ✓ | per-task workspace `skills/` |
+| QwenPaw | `qwenpaw` | ✓ | ✓ | per-run workspace `skills/` |
 | Reasonix | `reasonix` | ✓ | ✓ | `.reasonix/skills/` |
 | Trae CLI | `traecli` | ✓ | ✓ | `.traecli/skills/` |
 | Dim | `dim` | ✓ | ✓ | — |
@@ -82,11 +82,11 @@ Different tools may use different model names. After switching AI coding tools, 
 
 ### Codex
 
-From OpenAI. Uses JSON-RPC 2.0, has stronger statefulness, and a finer-grained approve mechanism (manual approval for `exec_command` and `patch_apply`). MCP config is materialized into the per-task `$CODEX_HOME/config.toml`. **Session resumption works** through Codex app-server `thread/resume`; if the saved thread is missing or stale, Multica falls back to a fresh thread so the task can still run. MiniMax Code 0.1.2 advertises no session-loading capability over ACP, so Multica starts a fresh MCode session for a later run.
+All tools marked ✓ support continuing an existing session in a later run. The prerequisites are that the original session still exists and the run is executed by a runtime that can reach it. MiniMax Code 0.1.2 advertises no session-loading capability over ACP, so Multica starts a fresh MCode session for a later run.
 
 ### Copilot
 
-From GitHub. Model routing goes through your GitHub account entitlement — the tool doesn't select a model itself; GitHub decides which model you get. Placing skills in `.github/skills/` is GitHub CLI's native discovery mechanism.
+Retry and session-resumption rules are in [Runs](/tasks#manual-retry).
 
 ### Cursor
 
@@ -205,7 +205,9 @@ Each tool uses **its own** skill discovery path. Before a task runs, the Multica
 
 Whether a fallback-path tool actually reads this directory depends on the tool's own documentation — no guarantees. If your skills aren't taking effect for OpenClaw, check this first.
 
-For native project-level paths, repo-scoped discovery is expected: if the checked-out repository already contains a matching directory, the underlying tool can discover those committed skills on its own. You do not need to import those repo skills into Multica just to use them in that repo. Multica keeps the repo files intact. If a workspace skill has the same natural directory name, the daemon writes the workspace copy to a collision-free sibling such as `review-helper-multica`.
+- Codex uses a per-run `CODEX_HOME`, so skills are never written into the system-level Codex directory.
+- Hermes uses a per-run `HERMES_HOME`. Existing local configuration is still readable, but bound skills and session data are isolated per run. This isolation kicks in only when the agent has skills bound; runs without bound skills use the machine's original Hermes home.
+- OpenClaw uses `skills/` under the current run's working directory, and the per-run configuration sets that directory as the workspace.
 
 For creating and using skills, see [Skills](/skills).
 

@@ -15,11 +15,10 @@ import (
 
 const maxLegacyMigrationPrefix = 148
 
-// legacyDuplicateMigrationStems lists prefixes that were already duplicated
-// before this lint existed. It is a frozen historical record, not an escape
-// hatch: a new collision must be renumbered instead of added here. Prefix 362
-// was briefly listed and is deliberately absent again — the later of the two
-// migrations was renumbered to 376, which its idempotent DDL made safe.
+// legacyDuplicateMigrationStems records historical prefixes whose complete
+// filename sets are already part of the migration ledger. It is a frozen
+// compatibility record, not an escape hatch: a new collision must be
+// renumbered instead of added here.
 var legacyDuplicateMigrationStems = map[string][]string{
 	"020": {"020_issue_number", "020_task_session"},
 	"026": {"026_comment_reactions", "026_task_messages"},
@@ -53,6 +52,10 @@ var legacyDuplicateMigrationStems = map[string][]string{
 	"128": {"128_agent_task_queue_runtime_mcp_overlay", "128_autopilot_collaborator", "128_comment_routing_escalation"},
 	"131": {"131_gitlab_integration", "131_issue_origin_slack_chat"},
 	"137": {"137_gitlab_complete_integration", "137_search_index_pg_trgm_extension"},
+	"314": {"314_runtime_profile_add_omp", "314_workspace_mcp_config"},
+	"362": {"362_plugin_hook_engine", "362_runtime_profile_restore_omp"},
+	"438": {"438_agent_runtime_online_last_seen_index", "438_runtime_profile_restore_omp"},
+	"444": {"444_comment_recovery_settled_at", "444_runtime_profile_restore_omp_after_codearts"},
 }
 
 var migrationPrefixPattern = regexp.MustCompile(`^(\d+)_`)
@@ -144,7 +147,6 @@ func migrationStemsByPrefix(t *testing.T) map[string][]string {
 	}
 	return stemsByPrefix
 }
-
 func migrationFilesForLint(t *testing.T, pattern string) []string {
 	t.Helper()
 

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -317,8 +318,11 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	}
 	var closeStdinOnce sync.Once
 	closeStdin := func() { closeStdinOnce.Do(func() { _ = stdin.Close() }) }
+	// Watch stderr for Pi resume refusals while retaining the bounded diagnostic
+	// tail used by the shared backend error reporting.
 	stderrBuf := newStderrTail(newLogWriter(b.cfg.Logger, "["+backendName+":stderr] "), agentStderrTailBytes)
-	cmd.Stderr = stderrBuf
+	stderrWatch := newPiStderrWatcher(stderrBuf)
+	cmd.Stderr = stderrWatch
 
 	if err := startOwnedProcessTree(cmd, b.cfg.Logger); err != nil {
 		closeStdin()
@@ -526,7 +530,12 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			finalStatus = "failed"
 			finalError = lastTurnError
 		}
-		resumeRejected := mode == piRuntimeModeOMPCompatible && ompResumeWasRejected(opts.ResumeSessionID, finalStatus == "failed", finalError)
+		resumeRejected := false
+		if mode == piRuntimeModeOMPCompatible {
+			resumeRejected = ompResumeWasRejected(opts.ResumeSessionID, finalStatus == "failed", finalError, stderrBuf.Tail())
+		} else if opts.ResumeSessionID != "" {
+			resumeRejected = stderrWatch.resumeRefused()
+		}
 
 		b.cfg.Logger.Info(backendName+" finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
@@ -583,6 +592,64 @@ func piSessionBusyResult(label, sessionPath string) *Session {
 	}
 	close(resCh)
 	return &Session{Messages: msgCh, Result: resCh}
+}
+
+// piResumeRefusedMarker is Pi's message when a resumed transcript names a
+// working directory that no longer exists. Pi re-anchors a resumed run to the
+// cwd recorded in the session header; when that directory is gone it prints
+// this to stderr and exits 1 immediately, before any JSON event, any tool call
+// and any output (GH #8082).
+//
+// The daemon's resume gate already declines to hand Pi such a session, so in
+// normal operation this never fires. It is the second layer, and its reach is
+// exactly this one refusal arriving on a run the gate let through: the
+// directory disappearing between the gate's check and Pi's, a header the
+// gate's bounded scan did not reach or could not parse, or a Pi-family runtime
+// the gate does not model as refusing. It is a single phrase match, so it does
+// NOT generalise to some other refusal Pi might grow later.
+//
+// Without it such a run fails as a generic non-retryable process_failure and
+// the same stale pointer is served again on the next claim — the permanent
+// loop #8082 reported.
+const piResumeRefusedMarker = "Stored session working directory does not exist"
+
+// piStderrTailLimit bounds the retained stderr tail. The marker arrives in a
+// single write at startup, so this only has to be large enough that a partial
+// flush cannot split it apart.
+const piStderrTailLimit = 8 << 10
+
+// piStderrWatcher tees Pi's stderr to the debug log while retaining a bounded
+// tail to test for a resume refusal. Writes arrive from the child process
+// goroutine and resumeRefused is read from the result goroutine after Wait, so
+// the buffer is mutex-guarded rather than relying on that ordering.
+type piStderrWatcher struct {
+	log io.Writer
+
+	mu   sync.Mutex
+	tail []byte
+}
+
+func newPiStderrWatcher(log io.Writer) *piStderrWatcher {
+	return &piStderrWatcher{log: log}
+}
+
+func (w *piStderrWatcher) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.tail = append(w.tail, p...)
+	if len(w.tail) > piStderrTailLimit {
+		w.tail = w.tail[len(w.tail)-piStderrTailLimit:]
+	}
+	w.mu.Unlock()
+	// Never fail the child's stderr write on a logging problem: a short write
+	// here makes Pi's own writer error out mid-run.
+	_, _ = w.log.Write(p)
+	return len(p), nil
+}
+
+func (w *piStderrWatcher) resumeRefused() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return bytes.Contains(w.tail, []byte(piResumeRefusedMarker))
 }
 
 // ── Pi event types ──

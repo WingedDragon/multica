@@ -33,6 +33,7 @@ MULTICA_PUBLIC_URL=https://api.multica.example.com
 | `DATABASE_URL` | ローカルの `multica` データベース | PostgreSQL 接続文字列 |
 | `DATABASE_MAX_CONNS` | `25` | API プロセスあたりの最大データベース接続数 |
 | `DATABASE_MIN_CONNS` | `5` | API プロセスが保持する最小接続数 |
+| `DATABASE_SEARCH_WORK_MEM_MB` | `64` | 検索プランの各ノードに対する PostgreSQL `work_mem` 上限（MB）。`1`～`64` で引き下げ、`0` でデータベース／セッションの既定値を使用 |
 | `DATABASE_REPLICA_URL` | 空 | オプションの PostgreSQL 読み取り専用レプリカ接続文字列。新しい接続では読み取り専用状態が検証され、各機能はコードで結果整合性読み取りを明示的に選択する必要があります |
 | `DATABASE_REPLICA_MAX_CONNS` | `10` | API プロセスあたりの最大レプリカ接続数 |
 | `DATABASE_REPLICA_MIN_CONNS` | `0` | API プロセスが保持する最小レプリカ接続数 |
@@ -228,6 +229,7 @@ API key と base URL の両方が空の場合、このレイヤーは無効に�
 | `MULTICA_DAEMON_DEVICE_NAME` | ホスト名 | ランタイム一覧に表示されるデバイス名 |
 | `MULTICA_AGENT_RUNTIME_NAME` | `Local Agent` | ランタイムの表示名 |
 | `MULTICA_DAEMON_POLL_INTERVAL` | `30s` | ウェイクイベントがないときの実行ポーリング間隔 |
+| `MULTICA_DAEMON_WS_CLAIM_POLL_INTERVAL` | `3m` | 正常な WebSocket での claim 安全ポーリング上限。`MULTICA_DAEMON_POLL_INTERVAL` とは独立して設定され、下方向のジッターにより既定値は実際には `2m30s`–`2m45s` となり、旧 Server または結果が不確実な claim では通常のポーリング間隔を維持します |
 | `MULTICA_DAEMON_HEARTBEAT_INTERVAL` | `15s` | ハートビート間隔 |
 | `MULTICA_DAEMON_MAX_CONCURRENT_TASKS` | `20` | デーモン 1 つあたりの同時実行上限 |
 | `MULTICA_AGENT_TIMEOUT` | `0` | 1 回の実行の絶対時間上限。`0` は上限なし |
@@ -237,6 +239,7 @@ API key と base URL の両方が空の場合、このレイヤーは無効に�
 | `MULTICA_CODEX_SEMANTIC_INACTIVITY_TIMEOUT` | `MULTICA_AGENT_IDLE_WATCHDOG` と同じ | Codex のセマンティック静穏しきい値。Codex 自身のタイマーはツール実行中かどうかを判別できないため、独自の短い上限を持たず idle / tool 予算の大きい方に追従します |
 | `MULTICA_CODEX_FIRST_TURN_TIMEOUT` | `0` | Codex 初回ターンの無進捗上限を明示的に上書き；`0` はデフォルトを維持。実効の初回ターン待機は依然として `MULTICA_CODEX_SEMANTIC_INACTIVITY_TIMEOUT` と全体の実行タイムアウトに制限される——`MULTICA_CODEX_SEMANTIC_INACTIVITY_TIMEOUT` をこの値より厳密に大きく（余裕を持たせて）設定すること。さもないと待機はその値で打ち切られ、モデルカタログの起動リトライがスキップされる。同値では不十分：セマンティックタイマーが先に起動するため、同値の場合でもリトライが失われることがある |
 | `MULTICA_CODEX_HANDSHAKE_TIMEOUT` | `30s`、`thread/start`・`thread/resume`：`60s` | Codex app-server 起動ハンドシェイクの上限。明示的な値は両方の予算を一括で上書きします |
+| `MULTICA_CODEX_TURN_INTERRUPT_TIMEOUT` | `2s` | キャンセル後に Codex app-server が `turn/interrupt` を確認し `turn/completed` を送信するまでの猶予時間。プロセスを強制終了する前に最終トークン使用量を保持します。特に遅いホストでは daemon ログに記録された割り込み遅延を基に調整できます |
 | `MULTICA_DAEMON_AUTO_UPDATE` | Cloud は `true`、セルフホストは `false` | CLI の更新を自動でチェックして適用するか |
 | `MULTICA_DAEMON_AUTO_UPDATE_INTERVAL` | `6h` | 更新チェックの間隔 |
 | `MULTICA_DAEMON_AUTO_RELOAD` | `true` | 帯域外で置き換えられた `multica` バイナリ（`brew upgrade`、再ダウンロード、ローカルビルド）へ再起動して追従するかどうか。`MULTICA_DAEMON_AUTO_UPDATE` とは独立 |
@@ -276,6 +279,7 @@ multica config show
 | `workspaces_root` | `~` 配下のプロファイル別パス | 実行用作業ディレクトリのルート |
 | `max_concurrent_tasks` | `20` | 同時実行上限。`0` または空は未設定を意味します |
 | `poll_interval` | `30s` | 実行のポーリング間隔 |
+| `ws_claim_poll_interval` | `3m` | 正常な WebSocket での claim 安全ポーリング上限。`poll_interval` とは独立して設定され、Daemon は下方向のジッターを適用します |
 | `heartbeat_interval` | `15s` | ハートビート間隔 |
 | `agent_timeout` | 無制限 | 1 回の実行の絶対時間上限 |
 | `codex_semantic_inactivity_timeout` | 派生値 | Codex のセマンティック静穏しきい値。未設定なら idle と tool の watchdog 予算のうち大きい方を採用し、tool 予算が `0` の場合は idle 予算に回帰します。Codex 自身の `10m` が残るのは watchdog 一式を無効化したときだけです |

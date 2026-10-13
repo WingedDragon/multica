@@ -178,8 +178,16 @@ export ELECTRON_MIRROR="${ELECTRON_BUILDER_BINARIES_MIRROR}"
 # Note: the desktop wrapper (apps/desktop/scripts/package.mjs) already adds
 # `-c.mac.notarize=false` when APPLE_TEAM_ID is unset, so don't pass it again
 # here — duplicates parse as a string array and fail boolean validation.
+#
+# `--publish never` is required, not cosmetic: the tracked
+# apps/desktop/electron-builder.yml declares a GitHub publish target for the
+# upstream release flow, and electron-builder acts on it whenever CI is set
+# (this host exports CI=true). Without the flag the local self-hosted build
+# aborts on `GitHub Personal Access Token is not set`, because a fork build has
+# no GH_TOKEN and no upstream release to upload to.
 pnpm --filter @multica/desktop package \
   -c.mac.identity=- \
+  --publish never \
   "$@"
 
 echo ""

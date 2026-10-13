@@ -52,7 +52,7 @@ Multica は、普段使っている AI コーディングツールの代わり�
 | MiniMax Code | `mcode` | — | ✓ | `.minimax/skills/` |
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
-| Pi | `pi` | ✓ | — | `.pi/skills/` |
+| Pi | `pi` | ✓ | ✓ | `.pi/skills/` |
 | OMP | `omp` | ✓ | — | `.omp/skills/` |
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
@@ -159,6 +159,8 @@ MiniMax 提供の ACP ネイティブなコーディングエージェント（`
 **19 個のツールのうち、`mcp_config` を実際に消費するのは 12 個です: Claude Code、CodeBuddy、Codex、Cursor、Hermes、Kimi、Kiro CLI、OpenCode、OpenClaw、Qoder、Trae CLI、Grok**。残りの 5 個（Antigravity、Copilot、DevEco Code、Pi、OMP）はこのフィールドを受け取りますが、**無視します** — エラーも警告もなく、構成はただ効果を発揮しません。
 
 接続方式はツールごとに異なります: Claude Code と CodeBuddy は `--mcp-config` と `--strict-mcp-config` で受け取り、Codex は daemon 管理の `mcp_servers` ブロックをタスクごとの `$CODEX_HOME/config.toml` に書き込み、Cursor は `.cursor/mcp.json` とタスクごとの `CURSOR_DATA_DIR` 配下のプロジェクト approval を書き込みます。Hermes、Kimi、Kiro CLI、Qoder、Trae CLI、Grok は ACP `mcpServers` で受け取ります。OpenCode は `OPENCODE_CONFIG_CONTENT` 環境変数でインライン構成を受け取り、OpenClaw は Multica のタスクごとの config wrapper 経由で `mcp.servers` を受け取ります。OpenCode の経路はプロジェクトの `opencode.json` を書き換えません。
+
+Pi への管理 MCP 設定の引き渡しには Pi 0.99.0 以降が必要です。それより古い Pi でも、MCP 設定のないエージェントは引き続き実行できます。
 
 <Callout type="warning">
 エージェント構成で `mcp_config` を設定しても、MCP 列に ✅ がないツールを選んだ場合、MCP サーバーはそのエージェントに**何の効果**も及ぼしません。MCP 連携はツールごとに実装されています。

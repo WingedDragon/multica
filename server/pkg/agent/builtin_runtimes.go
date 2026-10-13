@@ -65,8 +65,8 @@ type BuiltinRuntime struct {
 
 // ModelDiscoveryFunc discovers available models for a runtime identity.
 // It receives the context and the resolved command — executable plus the
-// runtime's launch prefix — and returns a model catalog. Errors propagate so
-// callers can retain their manual model-selector fallback.
+// runtime's launch prefix — and returns a model catalog. Discovery failures
+// propagate to the picker, which shows the reason and supports manual entry.
 type ModelDiscoveryFunc func(ctx context.Context, runtimeCmd Command) ([]Model, error)
 
 // BuiltinRuntimes is the registry of automatically detected runtime
@@ -128,7 +128,7 @@ type backendOverrideApplicator interface {
 // the descriptor→backend contract in one file.
 func (b *piBackend) applyBuiltinRuntimeOverrides(desc BuiltinRuntime) {
 	b.defaultExecutable = desc.DefaultExecutable
-	b.providerLabel = desc.ProviderLabel
+	b.label = desc.ProviderLabel
 }
 
 // ResolveBackend is the single production entry point the daemon uses to
@@ -166,4 +166,21 @@ func NewRuntime(runtimeID string, cfg Config) (Backend, error) {
 	}
 	applicator.applyBuiltinRuntimeOverrides(desc)
 	return backend, nil
+}
+
+// ProfileRuntimeType preserves profiles authored before runtime identity was stored.
+func ProfileRuntimeType(runtimeType, protocolFamily string) string {
+	if runtimeType != "" {
+		return runtimeType
+	}
+	return protocolFamily
+}
+
+// RuntimeProtocolFamily resolves the compatibility target using the same registry
+// as backend construction and model discovery.
+func RuntimeProtocolFamily(runtimeType string) (string, bool) {
+	if desc, ok := BuiltinRuntimeByID(runtimeType); ok {
+		return desc.ProtocolFamily, true
+	}
+	return runtimeType, IsSupportedType(runtimeType)
 }

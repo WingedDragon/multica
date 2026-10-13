@@ -17,11 +17,15 @@ type ompModelCatalog struct {
 }
 
 type ompCatalogModel struct {
-	Provider string   `json:"provider"`
-	ID       string   `json:"id"`
-	Selector string   `json:"selector"`
-	Name     string   `json:"name"`
-	Thinking []string `json:"thinking"`
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	Selector string `json:"selector"`
+	Name     string `json:"name"`
+	// Reasoning gates whether the model exposes an effort picker at all, and
+	// Thinking carries the efforts it advertises. The two are independent: a
+	// reasoning model may advertise none.
+	Reasoning bool            `json:"reasoning"`
+	Thinking  json.RawMessage `json:"thinking"`
 }
 
 // discoverOMPModels runs `omp models --no-extensions --json` through the
@@ -107,14 +111,68 @@ func parseOMPModels(raw []byte) ([]Model, error) {
 			label = selector
 		}
 		model := Model{ID: selector, Label: label, Provider: entry.Provider}
-		if len(entry.Thinking) > 0 {
-			levels := make([]ThinkingLevel, 0, len(entry.Thinking))
-			for _, value := range entry.Thinking {
-				levels = append(levels, ThinkingLevel{Value: value, Label: strings.Title(value)}) //nolint:staticcheck
-			}
-			model.Thinking = &ModelThinking{SupportedLevels: levels}
+		if entry.Reasoning {
+			model.Thinking = ompThinkingFromCatalogEntry(entry.Reasoning, entry.Thinking)
 		}
 		models = append(models, model)
 	}
 	return models, nil
+}
+
+// ompThinkingFromCatalogEntry maps one `omp models --json` entry's reasoning
+// metadata onto Multica's per-model effort catalog.
+//
+// The rules are omp's own, verified against can1357/oh-my-pi v18.2.0:
+//
+//   - `models --json` emits `thinking` as a concrete effort array or `null`,
+//     never an object — see ModelJson/toModelJson in cli/models-cli.ts.
+//   - omp's Effort vocabulary is minimal|low|medium|high|xhigh|max. `off` is
+//     NOT an effort and so never appears in that array (catalog/src/effort.ts).
+//   - `reasoning: true` with `thinking: null` means "reasons, but exposes no
+//     controllable effort dial": getSupportedEfforts documents that exact case.
+//     Inferring efforts there would offer levels omp then clamps away, which is
+//     the silent mismatch MUL-7412 exists to remove.
+//   - `off` is honoured for any model whatever its effort array, because
+//     resolveThinkingLevelForModel returns it before clamping runs
+//     (coding-agent/src/thinking.ts).
+//
+// So a reasoning model gets `off` plus exactly the efforts the catalog
+// advertised, and nothing inferred. A non-reasoning model gets no picker at
+// all, matching how Multica hides pi's inert `off`-only control.
+//
+// `auto` is deliberately excluded: omp keeps AUTO_THINKING as a session-level
+// sentinel that is explicitly never an Effort or ThinkingLevel and is resolved
+// per turn, so it is not a per-model capability, and providerThinkingEnums
+// rejects it (MUL-7412).
+func ompThinkingFromCatalogEntry(reasoning bool, raw json.RawMessage) *ModelThinking {
+	if !reasoning {
+		return nil
+	}
+	// `off` is always available; the catalog only ever adds efforts on top.
+	advertised := map[string]bool{"off": true}
+	for _, effort := range parseOmpEfforts(raw) {
+		advertised[strings.TrimSpace(effort)] = true
+	}
+	levels := make([]ThinkingLevel, 0, len(piThinkingLevelOrder))
+	for _, value := range piThinkingLevelOrder {
+		if advertised[value] {
+			levels = append(levels, ThinkingLevel{Value: value, Label: piThinkingLevelLabels[value]})
+		}
+	}
+	return &ModelThinking{SupportedLevels: levels}
+}
+
+// parseOmpEfforts reads the effort array out of a catalog entry's `thinking`
+// field. An absent field, `null`, and any shape that is not an array of strings
+// all yield no efforts: a payload we cannot read is not evidence that the model
+// supports anything.
+func parseOmpEfforts(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var efforts []string
+	if err := json.Unmarshal(raw, &efforts); err != nil {
+		return nil
+	}
+	return efforts
 }

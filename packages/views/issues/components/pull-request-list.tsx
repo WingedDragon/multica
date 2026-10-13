@@ -2,13 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   CheckCircle2,
   ChevronRight,
   Circle,
   CircleDashed,
   CircleSlash,
+  Clock,
   GitMerge,
+  LoaderCircle,
+  MoreHorizontal,
+  Unlink,
   GitPullRequest,
   GitPullRequestArrow,
   GitPullRequestClosed,
@@ -19,11 +24,14 @@ import {
 } from "lucide-react";
 import {
   issuePullRequestsOptions,
-  deriveChecksStatus,
-  deriveMergeStatus,
+  derivePullRequestVerdict,
+  formatPullRequestDiffCount,
   shouldShowPullRequestStats,
-  type PullRequestChecksStatus,
-  type PullRequestMergeStatus,
+  stripIssueKeyFromTitle,
+  useLinkIssuePullRequest,
+  useSetIssuePRAutoComplete,
+  useUnlinkIssuePullRequest,
+  type PullRequestVerdict,
 } from "@multica/core/github";
 import {
   gitlabKeys,
@@ -31,14 +39,29 @@ import {
   issueGitLabMergeRequestsOptions,
 } from "@multica/core/gitlab";
 import { api } from "@multica/core/api";
+import { useWorkspaceId } from "@multica/core/hooks";
+import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import type {
   GitHubPullRequest,
+  GitHubPullRequestState,
   GitLabMergeRequest,
   GitLabPipelineStatus,
+  PRAutoComplete,
 } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@multica/ui/components/ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@multica/ui/components/ui/dropdown-menu";
 import { cn } from "@multica/ui/lib/utils";
 import { useT, useTimeAgo } from "../../i18n";
+import { useStatusLabel } from "../utils/status-label";
+import { StatusIcon } from "./status-icon";
 import { GitLabMergeRequestDetails } from "./gitlab-merge-request-details";
 
 type IssuesT = ReturnType<typeof useT<"issues">>["t"];
@@ -48,7 +71,7 @@ type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 const PR_LIMIT_BEFORE_COLLAPSE = 4;
 
 const STATE_ICON: Record<
-  string,
+  GitHubPullRequestState,
   { icon: React.ComponentType<{ className?: string }>; className: string }
 > = {
   open: { icon: GitPullRequestArrow, className: "text-emerald-600 dark:text-emerald-400" },
@@ -57,6 +80,8 @@ const STATE_ICON: Record<
   closed: { icon: GitPullRequestClosed, className: "text-rose-600 dark:text-rose-400" },
 };
 
+// One list holds both providers: a GitHub PR and a GitLab MR are rows of the
+// same sidebar section, sorted together by creation time.
 type PullRequestRowEntry =
   | { provider: "github"; item: GitHubPullRequest }
   | { provider: "gitlab"; item: GitLabMergeRequest };
@@ -113,9 +138,13 @@ const GITLAB_CHECKING_STATUSES = new Set([
 
 export function PullRequestList({
   issueId,
+  identifier = "",
   includeGitHub = true,
 }: {
   issueId: string;
+  /** The issue's identifier, for the "linked by MUL-1 in the title" label. */
+  identifier?: string;
+  /** GitLab merge requests stay listed when the workspace turns GitHub PRs off. */
   includeGitHub?: boolean;
 }) {
   const { t } = useT("issues");
@@ -125,9 +154,14 @@ export function PullRequestList({
     enabled: includeGitHub && !!issueId,
   });
   const gitlabQuery = useQuery(issueGitLabMergeRequestsOptions(issueId));
+  const prs = githubQuery.data?.pull_requests ?? [];
+  // Older backends send no auto-complete block and have no link/unlink
+  // endpoints, so the row actions stay hidden with it.
+  const autoComplete = githubQuery.data?.auto_complete ?? null;
+  const rowActions = autoComplete ? { issueId, identifier, autoComplete } : null;
   const rows: PullRequestRowEntry[] = [
     ...(includeGitHub
-      ? (githubQuery.data?.pull_requests ?? []).map((pr) => ({ provider: "github" as const, item: pr }))
+      ? prs.map((pr) => ({ provider: "github" as const, item: pr }))
       : []),
     ...(gitlabQuery.data?.merge_requests ?? []).map((mr) => ({ provider: "gitlab" as const, item: mr })),
   ].sort((a, b) => createdAt(b).localeCompare(createdAt(a)));
@@ -141,8 +175,8 @@ export function PullRequestList({
   }
   if (rows.length === 0) {
     return (
-      <p className="text-caption text-muted-foreground px-2">
-        {t(($) => $.detail.pull_requests_empty)}
+      <p className="px-2 text-caption text-muted-foreground">
+        {t(($) => $.detail.pull_requests_empty_title)}
       </p>
     );
   }
@@ -154,17 +188,41 @@ export function PullRequestList({
   const useCollapse = rows.length >= PR_LIMIT_BEFORE_COLLAPSE;
   const expandedHead = useCollapse ? rows.slice(0, PR_LIMIT_BEFORE_COLLAPSE - 1) : rows;
   const collapsedTail = useCollapse ? rows.slice(PR_LIMIT_BEFORE_COLLAPSE - 1) : [];
+  // The repo name only tells rows apart when the rows span repos; otherwise it
+  // spends the width the diff needs. The row tooltip keeps owner/repo#number.
+  const showRepo =
+    new Set(
+      rows.map((row) =>
+        row.provider === "github"
+          ? `${row.item.repo_owner}/${row.item.repo_name}`
+          : row.item.project_path,
+      ),
+    ).size > 1;
 
   return (
     <div className="space-y-1">
       {expandedHead.map((row) => (
-        <ProviderPullRequestRow key={`${row.provider}:${row.item.id}`} issueId={issueId} row={row} />
+        <ProviderPullRequestRow
+          key={`${row.provider}:${row.item.id}`}
+          issueId={issueId}
+          row={row}
+          identifier={identifier}
+          showRepo={showRepo}
+          actions={rowActions}
+        />
       ))}
       {useCollapse ? (
         <div className="space-y-1">
           {expanded
             ? collapsedTail.map((row) => (
-                <ProviderPullRequestRow key={`${row.provider}:${row.item.id}`} issueId={issueId} row={row} />
+                <ProviderPullRequestRow
+                  key={`${row.provider}:${row.item.id}`}
+                  issueId={issueId}
+                  row={row}
+                  identifier={identifier}
+                  showRepo={showRepo}
+                  actions={rowActions}
+                />
               ))
             : null}
           <button
@@ -178,15 +236,30 @@ export function PullRequestList({
           </button>
         </div>
       ) : null}
+      {autoComplete ? (
+        <AutoCompleteLine issueId={issueId} prs={prs} autoComplete={autoComplete} />
+      ) : null}
     </div>
   );
 }
 
-function ProviderPullRequestRow({ issueId, row }: { issueId: string; row: PullRequestRowEntry }) {
+function ProviderPullRequestRow({
+  issueId,
+  row,
+  identifier,
+  showRepo,
+  actions,
+}: {
+  issueId: string;
+  row: PullRequestRowEntry;
+  identifier: string;
+  showRepo: boolean;
+  actions: RowActions | null;
+}) {
   return row.provider === "github" ? (
-    <PullRequestRow pr={row.item} />
+    <PullRequestRow pr={row.item} identifier={identifier} showRepo={showRepo} actions={actions} />
   ) : (
-    <GitLabMergeRequestRow issueId={issueId} mr={row.item} />
+    <GitLabMergeRequestRow issueId={issueId} mr={row.item} showRepo={showRepo} />
   );
 }
 
@@ -194,58 +267,266 @@ function createdAt(row: PullRequestRowEntry): string {
   return row.provider === "github" ? row.item.pr_created_at : row.item.mr_created_at;
 }
 
-function PullRequestRow({ pr }: { pr: GitHubPullRequest }) {
-  const { t } = useT("issues");
-  const cfg = STATE_ICON[pr.state] ?? { icon: GitPullRequest, className: "" };
-  const StateIcon = cfg.icon;
-  const isDraft = pr.state === "draft";
-  const stateLabel = getStateLabel(pr.state, t);
+interface RowActions {
+  issueId: string;
+  identifier: string;
+  autoComplete: PRAutoComplete;
+}
 
+const prLabel = (pr: Pick<GitHubPullRequest, "number">) => `#${pr.number}`;
+
+/** Where a merge moves the issue; older backends only ever moved it to Done. */
+const mergeTarget = (autoComplete: PRAutoComplete) => autoComplete.target_status ?? "done";
+
+/** States in which the merge has nothing left to do for this issue. */
+const SETTLED = new Set(["terminal", "at_target"]);
+
+/**
+ * Remove a PR from the issue. The server remembers the removal (webhooks will
+ * not link it again) and treats it as a PR event, so removing the last
+ * unmerged PR can move the issue — the toast says so, and offers undo only
+ * when nothing else changed.
+ */
+function useUnlinkPullRequest(issueId: string, before: PRAutoComplete) {
+  const { t } = useT("issues");
+  const statusLabel = useStatusLabel(useWorkspaceId());
+  const unlink = useUnlinkIssuePullRequest(issueId);
+  const relink = useLinkIssuePullRequest(issueId);
+  return (pr: GitHubPullRequest) => {
+    unlink.mutate(pr.id, {
+      onSuccess: (after) => {
+        const moved =
+          !SETTLED.has(before.state) && !!after.auto_complete && SETTLED.has(after.auto_complete.state);
+        if (moved) {
+          toast.success(
+            t(($) => $.pr_automation.unlinked_moved, {
+              pr: prLabel(pr),
+              status: statusLabel(mergeTarget(after.auto_complete!)),
+            }),
+          );
+          return;
+        }
+        toast.success(t(($) => $.pr_automation.unlinked, { pr: prLabel(pr) }), {
+          action: {
+            label: t(($) => $.pr_automation.undo),
+            onClick: () => relink.mutate({ pull_request_id: pr.id }),
+          },
+        });
+      },
+      onError: () => toast.error(t(($) => $.pr_automation.unlink_failed)),
+    });
+  };
+}
+
+function linkSourceLabel(pr: GitHubPullRequest, identifier: string, t: IssuesT): string {
+  switch (pr.link_source) {
+    case "manual":
+      return t(($) => $.pr_automation.source_manual);
+    case "title":
+      return t(($) => $.pr_automation.source_title, { identifier });
+    case "branch":
+      return t(($) => $.pr_automation.source_branch);
+    default:
+      return t(($) => $.pr_automation.source_auto);
+  }
+}
+
+function PullRequestRowMenu({ pr, actions }: { pr: GitHubPullRequest; actions: RowActions }) {
+  const { t } = useT("issues");
+  const unlink = useUnlinkPullRequest(actions.issueId, actions.autoComplete);
   return (
-    <a
-      data-testid="pull-request-row"
-      href={pr.html_url}
-      target="_blank"
-      rel="noreferrer noopener"
-      className={cn(
-        "flex items-start gap-2 rounded-md px-2 py-1.5 -mx-2 hover:bg-accent/50 transition-colors group",
-        isDraft ? "opacity-80" : null,
-      )}
-    >
-      <StateIcon className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", cfg.className)} />
-      <div className="min-w-0 flex-1">
-        <p className="text-caption font-medium leading-snug truncate group-hover:text-foreground">
-          {pr.title}
-        </p>
-        <p className="text-micro text-muted-foreground truncate">
-          {pr.repo_owner}/{pr.repo_name}#{pr.number} · {stateLabel}
-          {pr.author_login ? ` · @${pr.author_login}` : null}
-        </p>
-        <PullRequestRowDetails pr={pr} />
-      </div>
-    </a>
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={t(($) => $.pr_automation.row_menu)}
+            className="absolute top-0.5 right-0 opacity-0 group-hover/pr:opacity-100 group-focus-within/pr:opacity-100 data-popup-open:opacity-100 [@media(pointer:coarse)]:opacity-100"
+          >
+            <MoreHorizontal />
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="font-normal">
+            {linkSourceLabel(pr, actions.identifier, t)}
+          </DropdownMenuLabel>
+          <DropdownMenuItem onClick={() => unlink(pr)}>
+            <Unlink />
+            {t(($) => $.pr_automation.unlink)}
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
-function PullRequestRowDetails({ pr }: { pr: GitHubPullRequest }) {
+// Splits a translated sentence around the target status so each language keeps
+// its own word order and the status renders as a chip, not plain text.
+const STATUS_SLOT = "\u2063status\u2063";
+
+/**
+ * One line under the PR list saying what "every linked PR merged → move the
+ * issue to the workspace's target status" will do for this issue, straight
+ * from the server's decision. It speaks only when a merge would move the issue
+ * or this issue opted out: a workspace that leaves status alone, a finished or
+ * triaged issue, one already in the target, and unknown states render nothing.
+ */
+function AutoCompleteLine({
+  issueId,
+  prs,
+  autoComplete,
+}: {
+  issueId: string;
+  prs: GitHubPullRequest[];
+  autoComplete: PRAutoComplete;
+}) {
+  const { t } = useT("issues");
+  const wsId = useWorkspaceId();
+  const catalog = useIssueStatuses(wsId);
+  const statusLabel = useStatusLabel(wsId);
+  const unlink = useUnlinkPullRequest(issueId, autoComplete);
+  const setAutoComplete = useSetIssuePRAutoComplete(issueId);
+  const named = autoComplete.pull_request_ids
+    .map((id) => prs.find((pr) => pr.id === id))
+    .filter((pr): pr is GitHubPullRequest => !!pr);
+  const list = named.map(prLabel).join(", ");
+  const action = (label: string, onClick: () => void) => (
+    <button
+      type="button"
+      onClick={onClick}
+      className="font-medium text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
+    >
+      {label}
+    </button>
+  );
+  const target = mergeTarget(autoComplete);
+  const withTarget = (sentence: string) => {
+    const [before, after = ""] = sentence.split(STATUS_SLOT);
+    return (
+      <>
+        {before}
+        <span className="inline-flex items-center gap-1 align-[-2px] font-medium text-foreground">
+          <StatusIcon
+            status={target}
+            category={catalog.categoryOf(target)}
+            color={catalog.colorOf(target)}
+            icon={catalog.iconOf(target)}
+            className="size-3"
+          />
+          {statusLabel(target)}
+        </span>
+        {after}
+      </>
+    );
+  };
+
+  let icon: React.ReactNode;
+  let body: React.ReactNode;
+  switch (autoComplete.state) {
+    case "waiting":
+      if (named.length === 0) return null;
+      icon = <CircleDashed className="text-muted-foreground" />;
+      body = withTarget(t(($) => $.pr_automation.waiting_to, { count: named.length, prs: list, status: STATUS_SLOT }));
+      break;
+    case "not_merged": {
+      if (named.length === 0) return null;
+      const only = named.length === 1 ? named[0] : undefined;
+      icon = <TriangleAlert className="text-amber-600 dark:text-amber-400" />;
+      body = (
+        <>
+          {t(($) => $.pr_automation.not_merged, { prs: list })}
+          {only ? <> · {action(t(($) => $.pr_automation.not_merged_action), () => unlink(only))}</> : null}
+        </>
+      );
+      break;
+    }
+    case "all_merged":
+      icon = <CheckCircle2 className="text-muted-foreground" />;
+      body = withTarget(t(($) => $.pr_automation.all_merged_to, { status: STATUS_SLOT }));
+      break;
+    case "issue_disabled":
+      icon = <CircleSlash className="text-muted-foreground" />;
+      body = (
+        <>
+          {t(($) => $.pr_automation.issue_disabled)} ·{" "}
+          {action(t(($) => $.pr_automation.issue_disabled_action), () =>
+            setAutoComplete.mutate(false, {
+              onError: () => toast.error(t(($) => $.pr_automation.update_failed)),
+            }),
+          )}
+        </>
+      );
+      break;
+    default:
+      return null;
+  }
+  return (
+    <p
+      data-testid="pr-auto-complete-line"
+      className="mt-1 flex items-start gap-1.5 border-t border-border pt-2 text-caption text-muted-foreground [&>svg]:mt-0.5 [&>svg]:size-3.5 [&>svg]:shrink-0"
+    >
+      {icon}
+      <span className="min-w-0">{body}</span>
+    </p>
+  );
+}
+
+// At most this many problem lines under a failed PR; the rest fold into "+N more".
+const PROBLEM_LIMIT = 3;
+
+type VerdictTone = "red" | "amber" | "green" | "violet" | "muted";
+
+// Pills reuse the state icons' palette. Their text sits one shade darker so
+// 11px copy on a 10% tint keeps AA contrast.
+const TONE_CLASS: Record<VerdictTone, string> = {
+  red: "bg-rose-600/10 text-rose-700 dark:bg-rose-400/15 dark:text-rose-400",
+  amber: "bg-amber-600/10 text-amber-700 dark:bg-amber-400/15 dark:text-amber-400",
+  green: "bg-emerald-600/10 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-400",
+  violet: "bg-violet-600/10 text-violet-700 dark:bg-violet-400/15 dark:text-violet-400",
+  muted: "bg-muted text-muted-foreground",
+};
+
+interface VerdictPillConfig {
+  icon: React.ComponentType<{ className?: string }>;
+  tone: VerdictTone;
+  label: string;
+  /** The longer form of the label, on hover. */
+  title?: string;
+  /** The icon spins while the work it reports is live. */
+  spin?: boolean;
+}
+
+/**
+ * One PR in the sidebar: the title, then `#number` (`repo#number` when the
+ * list spans repos) with the diff size and one verdict pill aligned right, so
+ * several PRs scan as a column. A failed PR also lists what failed. Owner,
+ * author, the full title and exact counts live in the row's tooltip.
+ */
+function PullRequestRow({
+  pr,
+  identifier,
+  showRepo,
+  actions,
+}: {
+  pr: GitHubPullRequest;
+  identifier: string;
+  showRepo: boolean;
+  actions: RowActions | null;
+}) {
   const { t } = useT("issues");
   const timeAgo = useTimeAgo();
+  const cfg = STATE_ICON[pr.state] ?? { icon: GitPullRequest, className: "" };
+  const StateIcon = cfg.icon;
+  const verdict = derivePullRequestVerdict(pr);
+  const pill = getVerdictPill(verdict, t);
+  const showStats = shouldShowPullRequestStats(pr);
 
-  const showStats = shouldShowPullRequestStats({
-    additions: pr.additions,
-    deletions: pr.deletions,
-    changed_files: pr.changed_files,
-  });
-
-  // Neither status element is shown for terminal PRs — the leading state icon
-  // already conveys merged / closed, and CI / mergeability are no longer
-  // actionable there.
+  // A stale snapshot (GitHub outage / revoked key) greys out the verdict and
+  // shows the snapshot age instead of hiding the last-known data.
   const isTerminal = pr.state === "merged" || pr.state === "closed";
-  const checksBadge = isTerminal ? null : getChecksBadge(deriveChecksStatus(pr), t);
-  const mergeBadge = isTerminal ? null : getMergeBadge(deriveMergeStatus(pr), t);
-
-  // A stale snapshot (GitHub outage / revoked key) greys out both elements and
-  // annotates them with the snapshot age instead of hiding the last-known data.
   const stale = !isTerminal && pr.snapshot_stale === true;
   const staleTitle = stale
     ? pr.snapshot_fetched_at
@@ -253,18 +534,218 @@ function PullRequestRowDetails({ pr }: { pr: GitHubPullRequest }) {
       : t(($) => $.detail.pull_request_snapshot_stale_unknown)
     : undefined;
 
-  if (!showStats && !checksBadge && !mergeBadge) return null;
+  const endedAt = pr.state === "merged" ? pr.merged_at : pr.state === "closed" ? pr.closed_at : null;
+  let meta: React.ReactNode = null;
+  if (isTerminal) {
+    meta = endedAt ? <span className="truncate">{timeAgo(endedAt)}</span> : null;
+  } else if (stale && pr.snapshot_fetched_at) {
+    meta = (
+      <span className="inline-flex min-w-0 items-center gap-1" title={staleTitle}>
+        <Clock className="size-3 shrink-0" />
+        <span className="truncate">{timeAgo(pr.snapshot_fetched_at)}</span>
+      </span>
+    );
+  } else if (showStats) {
+    meta = (
+      <span>
+        <span className="text-emerald-600 dark:text-emerald-400">+{formatPullRequestDiffCount(pr.additions ?? 0)}</span>{" "}
+        <span className="text-rose-600 dark:text-rose-400">−{formatPullRequestDiffCount(pr.deletions ?? 0)}</span>
+      </span>
+    );
+  }
 
+  // The row link and its menu are siblings: a button inside an anchor is
+  // invalid HTML, and the menu must not open the PR.
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-micro text-muted-foreground">
-      {showStats ? <PullRequestStats stats={pr} /> : null}
-      {checksBadge ? <PullRequestBadge badge={checksBadge} stale={stale} title={staleTitle} /> : null}
-      {mergeBadge ? <PullRequestBadge badge={mergeBadge} stale={stale} title={staleTitle} /> : null}
+    <div className="group/pr relative -mx-2 rounded-md transition-colors hover:bg-accent/50">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <a
+              data-testid="pull-request-row"
+              href={pr.html_url}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="flex items-start gap-2 rounded-md px-2 py-1.5"
+            />
+          }
+        >
+          <StateIcon className={cn("mt-px size-3.5 shrink-0", cfg.className)} />
+          <div className="min-w-0 flex-1">
+            <p className={cn("truncate text-caption font-medium", actions ? "pr-5" : null)}>
+              {stripIssueKeyFromTitle(pr.title, identifier)}
+            </p>
+            <div className="mt-1 flex items-center gap-2">
+              {/* The number and the pill never yield. Everything after the dot
+                  is one unit: short of room, it wraps whole onto the clipped
+                  second line instead of being cut mid-number (+312 → +31). */}
+              <p className="flex h-lh min-w-0 flex-1 flex-wrap items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-micro text-muted-foreground tabular-nums">
+                <span className="min-w-0 truncate">
+                  {showRepo ? pr.repo_name : null}#{pr.number}
+                </span>
+                {meta ? (
+                  <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <span aria-hidden="true" className="text-faint-foreground">
+                      ·
+                    </span>
+                    {meta}
+                  </span>
+                ) : null}
+              </p>
+              {pill ? <VerdictPill pill={pill} stale={stale} title={staleTitle} /> : null}
+            </div>
+            {verdict.kind === "failed" ? <PullRequestProblems verdict={verdict} stale={stale} /> : null}
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="left" align="start" className="flex-col items-start gap-0.5">
+          <span className="font-medium">{pr.title}</span>
+          <span className="text-muted-foreground">
+            {pr.repo_owner}/{pr.repo_name}#{pr.number}
+            {pr.author_login ? ` · @${pr.author_login}` : null}
+          </span>
+          {showStats ? (
+            <span className="text-muted-foreground tabular-nums">
+              +{(pr.additions ?? 0).toLocaleString()} −{(pr.deletions ?? 0).toLocaleString()} ·{" "}
+              {t(($) => $.detail.pull_request_card_files_count, { count: pr.changed_files ?? 0 })}
+            </span>
+          ) : null}
+        </TooltipContent>
+      </Tooltip>
+      {actions ? <PullRequestRowMenu pr={pr} actions={actions} /> : null}
     </div>
   );
 }
 
-function GitLabMergeRequestRow({ issueId, mr }: { issueId: string; mr: GitLabMergeRequest }) {
+function VerdictPill({ pill, stale, title }: { pill: VerdictPillConfig; stale: boolean; title?: string }) {
+  const Icon = pill.icon;
+  return (
+    <span
+      data-testid="pull-request-verdict"
+      title={title ?? pill.title}
+      className={cn(
+        "ml-auto inline-flex h-4.5 shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-1.5 text-micro font-medium tabular-nums",
+        TONE_CLASS[pill.tone],
+        stale ? "opacity-60" : null,
+      )}
+    >
+      {/* A stale snapshot can't vouch that the checks are still running. */}
+      <Icon className={cn("size-3 shrink-0", pill.spin && !stale ? "motion-safe:animate-spin" : null)} />
+      {pill.label}
+    </span>
+  );
+}
+
+/** What stands in the way of a failed PR: a conflict, then each failing check. */
+function PullRequestProblems({
+  verdict,
+  stale,
+}: {
+  verdict: Extract<PullRequestVerdict, { kind: "failed" }>;
+  stale: boolean;
+}) {
+  const { t } = useT("issues");
+  const items = [
+    ...(verdict.conflicting
+      ? [{ key: "conflict", icon: TriangleAlert, className: "text-amber-600 dark:text-amber-400", label: t(($) => $.detail.pull_request_merge_conflicting) }]
+      : []),
+    ...verdict.names.map((name) => ({ key: `check:${name}`, icon: XCircle, className: "text-rose-600 dark:text-rose-400", label: name })),
+  ];
+  if (items.length === 0) return null;
+  const shown = items.slice(0, PROBLEM_LIMIT);
+  const remaining = items.length - shown.length;
+  return (
+    <ul className={cn("mt-1.5 rounded-md bg-muted/70 px-2 py-1 text-micro", stale ? "opacity-60" : null)}>
+      {shown.map(({ key, icon: Icon, className, label }) => (
+        <li key={key} className="flex items-center gap-1.5 py-px">
+          <Icon className={cn("size-3 shrink-0", className)} />
+          <span className="truncate">{label}</span>
+        </li>
+      ))}
+      {remaining > 0 ? (
+        <li className="py-px pl-4.5 text-muted-foreground">
+          {t(($) => $.detail.pull_request_checks_more, { count: remaining })}
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
+function getVerdictPill(verdict: PullRequestVerdict, t: IssuesT): VerdictPillConfig | null {
+  switch (verdict.kind) {
+    case "merged":
+      return { icon: GitMerge, tone: "violet", label: t(($) => $.detail.pull_request_state_merged) };
+    case "closed":
+      return { icon: GitPullRequestClosed, tone: "muted", label: t(($) => $.detail.pull_request_state_closed) };
+    case "failed":
+      return {
+        icon: XCircle,
+        tone: "red",
+        label: t(($) => $.detail.pull_request_checks_failed_count, {
+          failed: verdict.failed,
+          total: verdict.total,
+        }),
+      };
+    case "conflicting":
+      return {
+        icon: TriangleAlert,
+        tone: "amber",
+        label: t(($) => $.detail.pull_request_verdict_conflicting),
+        title: t(($) => $.detail.pull_request_merge_conflicting),
+      };
+    case "running":
+      return {
+        icon: LoaderCircle,
+        tone: "amber",
+        spin: true,
+        label: `${verdict.passed}/${verdict.total}`,
+        title: t(($) => $.detail.pull_request_checks_running, {
+          passed: verdict.passed,
+          total: verdict.total,
+          running: verdict.running,
+        }),
+      };
+    case "behind":
+      return { icon: CircleSlash, tone: "muted", label: t(($) => $.detail.pull_request_merge_behind) };
+    case "blocked":
+      return { icon: CircleSlash, tone: "muted", label: t(($) => $.detail.pull_request_merge_blocked) };
+    case "draft":
+      return { icon: GitPullRequestDraft, tone: "muted", label: t(($) => $.detail.pull_request_state_draft) };
+    case "ready":
+      return {
+        icon: CheckCircle2,
+        tone: "green",
+        label: t(($) => $.detail.pull_request_verdict_ready),
+        title: t(($) => $.detail.pull_request_merge_ready),
+      };
+    case "passed":
+      return {
+        icon: CheckCircle2,
+        tone: "green",
+        label: t(($) => $.detail.pull_request_verdict_passed),
+        title: t(($) => $.detail.pull_request_checks_all_passed, { total: verdict.total }),
+      };
+    case "no_checks":
+      return { icon: Circle, tone: "muted", label: t(($) => $.detail.pull_request_checks_none) };
+    case "unknown":
+      return null;
+  }
+}
+
+/**
+ * One linked GitLab MR: the same row anatomy as a PR, but GitLab is the only
+ * side that can answer what still stands in front of the merge, so this row
+ * adds the pipeline strip, the derived merge-status pill, and — behind the
+ * details toggle — approvals, jobs and discussions.
+ */
+function GitLabMergeRequestRow({
+  issueId,
+  mr,
+  showRepo,
+}: {
+  issueId: string;
+  mr: GitLabMergeRequest;
+  showRepo: boolean;
+}) {
   const { t } = useT("issues");
   const qc = useQueryClient();
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -272,15 +753,19 @@ function GitLabMergeRequestRow({ issueId, mr }: { issueId: string; mr: GitLabMer
   const StateIcon = cfg.icon;
   const counts = getGitLabPipelineCounts(mr.pipeline_status);
   const kind = deriveGitLabMergeRequestStatusKind(mr, counts);
+  const statusPill = getGitLabVerdictPill(kind, t);
+  // A draft MR keeps whatever GitLab says about the merge; the prefix only
+  // marks that the merge stays blocked until the MR is marked ready.
+  const pill =
+    mr.state === "draft"
+      ? { ...statusPill, label: t(($) => $.detail.pull_request_card_draft_prefix, { status: statusPill.label }) }
+      : statusPill;
   const segments = deriveGitLabMergeRequestProgressSegments(mr.state, counts);
   const showStats = shouldShowPullRequestStats({
     additions: mr.additions,
     deletions: mr.deletions,
     changed_files: mr.changed_files,
   });
-  const statusText = getGitLabStatusText(kind, t);
-  const draftPrefix = mr.state === "draft";
-  const stateLabel = getStateLabel(mr.state, t);
   const branchLabel = getGitLabBranchLabel(mr);
   const detailsQuery = useQuery({
     ...gitlabMergeRequestDetailsOptions(issueId, mr.id),
@@ -296,109 +781,100 @@ function GitLabMergeRequestRow({ issueId, mr }: { issueId: string; mr: GitLabMer
     },
   });
 
+  // The row link and this row's buttons are siblings: a button inside an
+  // anchor is invalid HTML, and refreshing must not open the MR.
   return (
-    <div
-      data-testid="pull-request-row"
-      className={cn(
-        "flex items-start gap-2 rounded-md px-2 py-1.5 -mx-2 hover:bg-accent/50 transition-colors group",
-        draftPrefix ? "opacity-80" : null,
-      )}
-    >
-      <StateIcon className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", cfg.className)} />
-      <div className="min-w-0 flex-1">
-        <a
-          href={mr.web_url}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="block text-xs font-medium leading-snug truncate group-hover:text-foreground"
-        >
-          {mr.title}
-        </a>
-        <p className="text-[11px] text-muted-foreground truncate">
-          {t(($) => $.detail.merge_request_provider_gitlab)} · {mr.project_path}!{mr.iid}
-          {branchLabel ? ` · ${branchLabel}` : null} · {stateLabel}
-          {mr.author_username ? ` · @${mr.author_username}` : null}
-        </p>
-        <GitLabMergeRequestRowDetails
-          mr={mr}
-          segments={segments}
-          showStats={showStats}
-          statusText={
-            draftPrefix
-              ? t(($) => $.detail.pull_request_card_draft_prefix, { status: statusText })
-            : statusText
+    <div className="group/pr relative -mx-2 rounded-md transition-colors hover:bg-accent/50">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <a
+              data-testid="pull-request-row"
+              href={mr.web_url}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="flex items-start gap-2 rounded-md px-2 py-1.5"
+            />
           }
-        />
-        <div className="mt-1 flex items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-6 px-1.5 text-[11px]"
-            onClick={() => setDetailsOpen((open) => !open)}
-          >
-            <ChevronRight className={cn("h-3 w-3 transition-transform", detailsOpen && "rotate-90")} />
-            {t(($) => $.detail.gitlab_details)}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            aria-label={t(($) => $.detail.gitlab_refresh)}
-            disabled={refresh.isPending}
-            onClick={() => refresh.mutate()}
-          >
-            <RefreshCw className={cn("h-3 w-3", refresh.isPending && "animate-spin")} />
-          </Button>
-        </div>
-        {detailsOpen ? (
-          detailsQuery.isLoading ? (
-            <p className="mt-2 text-[11px] text-muted-foreground">
-              {t(($) => $.detail.gitlab_loading_details)}
-            </p>
-          ) : detailsQuery.data ? (
-            <GitLabMergeRequestDetails issueId={issueId} details={detailsQuery.data} />
-          ) : null
-        ) : null}
+        >
+          <StateIcon className={cn("mt-px size-3.5 shrink-0", cfg.className)} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-caption font-medium">{mr.title}</p>
+            <div className="mt-1 flex items-center gap-2">
+              <p className="flex h-lh min-w-0 flex-1 flex-wrap items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-micro text-muted-foreground tabular-nums">
+                <span className="min-w-0 truncate">
+                  {showRepo ? mr.project_path : null}!{mr.iid}
+                </span>
+                <span className="inline-flex min-w-0 items-center gap-1.5">
+                  <span aria-hidden="true" className="text-faint-foreground">
+                    ·
+                  </span>
+                  <span className="truncate">{t(($) => $.detail.merge_request_provider_gitlab)}</span>
+                </span>
+                {branchLabel ? (
+                  <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <span aria-hidden="true" className="text-faint-foreground">
+                      ·
+                    </span>
+                    <span className="truncate">{branchLabel}</span>
+                  </span>
+                ) : null}
+              </p>
+              <PullRequestProgressStrip segments={segments} />
+              <VerdictPill pill={pill} stale={false} />
+            </div>
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="left" align="start" className="flex-col items-start gap-0.5">
+          <span className="font-medium">{mr.title}</span>
+          <span className="text-muted-foreground">
+            {mr.project_path}!{mr.iid}
+            {mr.author_username ? ` · @${mr.author_username}` : null}
+          </span>
+          {showStats ? (
+            <span className="text-muted-foreground tabular-nums">
+              +{(mr.additions ?? 0).toLocaleString()} −{(mr.deletions ?? 0).toLocaleString()} ·{" "}
+              {t(($) => $.detail.pull_request_card_files_count, { count: mr.changed_files ?? 0 })}
+            </span>
+          ) : null}
+        </TooltipContent>
+      </Tooltip>
+      <div className="flex items-center gap-1 px-2 pb-1.5">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 px-1.5 text-[11px]"
+          aria-expanded={detailsOpen}
+          onClick={() => setDetailsOpen((open) => !open)}
+        >
+          <ChevronRight className={cn("h-3 w-3 transition-transform", detailsOpen && "rotate-90")} />
+          {t(($) => $.detail.gitlab_details)}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6"
+          aria-label={t(($) => $.detail.gitlab_refresh)}
+          disabled={refresh.isPending}
+          onClick={() => refresh.mutate()}
+        >
+          <RefreshCw className={cn("h-3 w-3", refresh.isPending && "animate-spin")} />
+        </Button>
       </div>
+      {detailsOpen ? (
+        detailsQuery.isLoading ? (
+          <p className="px-2 pb-1.5 text-[11px] text-muted-foreground">
+            {t(($) => $.detail.gitlab_loading_details)}
+          </p>
+        ) : detailsQuery.data ? (
+          <div className="px-2 pb-1.5">
+            <GitLabMergeRequestDetails issueId={issueId} details={detailsQuery.data} />
+          </div>
+        ) : null
+      ) : null}
     </div>
-  );
-}
-
-function GitLabMergeRequestRowDetails({
-  mr,
-  segments,
-  showStats,
-  statusText,
-}: {
-  mr: GitLabMergeRequest;
-  segments: PullRequestProgressSegment[] | null;
-  showStats: boolean;
-  statusText: string;
-}) {
-  return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
-      {showStats ? <PullRequestStats stats={mr} /> : null}
-      <PullRequestProgressStrip segments={segments} />
-      <span className="truncate">{statusText}</span>
-    </div>
-  );
-}
-
-function PullRequestStats({ stats }: { stats: { additions?: number; deletions?: number; changed_files?: number } }) {
-  const { t } = useT("issues");
-  return (
-    <span className="inline-flex items-center gap-1.5 tabular-nums">
-      <span className="text-emerald-600 dark:text-emerald-400">+{stats.additions ?? 0}</span>
-      <span className="text-rose-600 dark:text-rose-400">−{stats.deletions ?? 0}</span>
-      <span aria-hidden="true">·</span>
-      <span>
-        {t(($) => $.detail.pull_request_card_files_count, {
-          count: stats.changed_files ?? 0,
-        })}
-      </span>
-    </span>
   );
 }
 
@@ -426,152 +902,6 @@ function PullRequestProgressStrip({
   );
 }
 
-interface PullRequestBadgeConfig {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  className: string;
-}
-
-function PullRequestBadge({
-  badge,
-  stale,
-  title,
-}: {
-  badge: PullRequestBadgeConfig;
-  stale?: boolean;
-  title?: string;
-}) {
-  const Icon = badge.icon;
-  return (
-    <span
-      className={cn("inline-flex items-center gap-1", stale ? "opacity-60" : null)}
-      title={title}
-    >
-      <Icon className={cn("h-3 w-3", badge.className)} />
-      {badge.label}
-    </span>
-  );
-}
-
-// CI element. A current snapshot with a null rollup renders "no checks yet";
-// an unavailable/disabled snapshot renders nothing.
-function getChecksBadge(
-  status: PullRequestChecksStatus,
-  t: IssuesT,
-): PullRequestBadgeConfig | null {
-  switch (status.kind) {
-    case "failed":
-      return {
-        icon: XCircle,
-        className: "text-rose-600 dark:text-rose-400",
-        label: checksFailedLabel(status, t),
-      };
-    case "pending":
-      return {
-        icon: CircleDashed,
-        className: "text-amber-600 dark:text-amber-400",
-        label: t(($) => $.detail.pull_request_checks_running, {
-          passed: status.passed,
-          total: status.total,
-          running: status.running,
-        }),
-      };
-    case "passed":
-      return {
-        icon: CheckCircle2,
-        className: "text-emerald-600 dark:text-emerald-400",
-        label: t(($) => $.detail.pull_request_checks_all_passed, { total: status.total }),
-      };
-    case "none":
-      return {
-        icon: Circle,
-        className: "text-muted-foreground",
-        label: t(($) => $.detail.pull_request_checks_none),
-      };
-    case "unavailable":
-      return null;
-  }
-}
-
-function checksFailedLabel(
-  status: Extract<PullRequestChecksStatus, { kind: "failed" }>,
-  t: IssuesT,
-): string {
-  const shown = status.names.slice(0, 2);
-  if (shown.length === 0) {
-    return t(($) => $.detail.pull_request_checks_failed_count, {
-      failed: status.failed,
-      total: status.total,
-    });
-  }
-  const remaining = status.names.length - shown.length;
-  const parts = [...shown];
-  if (remaining > 0) {
-    parts.push(t(($) => $.detail.pull_request_checks_more, { count: remaining }));
-  }
-  return t(($) => $.detail.pull_request_checks_failed_named, {
-    failed: status.failed,
-    total: status.total,
-    names: parts.join(", "),
-  });
-}
-
-// Mergeability element. Returns null for the "none" state — when GitHub has not
-// decided, the card asserts neither "conflict" nor "ready".
-function getMergeBadge(status: PullRequestMergeStatus, t: IssuesT): PullRequestBadgeConfig | null {
-  switch (status.kind) {
-    case "conflicting":
-      return {
-        icon: TriangleAlert,
-        className: "text-amber-600 dark:text-amber-400",
-        label: t(($) => $.detail.pull_request_merge_conflicting),
-      };
-    case "ready":
-      return {
-        icon: CheckCircle2,
-        className: "text-emerald-600 dark:text-emerald-400",
-        label: t(($) => $.detail.pull_request_merge_ready),
-      };
-    case "blocked":
-      return {
-        icon: CircleSlash,
-        className: "text-muted-foreground",
-        label: t(($) => $.detail.pull_request_merge_blocked),
-      };
-    case "behind":
-      return {
-        icon: CircleSlash,
-        className: "text-muted-foreground",
-        label: t(($) => $.detail.pull_request_merge_behind),
-      };
-    case "unstable":
-      return {
-        icon: CircleSlash,
-        className: "text-muted-foreground",
-        label: t(($) => $.detail.pull_request_merge_unstable),
-      };
-    case "has_hooks":
-      return {
-        icon: CircleSlash,
-        className: "text-muted-foreground",
-        label: t(($) => $.detail.pull_request_merge_has_hooks),
-      };
-    case "none":
-      return null;
-  }
-}
-
-function getStateLabel(state: string, t: IssuesT): string {
-  return state === "open"
-    ? t(($) => $.detail.pull_request_state_open)
-    : state === "draft"
-      ? t(($) => $.detail.pull_request_state_draft)
-      : state === "merged"
-        ? t(($) => $.detail.pull_request_state_merged)
-        : state === "closed"
-          ? t(($) => $.detail.pull_request_state_closed)
-          : state;
-}
 function getGitLabPipelineCounts(status: GitLabPipelineStatus | string | null): {
   failed: number;
   pending: number;
@@ -634,29 +964,76 @@ function deriveGitLabMergeRequestProgressSegments(
   return segments;
 }
 
-function getGitLabStatusText(kind: GitLabMergeRequestStatusKind, t: IssuesT): string {
+/**
+ * The GitLab row's one verdict pill. GitLab derives a single merge status
+ * where GitHub reports a rollup plus a mergeability, so this pill carries the
+ * fork's own merge-status copy instead of GitHub's labels.
+ */
+function getGitLabVerdictPill(kind: GitLabMergeRequestStatusKind, t: IssuesT): VerdictPillConfig {
   switch (kind) {
-    case "gitlab_blocked":
-      return t(($) => $.detail.merge_request_card_status_blocked);
-    case "gitlab_checking":
-      return t(($) => $.detail.merge_request_card_status_checking);
-    case "gitlab_unknown":
-      return t(($) => $.detail.merge_request_card_status_unknown);
-    case "closed":
-      return t(($) => $.detail.pull_request_card_status_closed);
     case "merged":
-      return t(($) => $.detail.pull_request_card_status_merged);
+      return { icon: GitMerge, tone: "violet", label: t(($) => $.detail.pull_request_card_status_merged) };
+    case "closed":
+      return {
+        icon: GitPullRequestClosed,
+        tone: "muted",
+        label: t(($) => $.detail.pull_request_card_status_closed),
+      };
     case "conflicts":
-      return t(($) => $.detail.pull_request_card_status_conflicts);
+      return {
+        icon: TriangleAlert,
+        tone: "amber",
+        label: t(($) => $.detail.pull_request_card_status_conflicts),
+      };
     case "checks_failed":
-      return t(($) => $.detail.pull_request_card_status_checks_failed);
+      return {
+        icon: XCircle,
+        tone: "red",
+        label: t(($) => $.detail.pull_request_card_status_checks_failed),
+      };
     case "checks_pending":
-      return t(($) => $.detail.pull_request_card_status_checks_pending);
+      return {
+        icon: LoaderCircle,
+        tone: "amber",
+        spin: true,
+        label: t(($) => $.detail.pull_request_card_status_checks_pending),
+      };
     case "checks_passed":
-      return t(($) => $.detail.pull_request_card_status_checks_passed);
+      return {
+        icon: CheckCircle2,
+        tone: "green",
+        label: t(($) => $.detail.pull_request_card_status_checks_passed),
+      };
     case "ready":
-      return t(($) => $.detail.pull_request_card_status_ready);
+      return {
+        icon: CheckCircle2,
+        tone: "green",
+        label: t(($) => $.detail.pull_request_card_status_ready),
+      };
+    case "gitlab_blocked":
+      return {
+        icon: CircleSlash,
+        tone: "muted",
+        label: t(($) => $.detail.merge_request_card_status_blocked),
+      };
+    case "gitlab_checking":
+      return {
+        icon: LoaderCircle,
+        tone: "amber",
+        spin: true,
+        label: t(($) => $.detail.merge_request_card_status_checking),
+      };
+    case "gitlab_unknown":
+      return {
+        icon: Circle,
+        tone: "muted",
+        label: t(($) => $.detail.merge_request_card_status_unknown),
+      };
     case "unknown":
-      return t(($) => $.detail.pull_request_card_status_unknown);
+      return {
+        icon: Circle,
+        tone: "muted",
+        label: t(($) => $.detail.pull_request_card_status_unknown),
+      };
   }
 }

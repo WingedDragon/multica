@@ -494,6 +494,12 @@ func TestModelKnownIncompatibleWithProvider(t *testing.T) {
 			want:     false,
 		},
 		{
+			name:     "codex bundled gpt-6-astra is compatible",
+			provider: "codex",
+			model:    "gpt-6-astra",
+			want:     false,
+		},
+		{
 			name:     "codex model is incompatible with claude",
 			provider: "claude",
 			model:    "o3",
@@ -524,10 +530,10 @@ func TestModelKnownIncompatibleWithProvider(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "unknown claude base stays incompatible after context normalization",
+			name:     "future claude model stays compatible after context normalization",
 			provider: "claude",
-			model:    "claude-fake-9[1m]",
-			want:     true,
+			model:    "claude-opus-5-5[1m]",
+			want:     false,
 		},
 		{
 			name:     "provider-prefixed openai model is incompatible with codex",
@@ -542,10 +548,10 @@ func TestModelKnownIncompatibleWithProvider(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "known openai-looking model outside codex catalog is incompatible",
+			name:     "future codex model is not rejected by the static fallback catalog",
 			provider: "codex",
-			model:    "gpt-99",
-			want:     true,
+			model:    "gpt-6-sol",
+			want:     false,
 		},
 		{
 			name:     "unknown custom model is not classified",

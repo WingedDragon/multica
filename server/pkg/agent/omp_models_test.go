@@ -18,6 +18,7 @@ const ompCatalogFixture = `{
       "id": "gpt-5",
       "selector": "openai/gpt-5",
       "name": "GPT 5",
+      "reasoning": true,
       "thinking": ["low", "high"]
     },
     {
@@ -65,7 +66,7 @@ func TestParseOMPModels_MapsSelectorsAndThinking(t *testing.T) {
 	if got.Thinking == nil || got.Thinking.DefaultLevel != "" {
 		t.Fatalf("first model thinking = %+v, want levels with no default", got.Thinking)
 	}
-	wantLevels := []ThinkingLevel{{Value: "low", Label: "Low"}, {Value: "high", Label: "High"}}
+	wantLevels := []ThinkingLevel{{Value: "off", Label: "Off"}, {Value: "low", Label: "Low"}, {Value: "high", Label: "High"}}
 	if len(got.Thinking.SupportedLevels) != len(wantLevels) {
 		t.Fatalf("thinking levels = %+v, want %+v", got.Thinking.SupportedLevels, wantLevels)
 	}

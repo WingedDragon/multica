@@ -53,7 +53,7 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | MiniMax Code | `mcode` | — | ✓ | `.minimax/skills/` |
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
-| Pi | `pi` | ✓ | — | `.pi/skills/` |
+| Pi | `pi` | ✓ | ✓ | `.pi/skills/` |
 | OMP | `omp` | ✓ | — | `.omp/skills/` |
 | Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
 | Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
@@ -169,12 +169,14 @@ The session resumption mechanism is covered in [Tasks](/tasks#can-a-task-continu
 
 ## MCP configuration: provider-specific support
 
-**Of the 19 tools, fourteen consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Qwen Code, Trae, Grok, and MiniMax Code**. The other five (Antigravity, Copilot, DevEco Code, Pi, and OMP) accept the field but **ignore it** — no error, no warning, the config just has no effect.
+**Of the 25 tools, fifteen consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Pi, Qoder, Qwen Code, Trae, Grok, and MiniMax Code**. The other ten (Antigravity, Copilot, CodeArts, DeepSeek Harness, DevEco Code, Dim, OMP, Qoder CN CLI, QwenPaw, and Reasonix) accept the field but **ignore it** — no error, no warning, the config just has no effect.
 
 The runtime paths are provider-specific: Claude Code, CodeBuddy, and Qwen Code receive it through daemon-owned temporary JSON files passed with `--mcp-config` (mode `0600` on POSIX systems because MCP configs may embed API tokens); Claude Code and CodeBuddy additionally use `--strict-mcp-config`; Codex writes a daemon-managed `mcp_servers` block into the per-task `$CODEX_HOME/config.toml`; Cursor writes `.cursor/mcp.json` plus per-task project approvals under `CURSOR_DATA_DIR`; Hermes, Kimi, Kiro CLI, Qoder, Trae, Grok, and MiniMax Code receive ACP `mcpServers`; OpenCode receives inline config through `OPENCODE_CONFIG_CONTENT`; OpenClaw receives `mcp.servers` through Multica's per-task config wrapper. OpenCode's path does **not** rewrite the project's `opencode.json`.
 
+Managed MCP delivery for Pi requires Pi 0.99.0 or later. Older Pi versions continue to run agents that have no MCP configuration.
+
 <Callout type="warning">
-If you set `mcp_config` in an agent configuration but pick a tool not marked ✅ in the MCP column, your MCP servers have no effect on Antigravity, Copilot, DevEco Code, Pi, or OMP.
+If you set `mcp_config` in an agent configuration but pick a tool not marked ✅ in the MCP column, your MCP servers have no effect on that agent's runtime.
 </Callout>
 
 ## Where skill files go

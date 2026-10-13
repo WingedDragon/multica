@@ -35,6 +35,14 @@ import { useActorName } from "@multica/core/workspace/hooks";
 import type { OctoInstallation } from "@multica/core/types";
 import { ActorAvatar } from "../../common/actor-avatar";
 
+/**
+ * Copy for the Octo row on the Channels page and for its search entry. Unlike
+ * upstream's chat platforms, Octo ships no locale block — its page is
+ * English-only — so the channel's label and description live with it.
+ */
+export const OCTO_CHANNEL_LABEL = "Octo";
+export const OCTO_CHANNEL_DESCRIPTION = "Connect Octo IM bots to agents.";
+
 export function OctoTab() {
   const wsId = useWorkspaceId();
   const user = useAuthStore((s) => s.user);

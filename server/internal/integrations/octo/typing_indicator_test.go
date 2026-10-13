@@ -73,7 +73,7 @@ func TestTypingIndicatorSendsReadReceiptAndRepeatsTypingUntilSettled(t *testing.
 		Platform: db.ChannelInstallation{ID: testUUID(1), Config: octoInstallConfigJSON()},
 	}
 
-	mgr.OnIngested(context.Background(), inst, msg, sessionID)
+	mgr.OnIngested(context.Background(), inst, msg, sessionID, sessionID)
 
 	if !waitForCount(t, 200*time.Millisecond, func() bool {
 		typing, receipts := sender.counts()
@@ -90,7 +90,7 @@ func TestTypingIndicatorSendsReadReceiptAndRepeatsTypingUntilSettled(t *testing.
 		t.Fatalf("read receipt message ids = %+v", receipt.MessageIDs)
 	}
 
-	mgr.OnSettled(context.Background(), sessionID)
+	mgr.OnSettled(context.Background(), sessionID, engine.TypingSettlement{})
 	typingBefore, _ := sender.counts()
 	time.Sleep(35 * time.Millisecond)
 	typingAfter, _ := sender.counts()
@@ -116,7 +116,7 @@ func TestTypingIndicatorClearsOnTaskFailedEvent(t *testing.T) {
 			ChatID:      "group-1",
 			ChatType:    channel.ChatTypeGroup,
 		},
-	}, sessionID)
+	}, sessionID, sessionID)
 
 	if !waitForCount(t, 200*time.Millisecond, func() bool {
 		typing, _ := sender.counts()

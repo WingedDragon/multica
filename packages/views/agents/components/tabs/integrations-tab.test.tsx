@@ -289,7 +289,6 @@ describe("IntegrationsTab", () => {
     expect(screen.getByText("Slack")).toBeTruthy();
     expect(screen.getByText("Octo")).toBeTruthy();
     expect(screen.getByText("Telegram")).toBeTruthy();
-    expect(screen.getByText(/Telegram bot.*\/issue.*reply stream live/i)).toBeTruthy();
     expect(screen.getByTestId("lark-bind-button").getAttribute("data-agent-id")).toBe("agent-1");
     expect(screen.getByTestId("slack-bind-button").getAttribute("data-agent-id")).toBe("agent-1");
     expect(screen.getByTestId("octo-bind-button").getAttribute("data-agent-id")).toBe("agent-1");

@@ -66,7 +66,7 @@ func (m *TypingIndicatorManager) Register(bus *events.Bus) {
 	bus.Subscribe(protocol.EventTaskFailed, m.handleEvent)
 }
 
-func (m *TypingIndicatorManager) OnIngested(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, sessionID pgtype.UUID) {
+func (m *TypingIndicatorManager) OnIngested(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, sessionID pgtype.UUID, chatMessageID pgtype.UUID) {
 	row, ok := inst.Platform.(db.ChannelInstallation)
 	if !ok {
 		return
@@ -100,7 +100,7 @@ func (m *TypingIndicatorManager) OnIngested(ctx context.Context, inst engine.Res
 	go m.repeatTyping(loopCtx, sender, target, sessionID)
 }
 
-func (m *TypingIndicatorManager) OnSettled(ctx context.Context, sessionID pgtype.UUID) {
+func (m *TypingIndicatorManager) OnSettled(ctx context.Context, sessionID pgtype.UUID, scope engine.TypingSettlement) {
 	m.Clear(ctx, sessionID)
 }
 

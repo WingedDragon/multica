@@ -2061,7 +2061,7 @@ func TestGateResumeToReachableSession(t *testing.T) {
 			task := Task{PriorSessionID: tt.sessionID, PriorWorkDir: priorDir}
 			taskCtx := execenv.TaskContextForEnv{PriorSessionResumed: tt.sessionID != ""}
 
-			reachable := gateResumeToReachableSession(&task, &taskCtx, "claude", envDir, !tt.sessionHomeUnreachable, false, slog.Default())
+			reachable := gateResumeToReachableSession(&task, &taskCtx, "claude", envDir, !tt.sessionHomeUnreachable, false, false, slog.Default())
 
 			if reachable != tt.wantReused {
 				t.Fatalf("reachable = %v, want %v", reachable, tt.wantReused)
@@ -2077,6 +2077,68 @@ func TestGateResumeToReachableSession(t *testing.T) {
 			wantUnavailable := tt.sessionID != "" && tt.wantSession == ""
 			if taskCtx.PriorSessionResumeUnavailable != wantUnavailable {
 				t.Fatalf("PriorSessionResumeUnavailable = %v, want %v", taskCtx.PriorSessionResumeUnavailable, wantUnavailable)
+			}
+		})
+	}
+}
+
+func TestGateCodexResumeAcrossLocalWorktrees(t *testing.T) {
+	priorDir, workDir, codexHome := t.TempDir(), t.TempDir(), t.TempDir()
+	rollout := filepath.Join(codexHome, "sessions", "2026", "10", "13", "rollout-2026-10-13T00-00-00-session-1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(rollout), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rollout, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name           string
+		provider       string
+		localWorktree  *execenv.LocalWorktree
+		localDirectory bool
+		stableStore    bool
+		codexHome      bool
+		sameWorkdir    bool
+		rolloutPresent bool
+		wantResume     bool
+	}{
+		{name: "continued branch and rollout", provider: "codex", localWorktree: &execenv.LocalWorktree{Continued: true}, stableStore: true, codexHome: true, rolloutPresent: true, wantResume: true},
+		{name: "new branch", provider: "codex", localWorktree: &execenv.LocalWorktree{}, stableStore: true, codexHome: true, rolloutPresent: true},
+		{name: "missing conversation key", provider: "codex", localWorktree: &execenv.LocalWorktree{Continued: true}, codexHome: true, rolloutPresent: true},
+		{name: "missing Codex home", provider: "codex", localWorktree: &execenv.LocalWorktree{Continued: true}, stableStore: true, rolloutPresent: true},
+		{name: "missing rollout", provider: "codex", localWorktree: &execenv.LocalWorktree{Continued: true}, stableStore: true, codexHome: true},
+		{name: "managed workdir", provider: "codex", stableStore: true, codexHome: true, rolloutPresent: true},
+		{name: "in-place changed workdir", provider: "codex", localDirectory: true, stableStore: true, codexHome: true, rolloutPresent: true},
+		{name: "in-place same workdir", provider: "codex", localDirectory: true, stableStore: true, codexHome: true, sameWorkdir: true, rolloutPresent: true, wantResume: true},
+		{name: "other provider", provider: "claude", localWorktree: &execenv.LocalWorktree{Continued: true}, stableStore: true, codexHome: true, rolloutPresent: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := Task{PriorSessionID: "session-1", PriorWorkDir: priorDir}
+			taskCtx := execenv.TaskContextForEnv{AgentID: "agent-1", PriorSessionResumed: true}
+			if tt.stableStore {
+				taskCtx.IssueID = "issue-1"
+			}
+			env := &execenv.Environment{WorkDir: workDir, LocalDirectory: tt.localDirectory, LocalWorktree: tt.localWorktree}
+			if tt.codexHome {
+				env.CodexHome = codexHome
+			}
+			if tt.sameWorkdir {
+				env.WorkDir = priorDir
+			}
+			store := execenv.CodexSessionStorePath("test", taskCtx)
+			eligible := codexWorktreeResumeEligible(env, store)
+			if got := gateResumeToReachableSession(&task, &taskCtx, tt.provider, env.WorkDir, true, false, eligible, slog.Default()); got {
+				if tt.provider == "codex" && !tt.rolloutPresent {
+					gateCodexResumeToRolloutPresence(&task, &taskCtx, tt.provider, t.TempDir(), slog.Default())
+				} else {
+					gateCodexResumeToRolloutPresence(&task, &taskCtx, tt.provider, env.CodexHome, slog.Default())
+				}
+			}
+			if got := task.PriorSessionID != ""; got != tt.wantResume {
+				t.Fatalf("resume=%v, want %v", got, tt.wantResume)
+			}
+			if taskCtx.PriorSessionResumed != tt.wantResume || task.PriorSessionResumeUnavailable == tt.wantResume || taskCtx.PriorSessionResumeUnavailable == tt.wantResume {
+				t.Fatalf("inconsistent resume state: task=%+v taskCtx=%+v", task, taskCtx)
 			}
 		})
 	}
@@ -2113,7 +2175,7 @@ func TestGateHermesResumeToSessionHome(t *testing.T) {
 			task := Task{PriorSessionID: "session-1", PriorWorkDir: priorDir}
 			taskCtx := execenv.TaskContextForEnv{PriorSessionResumed: true}
 			got := gateResumeToReachableSession(&task, &taskCtx, "hermes", workDir,
-				sessionHomeReachable("hermes", env, tt.envReused), false, slog.Default())
+				sessionHomeReachable("hermes", env, tt.envReused), false, false, slog.Default())
 			if got != tt.want || (task.PriorSessionID == "session-1") != tt.want || taskCtx.PriorSessionResumed != tt.want {
 				t.Fatalf("resume = %v, session = %q, resumed = %v; want %v", got, task.PriorSessionID, taskCtx.PriorSessionResumed, tt.want)
 			}
@@ -2175,7 +2237,7 @@ func TestHermesPreparedSessionReachability(t *testing.T) {
 			task := Task{PriorSessionID: "session-1", PriorWorkDir: first.WorkDir}
 			taskCtx := execenv.TaskContextForEnv{PriorSessionResumed: true}
 			if got := gateResumeToReachableSession(&task, &taskCtx, "hermes", env.WorkDir,
-				sessionHomeReachable("hermes", env, false), false, slog.Default()); got != tt.want {
+				sessionHomeReachable("hermes", env, false), false, false, slog.Default()); got != tt.want {
 				t.Fatalf("reachable = %v, want %v", got, tt.want)
 			}
 		})
@@ -2202,7 +2264,7 @@ func TestGatePiResumeToSessionFile(t *testing.T) {
 	task := Task{PriorSessionID: sessionFile, PriorWorkDir: priorDir}
 	taskCtx := execenv.TaskContextForEnv{PriorSessionResumed: true}
 
-	reachable := gateResumeToReachableSession(&task, &taskCtx, "pi", envDir, true, providerRefusesMissingSessionCwd("pi", true), slog.Default())
+	reachable := gateResumeToReachableSession(&task, &taskCtx, "pi", envDir, true, providerRefusesMissingSessionCwd("pi", true), false, slog.Default())
 
 	if !reachable {
 		t.Fatal("Pi session file should remain reachable across workdirs")
@@ -2254,7 +2316,7 @@ func TestGateOMPResumeAcrossWorkdirs(t *testing.T) {
 			task := Task{PriorSessionID: "omp-session-1", PriorWorkDir: priorDir}
 			taskCtx := execenv.TaskContextForEnv{PriorSessionResumed: true}
 
-			reachable := gateResumeToReachableSession(&task, &taskCtx, "omp", envDir, test.sessionHomeReachable, false, slog.Default())
+			reachable := gateResumeToReachableSession(&task, &taskCtx, "omp", envDir, test.sessionHomeReachable, false, false, slog.Default())
 
 			if reachable != test.wantReachable {
 				t.Fatalf("reachable = %v, want %v", reachable, test.wantReachable)
@@ -2314,7 +2376,7 @@ func TestGatePiResumeDropsUnusableSessionFile(t *testing.T) {
 			task := Task{PriorSessionID: sessionPath, PriorWorkDir: workDir}
 			taskCtx := execenv.TaskContextForEnv{PriorSessionResumed: true}
 
-			reachable := gateResumeToReachableSession(&task, &taskCtx, "pi", workDir, true, providerRefusesMissingSessionCwd("pi", true), slog.Default())
+			reachable := gateResumeToReachableSession(&task, &taskCtx, "pi", workDir, true, providerRefusesMissingSessionCwd("pi", true), false, slog.Default())
 
 			if reachable {
 				t.Fatalf("%s Pi session was treated as reachable", test.name)
@@ -2485,7 +2547,7 @@ func TestGatePiResumeChecksRecordedCwd(t *testing.T) {
 				task := Task{PriorSessionID: sessionPath, PriorWorkDir: liveDir}
 				taskCtx := execenv.TaskContextForEnv{PriorSessionResumed: true}
 
-				reachable := gateResumeToReachableSession(&task, &taskCtx, provider, workDir, true, runtime.refusesMissingCwd, slog.Default())
+				reachable := gateResumeToReachableSession(&task, &taskCtx, provider, workDir, true, runtime.refusesMissingCwd, false, slog.Default())
 
 				if reachable != wantReachable {
 					t.Fatalf("reachable = %v, want %v", reachable, wantReachable)
@@ -5057,11 +5119,70 @@ func TestEnsureRepoReadyReportsSyncFailure(t *testing.T) {
 	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil, nil)
 
 	err := d.ensureRepoReady(context.Background(), "ws-1", missingRepo)
-	if err == nil || !strings.Contains(err.Error(), "repo is configured but not synced:") {
-		t.Fatalf("expected sync failure error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "repo is configured but not synced: git clone --bare:") {
+		t.Fatalf("expected sync failure error with git's output, got %v", err)
 	}
-	if got := d.workspaceLastRepoSyncErr("ws-1"); got == "" {
-		t.Fatal("expected lastRepoSyncErr to be recorded")
+}
+
+// syncRaceRepoCache fails the sync of failURL and, on the Lookup that
+// follows, runs a successful background sync of another repo: the window in
+// which a shared per-workspace error slot used to be cleared.
+type syncRaceRepoCache struct {
+	d          *Daemon
+	failURL    string
+	mu         sync.Mutex
+	failedOnce bool
+	raced      bool
+}
+
+func (c *syncRaceRepoCache) Lookup(string, string) string {
+	c.mu.Lock()
+	race := c.failedOnce && !c.raced
+	c.raced = c.raced || race
+	c.mu.Unlock()
+	if race {
+		c.d.syncWorkspaceRepos("ws-1", []RepoData{{URL: "https://example.com/other.git"}})
+	}
+	return ""
+}
+func (c *syncRaceRepoCache) BarePath(string, string) string { return "" }
+func (c *syncRaceRepoCache) Sync(_ string, repos []repocache.RepoInfo) error {
+	for _, r := range repos {
+		if r.URL == c.failURL {
+			c.mu.Lock()
+			c.failedOnce = true
+			c.mu.Unlock()
+			return errors.New("git clone --bare: server certificate verification failed")
+		}
+	}
+	return nil
+}
+func (c *syncRaceRepoCache) WithRepoLock(_ string, fn func() error) error { return fn() }
+func (c *syncRaceRepoCache) CreateWorktree(repocache.WorktreeParams) (*repocache.WorktreeResult, error) {
+	return nil, nil
+}
+
+func TestEnsureRepoReadyKeepsSyncFailureDespiteConcurrentSuccess(t *testing.T) {
+	t.Parallel()
+
+	const repoURL = "https://devops.example.com/team/_git/app"
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(WorkspaceReposResponse{
+			WorkspaceID:  "ws-1",
+			Repos:        []RepoData{{URL: repoURL}},
+			ReposVersion: "v1",
+		})
+	})
+	cache := &syncRaceRepoCache{d: d, failURL: repoURL}
+	d.repoCache = cache
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil, nil)
+
+	err := d.ensureRepoReady(context.Background(), "ws-1", repoURL)
+	if !cache.raced {
+		t.Fatal("test did not exercise the concurrent sync")
+	}
+	if err == nil || !strings.Contains(err.Error(), "server certificate verification failed") {
+		t.Fatalf("expected the checkout's own sync failure, got %v", err)
 	}
 }
 

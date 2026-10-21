@@ -1,7 +1,7 @@
 // Package agent provides a unified interface for executing prompts via
 // coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, DevEco Code,
 // OpenClaw, Hermes, Pi, Oh-My-Pi, Cursor, Kimi, Reasonix, Kiro, Antigravity, Qoder,
-// Trae, Grok, Qwen Code, QwenPaw, MiniMax Code). It
+// Trae, Grok, Qwen Code, QwenPaw, MiniMax Code, Meta Muse Code). It
 // mirrors the happy-cli AgentBackend pattern, translated to idiomatic Go.
 package agent
 
@@ -133,6 +133,11 @@ type ExecOptions struct {
 	// through Claude Code's --settings flag. It currently carries restrictive
 	// runtime-skill overrides only; other providers ignore it.
 	ClaudeSettingsPath string
+	// CursorHookCommand is the argv of the multica hook relay (the daemon's own
+	// binary followed by CursorHookHelperArg). The cursor backend needs it, with
+	// EnableTaskSupplement, to accept additional messages; other providers
+	// ignore it.
+	CursorHookCommand []string
 	// piMcpExtensionPath is set by piBackend.Execute after it writes the
 	// temporary MCP extension. The daemon does not fill it.
 	piMcpExtensionPath string
@@ -312,7 +317,7 @@ type Result struct {
 
 // Config configures a Backend instance.
 type Config struct {
-	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, codearts, openclaw, hermes, pi, omp, cursor, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim, zeroclaw)
+	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, codearts, openclaw, hermes, pi, omp, cursor, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, muse, dim, zeroclaw)
 	CLIVersion     string            // detected version paired with ExecutablePath; vendor-specific usage semantics also require BuiltinRuntime
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
@@ -347,7 +352,7 @@ type Config struct {
 }
 
 // New creates a Backend for the given agent type.
-// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "codearts", "deveco", "openclaw", "hermes", "pi", "omp", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "mcode".
+// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "codearts", "deveco", "openclaw", "hermes", "pi", "omp", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "mcode", "muse".
 //
 // SupportedTypes is the canonical whitelist of agent types eligible to back a
 // custom runtime profile. It MUST stay in lockstep with the
@@ -360,7 +365,7 @@ type Config struct {
 // to add zeroclaw, and migration 441 to add codearts): a custom runtime profile
 // may only be based on a backend Multica officially supports.
 // omp is fork-local, so every upstream rebuild of this constraint drops it;
-// migrations 362, 438, and 444 restored it, and
+// migrations 362, 438, 444, and 585 restored it, and
 // TestSupportedTypesMatchesMigrationWhitelist now parses the newest constraint
 // migration so the next upstream rebuild fails in tests rather than in
 // production.
@@ -396,6 +401,7 @@ var SupportedTypes = []string{
 	"qwen",
 	"qwenpaw",
 	"mcode",
+	"muse",
 	"dim",
 	"zeroclaw",
 }
@@ -503,6 +509,8 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &qwenpawBackend{cfg: cfg}, nil
 	case "mcode":
 		return &mcodeBackend{cfg: cfg}, nil
+	case "muse":
+		return &museBackend{cfg: cfg}, nil
 	case "zeroclaw":
 		return &zeroclawBackend{cfg: cfg}, nil
 	default:
@@ -551,6 +559,7 @@ var launchHeaders = map[string]string{
 	"qwenpaw":     "qwenpaw acp",
 	"dim":         "dim acp",
 	"mcode":       "mcode acp",
+	"muse":        "muse serve (msp)",
 	"zeroclaw":    "zeroclaw acp",
 }
 

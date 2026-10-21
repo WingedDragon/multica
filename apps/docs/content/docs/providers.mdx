@@ -51,6 +51,7 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | Kimi CLI | `kimi` | ✓ | ✓ | `.kimi/skills/` |
 | Kiro CLI | `kiro-cli` | ✓ | ✓ | `.kiro/skills/` |
 | MiniMax Code | `mcode` | — | ✓ | `.minimax/skills/` |
+| Muse Code | `muse` | ✓ | — | `.agents/skills/` |
 | OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
 | OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
 | Pi | `pi` | ✓ | ✓ | `.pi/skills/` |
@@ -133,6 +134,8 @@ From Inflection AI, minimalist. **Session resumption is unusual** — the sessio
 [Oh My Pi](https://omp.sh) is a standalone coding agent, **not a Pi alias**. Multica launches it non-interactively as `omp -p --mode json --session-dir <dir>`, reads its Pi-compatible JSON event stream, and saves the emitted string session ID for `--resume <id>` on the next task. Models and their supported thinking levels are discovered from `omp models --no-extensions --json`; Multica sends the selected model selector with `--model` and the selected level with `--thinking`. Assigned workspace skills are written to `.omp/skills/` for OMP's native discovery.
 
 To enable OMP, install and authenticate it first, then make `omp` available on the daemon's `PATH` or set `MULTICA_OMP_PATH` to its absolute executable path. Restart or refresh the daemon so it detects the runtime. Set `MULTICA_OMP_MODEL` to an OMP selector to choose a daemon-wide default, or choose a discovered selector for an individual agent. OMP currently ignores an agent's `mcp_config`.
+
+Self-hosted upgrades must apply migration `585_runtime_profile_restore_omp_after_muse` so both OMP (`omp`) and Muse (`muse`) remain available as custom runtime profile protocol families.
 
 ### Qoder
 

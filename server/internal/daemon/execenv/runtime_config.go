@@ -229,7 +229,7 @@ func runtimeConfigPath(workDir, provider string) string {
 		// disabled the root brief is never loaded, while .omp/AGENTS.md is
 		// loaded in both `-p` print mode and interactive sessions.
 		return filepath.Join(workDir, ".omp", "AGENTS.md")
-	case "codex", "copilot", "opencode", "codearts", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw", "mcode", "dim", "zeroclaw":
+	case "codex", "copilot", "opencode", "codearts", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw", "mcode", "muse", "dim", "zeroclaw":
 		return filepath.Join(workDir, "AGENTS.md")
 	default:
 		return ""

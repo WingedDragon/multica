@@ -37,6 +37,7 @@ import { useCreateIssue } from "@multica/core/issues/mutations";
 import { useT } from "../i18n";
 import { createShortcutChord, type ShortcutChord } from "@multica/core/shortcuts";
 import { ShortcutKeycaps } from "../common/shortcut-keycaps";
+import { contextMenuOrigin } from "@multica/ui/lib/context-menu-origin";
 import { Toggle, toggleVariants } from "@multica/ui/components/ui/toggle";
 import { Separator } from "@multica/ui/components/ui/separator";
 import {
@@ -51,7 +52,7 @@ import {
   PopoverContent,
 } from "@multica/ui/components/ui/popover";
 import { Input } from "@multica/ui/components/ui/input";
-import { Button } from "@multica/ui/components/ui/button";
+import { IconButton } from "@multica/ui/components/common/icon-button";
 import {
   Bold,
   Italic,
@@ -74,7 +75,7 @@ import {
   FilePlus,
   Loader2,
   MessageSquarePlus,
-} from "lucide-react";
+} from "@multica/ui/icons";
 
 // Helpers
 
@@ -216,35 +217,35 @@ function LinkEditBar({
           if (e.key === "Escape") { e.preventDefault(); onClose(); editor.commands.focus(); }
         }}
       />
-      <Button
+      <IconButton
         size="icon-xs"
         variant="ghost"
-        aria-label={t(($) => $.bubble_menu.link_edit.apply)}
+        label={t(($) => $.bubble_menu.link_edit.apply)}
         onClick={apply}
         onMouseDown={(e) => e.preventDefault()}
       >
         <Check className="size-3.5" />
-      </Button>
+      </IconButton>
       {existingHref && (
-        <Button
+        <IconButton
           size="icon-xs"
           variant="ghost"
-          aria-label={t(($) => $.bubble_menu.link_edit.remove)}
+          label={t(($) => $.bubble_menu.link_edit.remove)}
           onClick={remove}
           onMouseDown={(e) => e.preventDefault()}
         >
           <Unlink className="size-3.5" />
-        </Button>
+        </IconButton>
       )}
-      <Button
+      <IconButton
         size="icon-xs"
         variant="ghost"
-        aria-label={t(($) => $.bubble_menu.link_edit.close)}
+        label={t(($) => $.bubble_menu.link_edit.close)}
         onClick={() => { onClose(); editor.commands.focus(); }}
         onMouseDown={(e) => e.preventDefault()}
       >
         <X className="size-3.5" />
-      </Button>
+      </IconButton>
     </div>
   );
 }
@@ -547,8 +548,9 @@ function EditorBubbleMenu({
       setTimeout(() => {
         if (editor.isDestroyed) return;
         const el = floatingRef.current;
-        if (el && el.contains(document.activeElement)) return;
-        if (editor.view.hasFocus()) return;
+        const active = contextMenuOrigin(document.activeElement);
+        if (el && el.contains(active)) return;
+        if (editor.view.hasFocus() || editor.view.dom.contains(active)) return;
         setVisible(false);
       }, 0);
     };
@@ -585,7 +587,7 @@ function EditorBubbleMenu({
   useEffect(() => {
     if (!visible) return;
     const handle = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
+      const target = contextMenuOrigin(e.target) as HTMLElement;
       if (editor.view.dom.contains(target)) return;
       if (floatingRef.current?.contains(target)) return;
       setVisible(false);
@@ -610,6 +612,8 @@ function EditorBubbleMenu({
   return (
     <div
       ref={floatingRef}
+      data-mc="editor-toolbar"
+      data-mode={mode === "link-edit" ? "link" : "format"}
       style={{
         position: "fixed",
         zIndex: 50,

@@ -121,6 +121,13 @@ describe("runtimeDisplayLabel", () => {
         provider: "zeroclaw",
       }),
     ).toBe("box (ZeroClaw)");
+    expect(
+      runtimeDisplayLabel({
+        name: "ZCode (host)",
+        custom_name: "box",
+        provider: "zcode",
+      }),
+    ).toBe("box (ZCode)");
   });
 
   it("uses OMP as the provider display name", () => {

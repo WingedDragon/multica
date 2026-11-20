@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +57,16 @@ var legacyDuplicateMigrationStems = map[string][]string{
 	"444": {"444_comment_recovery_settled_at", "444_runtime_profile_restore_omp_after_codearts"},
 }
 
+// deployedMergeMigrationPrefixCollisions records the one intentional
+// cross-branch collision: the self-host OMP migration at 585 is already
+// applied and cannot be renamed, while upstream's issue-workflow migration
+// uses the same numeric prefix. Migration versions use full stems, so these
+// two names remain distinct. Keep this exact; new collisions must be reviewed
+// for deployment state and dependency ordering before any rename.
+var deployedMergeMigrationPrefixCollisions = map[string][]string{
+	"585": {"585_issue_workflow_owner", "585_runtime_profile_restore_omp_after_muse"},
+}
+
 var migrationPrefixPattern = regexp.MustCompile(`^(\d+)_`)
 
 func TestMigrationNumericPrefixesAreUnique(t *testing.T) {
@@ -87,6 +96,12 @@ func TestMigrationNumericPrefixesAreUnique(t *testing.T) {
 		// TestMigrationNumericPrefixesStayUniqueAfterLegacySet owns their exact
 		// stem sets, so they are grandfathered here.
 		if _, frozen := legacyDuplicateMigrationStems[prefix]; frozen {
+			continue
+		}
+
+		// This intentional cross-branch collision is validated against its
+		// exact stem set in TestMigrationNumericPrefixesStayUniqueAfterLegacySet.
+		if _, mergeCollision := deployedMergeMigrationPrefixCollisions[prefix]; mergeCollision {
 			continue
 		}
 		if previous, exists := stemByNumber[number]; exists {
@@ -131,6 +146,16 @@ func TestMigrationNumericPrefixesStayUniqueAfterLegacySet(t *testing.T) {
 			sort.Strings(expected)
 			if !reflect.DeepEqual(stems, expected) {
 				t.Errorf("legacy duplicate migration prefix %s changed: got %v, want %v; do not add to or rename historical duplicate-prefix migrations", prefix, stems, expected)
+			}
+			continue
+		}
+
+		mergeCollisionStems, isMergeCollision := deployedMergeMigrationPrefixCollisions[prefix]
+		if isMergeCollision {
+			expected := append([]string(nil), mergeCollisionStems...)
+			sort.Strings(expected)
+			if !reflect.DeepEqual(stems, expected) {
+				t.Errorf("deployed merge migration prefix %s changed: got %v, want %v", prefix, stems, expected)
 			}
 			continue
 		}
@@ -202,11 +227,13 @@ func migrationFilesForLint(t *testing.T, pattern string) []string {
 func realMigrationsDir(t *testing.T) string {
 	t.Helper()
 
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve migration lint test path")
+	// Relative to the package directory go test runs in; runtime.Caller
+	// would return a module path under -trimpath.
+	dir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		t.Fatalf("resolve migrations dir: %v", err)
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(self), "..", "..", "migrations"))
+	return dir
 }
 
 func splitMigrationFilename(name string) (stem, direction string, ok bool) {

@@ -316,8 +316,9 @@ func TestBuildOmpArgsOwnsSessionSelection(t *testing.T) {
 	const dir = "/shared/sessions"
 	hostile := []string{
 		"--session", "other", "--session-dir", "/other", "--session-dir=/other",
-		"--continue", "--resume", "other", "--resume=other", "--model", "other",
-		"--thinking", "low", "--tools", "read",
+		"--continue", "-c", "--no-session", "--resume", "other", "--resume=other",
+		"-r", "other", "--fork", "other", "--session-id", "other",
+		"--model", "other", "--thinking", "low", "--tools", "read",
 	}
 
 	fresh := buildOMPArgs(dir, ExecOptions{CustomArgs: hostile}, slog.Default())

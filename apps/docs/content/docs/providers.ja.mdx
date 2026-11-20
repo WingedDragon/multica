@@ -1,13 +1,21 @@
 ---
-title: AI コーディングツール対応表
-description: Multica は 19 個の AI コーディングツールをサポートしています。すべて同じインターフェースを実装していますが、機能の詳細は大きく異なります。
+title: AI コーディングツール比較
+description: Multica が対応する AI コーディングツールと、モデル、MCP、セッション、スキルの違いを比較します。
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
+import { ProviderPickerDemo } from "@/components/demos/provider-picker-demo";
 
-Multica は、普段使っている AI コーディングツールの代わりになるものではありません。ランタイムがコンピューターにインストール済みでログイン済みのツールを呼び出し、実行の進捗と結果をタスクに書き戻します。
+Multica は、普段使っている AI コーディングツールの代わりになるものではありません。ランタイムがコンピューターにインストール済みでログイン済みのツールを呼び出し、実行の進捗と結果をタスクに書き戻します。すでにいずれかのツールを使っているなら、通常はそのまま使い続けられます。まだ決めていない場合は、次の 4 点を確認してください。
 
 エージェントを作成するときにツールを選ぶ際のガイダンスは、[エージェントの作成と構成](/agents-create)を参照してください。
+
+- コンピューターにすでにインストールされているか
+- アカウントでどのモデルを利用できるか
+- Multica から MCP を設定する必要があるか
+- チームでどのスキルを再利用したいか
+
+インストール方法は [AI コーディングツールをインストールする](/install-agent-runtime)を参照してください。
 
 ## 機能対応マトリクス
 
@@ -25,7 +33,7 @@ Multica は、普段使っている AI コーディングツールの代わり�
 | **OpenCode** | SST | ✅ | ✅ | `.opencode/skills/` | 動的探索 + variant |
 | **DevEco Code** | Huawei（ファーウェイ） | ✅ | ❌ | `.deveco/skills/` | 動的探索（`deveco models`） |
 | **OpenClaw** | オープンソース | ✅ | ✅ | `.agent_context/skills/`（フォールバック） | エージェントにバインドされ、タスクごとに切り替え不可 |
-| **Pi** | Inflection AI | ✅（セッションがファイルパス） | ❌ | `.pi/skills/` | 動的探索 |
+| **Pi** | Inflection AI | ✅（セッションがファイルパス）| ✅ | `.pi/skills/` | 動的探索 |
 | **OMP** | Oh My Pi | ✅ (`--resume <id>`) | ❌ | `.omp/skills/` | 動的探索（`omp models --no-extensions --json`） |
 | **Qoder** | Alibaba | ✅ | ✅ | `.qoder/skills/` | 動的探索 |
 | **Trae CLI** | ByteDance | ✅（ACP `session/load`） | ✅ | `.traecli/skills/` | 動的探索 |
@@ -34,55 +42,89 @@ Multica は、普段使っている AI コーディングツールの代わり�
 
 ## 各ツールの用途
 
-| ツール | 検出コマンド | セッション再開 | Multica による MCP 管理 | スキルの注入先 |
-|---|---|---:|---:|---|
-| Antigravity | `agy` | ✓ | — | `.agents/skills/` |
-| Claude Code | `claude` | ✓ | ✓ | `.claude/skills/` |
-| CodeBuddy | `codebuddy` | ✓ | ✓ | `.codebuddy/skills/` |
-| CodeArts | `codearts` | ✓ | ✓ | `.codeartsdoer/skills/` |
-| Codex | `codex` | ✓ | ✓ | `$CODEX_HOME/skills/` |
-| GitHub Copilot CLI | `copilot` | ✓ | — | `.github/skills/` |
-| Cursor Agent | `cursor-agent` | ✓ | ✓ | `.cursor/skills/` |
-| DeepSeek Harness | `dsh` | ✓ | ✓ | `.dsh/skills/` |
-| DevEco Code | `deveco` | ✓ | — | `.deveco/skills/` |
-| Grok | `grok` | ✓ | ✓ | `.grok/skills/` |
-| Hermes | `hermes` | ✓ | ✓ | 1 回の実行専用の `HERMES_HOME/skills/` |
-| Kimi CLI | `kimi` | ✓ | ✓ | `.kimi/skills/` |
-| Kiro CLI | `kiro-cli` | ✓ | ✓ | `.kiro/skills/` |
-| MiniMax Code | `mcode` | — | ✓ | `.minimax/skills/` |
-| Muse Code | `muse` | ✓ | — | `.agents/skills/` |
-| OpenClaw | `openclaw` | ✓ | ✓ | `skills/` |
-| OpenCode | `opencode` | ✓ | ✓ | `.opencode/skills/` |
-| Pi | `pi` | ✓ | ✓ | `.pi/skills/` |
-| OMP | `omp` | ✓ | — | `.omp/skills/` |
-| Qoder CLI | `qodercli` | ✓ | ✓ | `.qoder/skills/` |
-| Qoder CN CLI | `qoderclicn` | ✓ | ✓ | `.qoder/skills/` |
-| Qwen Code | `qwen` | ✓ | ✓ | `.qwen/skills/` |
-| QwenPaw | `qwenpaw` | ✓ | ✓ | 1 回の実行専用のワークスペース `skills/` |
-| Reasonix | `reasonix` | ✓ | ✓ | `.reasonix/skills/` |
-| Trae CLI | `traecli` | ✓ | ✓ | `.traecli/skills/` |
-| Dim | `dim` | ✓ | ✓ | — |
-
 Google が提供します。CLI バイナリ名は `agy` です。Google の Antigravity サービスと連携し、Gemini ベースのデフォルトモデルが付属しています。**セッション再開が動作します** — `--conversation <id>` を通じて行われ、stdout が構造化されたイベントストリームではなくプレーンテキストであるため、デーモンが CLI のログファイルから conversation UUID をキャプチャします。**モデル選択が動作します** — `--model` flag（agy 1.0.6 で追加）を通じて行われ、デーモンが `agy models` でカタログを列挙し、選択された値をそのまま渡します。これらは `provider/model` slug ではなく `Claude Opus 4.6 (Thinking)` のような人間が読める表示名である点に注意してください。また agy は認識できない値を渡すと黙って空実行するため、手入力ではなく検出されたリストから選ぶことをおすすめします。スキルは `.agents/skills/` に配置されます（CLI が Gemini CLI のワークスペーススキルレイアウトをそのまま継承します — [Antigravity 移行ドキュメント](https://antigravity.google/docs/gcli-migration)を参照）。
+
+<ProviderPickerDemo />
+
+| ツール | 検出コマンド | セッション再開 | Multica による MCP 管理 | Multica でのモデル選択 | スキルの注入先 |
+|---|---|---:|---:|---:|---|
+| Antigravity | `agy` | ✓ | — | ✓ | `.agents/skills/` |
+| Claude Code | `claude` | ✓ | ✓ | ✓ | `.claude/skills/` |
+| CodeBuddy | `codebuddy` | ✓ | ✓ | ✓ | `.codebuddy/skills/` |
+| CodeArts | `codearts` | ✓ | ✓ | ✓ | `.codeartsdoer/skills/` |
+| Codex | `codex` | ✓ | ✓ | ✓ | `$CODEX_HOME/skills/` |
+| GitHub Copilot CLI | `copilot` | ✓ | — | ✓ | `.github/skills/` |
+| Cursor Agent | `cursor-agent` | ✓ | ✓ | ✓ | `.cursor/skills/` |
+| DeepSeek Harness | `dsh` | ✓ | ✓ | ✓ | `.dsh/skills/` |
+| DevEco Code | `deveco` | ✓ | — | ✓ | `.deveco/skills/` |
+| Grok | `grok` | ✓ | ✓ | ✓ | `.grok/skills/` |
+| Hermes | `hermes` | ✓ | ✓ | ✓ | 1 回の実行専用の `HERMES_HOME/skills/` |
+| Kimi CLI | `kimi` | ✓ | ✓ | ✓ | `.kimi/skills/` |
+| Kiro CLI | `kiro-cli` | ✓ | ✓ | ✓ | `.kiro/skills/` |
+| MiniMax Code | `mcode` | — | ✓ | — | `.minimax/skills/` |
+| Muse Code | `muse` | ✓ | — | ✓ | `.agents/skills/` |
+| Devin CLI | `devin` | ✓ | ✓ | ✓ | `.devin/skills/` |
+| OpenClaw | `openclaw` | ✓ | ✓ | ✓ | `skills/` |
+| OpenCode | `opencode` | ✓ | ✓ | ✓ | `.opencode/skills/` |
+| Pi | `pi` | ✓ | ✓ | ✓ | `.pi/skills/` |
+| Oh-My-Pi | `omp` | ✓ | — | ✓ | `.omp/skills/` |
+| Qoder CLI | `qodercli` | ✓ | ✓ | ✓ | `.qoder/skills/` |
+| Qoder CN CLI | `qoderclicn` | ✓ | ✓ | ✓ | `.qoder/skills/` |
+| Qwen Code | `qwen` | ✓ | ✓ | ✓ | `.qwen/skills/` |
+| QwenPaw | `qwenpaw` | ✓ | ✓ | — | 1 回の実行専用のワークスペース `skills/` |
+| Amp | `amp` | ✓ | — | モード | `.agents/skills/` |
+| Factory Droid | `droid` | ✓ | — | ✓ | `.factory/skills/` |
+| Reasonix | `reasonix` | ✓ | ✓ | ✓ | `.reasonix/skills/` |
+| Trae CLI | `traecli` | ✓ | ✓ | ✓ | `.traecli/skills/` |
+| Dim | `dim` | ✓ | ✓ | ✓ | — |
+| ZeroClaw | `zeroclaw` | ✓ | — | — | — |
+| ZCode | `zcode` / ZCode Desktop | ✓ | ✓ | ✓ | `.zcode/skills/` |
+
+Claude Code では、デーモンの環境変数 `CLAUDE_CONFIG_DIR` に絶対パスを指定すると、Multica はその場所からユーザーとプラグインのスキルを一覧表示・インポートします。起動ラッパー内だけで指定したパスはスキャンに反映されません。
+
+Amp のモデル欄では、基盤モデルの ID ではなく `high` などの Amp の**モード**を指定します。空欄なら Amp の既定値を使います。
+
+Amp ではデーモンまたはエージェントの環境に `AMP_API_KEY` も必要で、保存済みの対話型ログインだけでは実行できません。
+
+「Multica による MCP 管理」とは、エージェント設定に MCP server を入力し、Multica が実行前にその設定を対応ツールへ渡せることを意味します。この列が示すのは Multica が代わりに設定できるかどうかで、ツール自体にほかの MCP 設定方法があるかどうかではありません。
+
+「Multica でのモデル選択」が — のツールは、ツール自身の設定でモデルを選びます。[モデルの取得元](#モデルの取得元)を参照してください。
 
 ### Claude Code
 
 Anthropic が提供します。**新規ユーザーにとって第一の選択肢**であり、最も完成度の高い機能セットを備えています: セッション再開が実際に動作し、MCP 構成を読み取り、`--max-turns` や `--append-system-prompt` のような細かな調整 flag をサポートします。Anthropic API キーが必要です。
 
+### モデルの取得元
+
+モデルを選択しない場合、Multica はそのツールのデフォルト設定を使用します。一覧が空の場合は、ランタイムがオンラインでツールにログイン済みであることを確認してから、モデル一覧を更新してください。
+
+Devin はローカル ACP で動作し、stdio MCP に対応します。HTTP/SSE は CLI が対応を宣言した場合のみ渡されます。skill のインポートは Devin/Cognition のディレクトリに続き、`~/.codeium/<channel>/skills`（`windsurf`、`windsurf-next`、`windsurf-insiders` の順）、最後に `~/.agents/skills` も検索します。
+
+Devin のモデル一覧にはアカウントで利用できないモデルも含まれます。完全なモデル ID、一意なセッションモデル名やカタログのファミリー slug/別名（例：`opus`）を選ぶか、空欄で CLI のデフォルトを使ってください。Multica は送信前に実際のモデルを確認し、別ファミリーへのフォールバックを拒否します。曖昧な名前、任意の部分名、利用できないバリアントには完全な ID を指定してください。使用量は返されたモデルに帰属し、Adaptive はルーティング ID のまま記録します。基盤モデルは推測しません。
+
+Devin は `WINDSURF_API_KEY` があれば使用し、なければ `devin auth login` の保存済み認証情報を使います。未知の ACP 認証方式でも保存済みログインを妨げません。Multica は権限を引き上げず、設定されたセッションモードを維持します。デフォルトが `plan` の場合、ファイルを変更するタスクの前に Devin で編集可能なモードに切り替えてください。
+
+エージェントを作成するとき、モデル一覧は対応するランタイムから取得されます。固定されたモデル名を提供するツールもあれば、ローカル設定、ログイン中のアカウント、サブスクリプションに応じて利用可能なモデルを返すツールもあります。
+
 ### CodeBuddy
 
 Tencent が提供します。Claude Code 互換の CLI エージェントです — Multica は Claude Code と同じ stream-json プロトコルで駆動するため、セッション再開が動作し（`--resume` 経由）、MCP 構成は `--mcp-config` で渡されます。CodeBuddy は Claude のディレクトリを再利用せず独自の設定ディレクトリを使うため、スキルは `.codebuddy/skills/` に配置され、ランタイムのブリーフは `CODEBUDDY.md` に書き込まれます。モデルは動的に探索されます。
-QwenPaw と MiniMax Code は例外です。Multica 側で選んだモデルを受け付けないため、選択欄は操作できず「ランタイムで管理」と表示されます。モデルは各ツール側の設定で選んでください。モデル一覧が空なのは正常であり、ランタイムがオフラインであることを示すものではありません。
+
+### モデル選択の補足
+
+QwenPaw、MiniMax Code、ZeroClaw は例外です。Multica 側で選んだモデルを受け付けないため、選択欄は操作できず「ランタイムで管理」と表示されます。モデルは各ツール側の設定で選んでください。これらのツールでモデル一覧が空なのは正常で、ランタイムがオフラインという意味ではありません。
+
+Antigravity の推論バリアントが `agy models` にある場合、それぞれが別のモデルとして表示されます。モデル選択欄で、接尾辞を含む正確なバリアントを選んでください。Multica には Antigravity 専用の 推論設定はありません。カスタム引数で `--effort` を渡す場合、選択したモデルと併用できるかどうかは Antigravity が判定します。
 
 DeepSeek Harness のモデルカタログはランタイム自身が提供します（`dsh --profile multica --list-models`）。モデル ID は `provider/model` 形式（例: `deepseek-official/deepseek-chat`）なので、一覧から完全な ID を選択してください。
 
 <Callout type="info">
-ツールによってモデル名が異なることがあります。AI コーディングツールを変更すると、以前のモデル値は新しいツールで使えないため、選び直す必要があります。
+モデル名はツール間で共通ではありません。AI コーディングツールを変更すると、以前のモデル値は新しいツールで使えないため、選び直す必要があります。
 </Callout>
 
 ### Codex
 
-表で ✓ が付いたツールは、後続の実行で既存のセッションを続行できます。ただし、元のセッションが残っており、そのセッションへアクセスできるランタイムが実行を処理する必要があります。MiniMax Code 0.1.2 は ACP でセッション読み込み機能を通知しないため、後続の実行では新しい MCode セッションを開始します。
+表で ✓ が付いたツールは、後続の実行で既存のセッションを続行できます。前提は、元のセッションが残っていて、そのセッションにアクセスできるランタイムが実行を処理することです。MiniMax Code 0.1.2 は ACP でセッション読み込み機能を通知しないため、後続の実行では新しい MCode セッションを開始します。
 
 Multica はツールから返されたセッション識別子を保存します。次に同じタスクで作業を続けるとき、ランタイムはそのセッションの再開を試みます。再開できない場合は、新しいセッションを作成して実行を続けます。Pi はローカルのセッションファイルパスを保存するため、元のコンピューターとファイルへの依存度が高くなります。
 
@@ -157,19 +199,28 @@ MiniMax 提供の ACP ネイティブなコーディングエージェント（`
 
 ## MCP 構成: ツールごとの対応
 
-**19 個のツールのうち、`mcp_config` を実際に消費するのは 12 個です: Claude Code、CodeBuddy、Codex、Cursor、Hermes、Kimi、Kiro CLI、OpenCode、OpenClaw、Qoder、Trae CLI、Grok**。残りの 5 個（Antigravity、Copilot、DevEco Code、Pi、OMP）はこのフィールドを受け取りますが、**無視します** — エラーも警告もなく、構成はただ効果を発揮しません。
+**31 個のツールのうち、`mcp_config` を実際に消費するのは 22 個です: CodeArts、Claude Code、CodeBuddy、Codex、Cursor Agent、DeepSeek Harness、Devin、Dim、Grok、Hermes、Kimi CLI、Kiro CLI、MiniMax Code、OpenClaw、OpenCode、Pi、Qoder CLI、Qoder CN CLI、Qwen Code、Reasonix、Trae CLI、ZCode**。残る 9 個（Amp、Antigravity、GitHub Copilot CLI、DevEco Code、Factory Droid、Muse Code、OMP、QwenPaw、ZeroClaw）はエージェントの MCP 構成を読み取らず、設定しても効果はありません。
 
 接続方式はツールごとに異なります: Claude Code と CodeBuddy は `--mcp-config` と `--strict-mcp-config` で受け取り、Codex は daemon 管理の `mcp_servers` ブロックをタスクごとの `$CODEX_HOME/config.toml` に書き込み、Cursor は `.cursor/mcp.json` とタスクごとの `CURSOR_DATA_DIR` 配下のプロジェクト approval を書き込みます。Hermes、Kimi、Kiro CLI、Qoder、Trae CLI、Grok は ACP `mcpServers` で受け取ります。OpenCode は `OPENCODE_CONFIG_CONTENT` 環境変数でインライン構成を受け取り、OpenClaw は Multica のタスクごとの config wrapper 経由で `mcp.servers` を受け取ります。OpenCode の経路はプロジェクトの `opencode.json` を書き換えません。
+Amp、Factory Droid、Antigravity、GitHub Copilot CLI、DevEco Code、Muse Code、ZeroClaw は、現時点ではエージェントの MCP 設定を読み取らないため、これらのツールではエージェント作成画面にこの項目が表示されません。
 
 Pi への管理 MCP 設定の引き渡しには Pi 0.99.0 以降が必要です。それより古い Pi でも、MCP 設定のないエージェントは引き続き実行できます。
 
 <Callout type="warning">
-エージェント構成で `mcp_config` を設定しても、MCP 列に ✅ がないツールを選んだ場合、MCP サーバーはそのエージェントに**何の効果**も及ぼしません。MCP 連携はツールごとに実装されています。
+MCP server のコマンド、引数、環境変数は、エージェント設定の一部としてサーバーに保存されます。共有する必要がないローカルの認証情報を設定へ直接入力しないでください。
 </Callout>
 
-## スキルファイルが置かれる場所
+<Callout type="warning">
+エージェント構成で `mcp_config` を設定しても、MCP 列に ✅ がないツールを選んだ場合、MCP サーバーはそのエージェントに**何の効果**も及ぼしません。MCP 連携はツールごとに実装されています。
+</Callout>
+ランタイムのマシンに設定済みの MCP サーバーは、そのマシン上でエージェントの構成とマージされます。[ローカルの MCP 設定](/daemon-runtimes#local-mcp)を参照してください。
+
+
+## スキルの注入方法
 
 各ツールは**それぞれ独自の**スキル探索パスを使用します。タスクが実行される前に、Multica デーモンがワークスペースのスキルファイルを対応するパスにコピーします。
+
+リポジトリにすでにあるスキルは上書きしません。同名のスキルがある場合、Multica は注入するコピーに別のディレクトリ名を使い、実行後には自分で作成したファイルだけを削除します。
 
 | ツール | パス | ネイティブ探索か |
 |---|---|---|
@@ -200,9 +251,15 @@ Pi への管理 MCP 設定の引き渡しには Pi 0.99.0 以降が必要です�
 
 スキルの作成と使用については、[スキル](/skills)を参照してください。
 
-## 次へ
+## 次のステップ
 
-- [エージェントの作成と構成](/agents-create) — エージェントに使うツールを選ぶ
 - [タスク](/tasks) — タスクのライフサイクルとセッション再開のメカニズム
-- [デーモンとランタイム](/daemon-runtimes) — ツールが実行される場所と Multica への接続方法
-- [エージェントランタイムのインストール](/install-agent-runtime) — サポートされる 19 個のツールそれぞれのインストールと認証
+- [エージェントを作成・設定する](/agents-create) — モデルと thinking level の設定
+- [AI コーディングツールをインストールする](/install-agent-runtime) — インストールと検出の手順
+- [デーモンとランタイム](/daemon-runtimes) — ランタイムの登録と同時実行
+
+## ZCode
+
+ZCode はネイティブの NDJSON `app-server` プロトコルで、セッションの作成・再開・キャンセル、モデル検出、推論レベル、MCP に対応します。タスクは yolo モードで実行され、対話的なツール承認は求められません。推論レベルの選択肢はランタイムのモデルカタログから取得し、エージェント作成時には選択したモデルの既定値が維持されます。
+
+macOS では ZCode Desktop に同梱された CLI も自動検出します。Node.js のインストールが必要です。Linux でも ZCode Desktop を自動検出し、デスクトップウィンドウを開かずに同梱 CLI を実行します。Node.js の追加インストールや環境変数の手動設定は不要です。デスクトップアプリで有効になっている API-key/Coding Plan 接続を、プロセス専用の一時設定へ取り込みます。この設定は終了時に削除され、元のファイルは変更されません。Start Plan の認証トークンは API キーではなく、このアカウント認証方式には対応していません。モデルが検出されない場合は、ZCode Desktop で利用可能な API 接続を設定してください。

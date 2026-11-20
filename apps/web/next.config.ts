@@ -40,9 +40,14 @@ const allowedDevOrigins = process.env.CORS_ALLOWED_ORIGINS
 
 const nextConfig: NextConfig = {
   ...(process.env.STANDALONE === "true" ? { output: "standalone" as const } : {}),
-  transpilePackages: ["@multica/core", "@multica/ui", "@multica/views"],
+  transpilePackages: ["@multica/core", "@multica/ui", "@multica/views", "@multica/ee"],
   experimental: {
     webpackMemoryOptimizations: true,
+    // Workspace pages are client components over TanStack Query, so a route's
+    // RSC payload is the same on every visit. Reusing a visited or prefetched
+    // one for 30s lets a click (an Inbox notification, back to an issue just
+    // read) render without a server round trip first (MUL-9538).
+    staleTimes: { dynamic: 30 },
   },
   ...(process.env.MULTICA_WEB_TYPECHECK_ALREADY_PASSED === "1"
     ? {
@@ -56,6 +61,10 @@ const nextConfig: NextConfig = {
   images: {
     formats: ["image/avif", "image/webp"],
     qualities: [75, 80, 85],
+    localPatterns: [
+      { pathname: "/images/**", search: "" },
+      { pathname: "/usecases/**", search: "" },
+    ],
   },
   async rewrites() {
     return {
@@ -95,10 +104,6 @@ const nextConfig: NextConfig = {
               source: "/auth/:path*",
               destination: `${remoteApiUrl}/auth/:path*`,
             },
-            {
-              source: "/uploads/:path*",
-              destination: `${remoteApiUrl}/uploads/:path*`,
-            },
           ]
         : [],
       fallback: [],
@@ -106,10 +111,6 @@ const nextConfig: NextConfig = {
   },
 };
 
-// fumadocs-mdx@12 is incompatible with Next 16's Turbopack: its loader fails to
-// dynamic-import `.source/source.config.mjs` under the Turbopack Node evaluator
-// (see fumadocs#2658). `dev`/`build` scripts pass `--webpack` to opt out.
-// Drop the flag once fumadocs-mdx ships a Turbopack-compatible loader.
-const withMDX = createMDX() as (config: NextConfig) => NextConfig;
+const withMDX = createMDX();
 
 export default withMDX(nextConfig);

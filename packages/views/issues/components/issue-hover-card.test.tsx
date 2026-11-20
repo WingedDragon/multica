@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { useQuery } from "@tanstack/react-query";
 import { renderWithI18n } from "../../test/i18n";
+import enIssues from "../../locales/en/issues.json";
 import { IssueHoverCard } from "./issue-hover-card";
 
 vi.mock("@tanstack/react-query", () => ({
@@ -490,7 +491,7 @@ describe("IssueHoverCard", () => {
 
     await openCard();
 
-    const prs = propertyValue("Pull requests");
+    const prs = propertyValue(enIssues.detail.section_pull_requests);
     expect(within(prs).getByTestId("pr-summary")).toHaveTextContent("#7612");
     expect(within(prs).getByText("+1")).toBeInTheDocument();
   });
@@ -498,7 +499,7 @@ describe("IssueHoverCard", () => {
   it("omits the pull request row when none are linked", async () => {
     await openCard();
 
-    expect(screen.queryByText("Pull requests", { selector: "dt" })).not.toBeInTheDocument();
+    expect(screen.queryByText(enIssues.detail.section_pull_requests, { selector: "dt" })).not.toBeInTheDocument();
   });
 
   it("shows sub-issue progress when the workspace map has an entry", async () => {

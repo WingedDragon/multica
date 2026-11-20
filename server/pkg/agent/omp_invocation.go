@@ -11,12 +11,17 @@ import (
 // selectors, so a custom arg that restated one would silently win over the
 // invocation the backend builds.
 var ompBlockedArgs = map[string]blockedArgMode{
+	"-c":            blockedStandalone,
 	"-p":            blockedStandalone,
+	"-r":            blockedOptionalValue,
 	"--print":       blockedStandalone,
 	"--mode":        blockedWithValue,
+	"--no-session":  blockedStandalone,
 	"--session":     blockedWithValue,
 	"--session-dir": blockedWithValue,
+	"--session-id":  blockedWithValue,
 	"--continue":    blockedStandalone,
+	"--fork":        blockedWithValue,
 	"--resume":      blockedWithValue,
 	"--model":       blockedWithValue,
 	"--thinking":    blockedWithValue,

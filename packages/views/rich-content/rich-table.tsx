@@ -31,10 +31,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { ExtraProps } from "react-markdown";
-import { Check, Copy, Maximize2, RotateCcw } from "lucide-react";
+import { Check, Copy, Maximize2, RotateCcw } from "@multica/ui/icons";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { cn } from "@multica/ui/lib/utils";
 import { useT } from "../i18n";
+import { DeferredTooltip } from "../common/deferred-tooltip";
 import { RichTableDialog } from "./rich-table-dialog";
 import {
   columnWidthKey,
@@ -236,11 +237,15 @@ export function RichTableFrame({ model, getMarkdown, tableRef: onTable, children
     fit();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(fit);
     observer?.observe(wrapper);
-    // Content widths change when a web font replaces its fallback.
-    void document.fonts?.ready.then(() => {
-      measuredAt = -1;
-      fit();
-    });
+    // Content widths change when a web font replaces its fallback. Once the
+    // fonts have loaded, `ready` resolves at once and a second measure of every
+    // table would only repeat the first.
+    if (document.fonts && document.fonts.status !== "loaded") {
+      void document.fonts.ready.then(() => {
+        measuredAt = -1;
+        fit();
+      });
+    }
     return () => {
       active = false;
       observer?.disconnect();
@@ -406,24 +411,32 @@ export function RichTableFrame({ model, getMarkdown, tableRef: onTable, children
             {t(($) => $.table.reset_widths)}
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => setExpanded(true)}
-          className={cn(toolbarButton, "w-6")}
-          title={t(($) => $.table.expand)}
-          aria-label={t(($) => $.table.expand)}
-        >
-          <Maximize2 className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={copyMarkdown}
-          className={cn(toolbarButton, "w-6")}
-          title={copied ? t(($) => $.table.copied) : t(($) => $.table.copy_markdown)}
-          aria-label={t(($) => $.table.copy_markdown)}
-        >
-          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-        </button>
+        <DeferredTooltip
+          content={t(($) => $.table.expand)}
+          trigger={
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className={cn(toolbarButton, "w-6")}
+              aria-label={t(($) => $.table.expand)}
+            >
+              <Maximize2 className="size-3.5" />
+            </button>
+          }
+        />
+        <DeferredTooltip
+          content={copied ? t(($) => $.table.copied) : t(($) => $.table.copy_markdown)}
+          trigger={
+            <button
+              type="button"
+              onClick={copyMarkdown}
+              className={cn(toolbarButton, "w-6")}
+              aria-label={t(($) => $.table.copy_markdown)}
+            >
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            </button>
+          }
+        />
       </div>
       <div className="relative">
         <div ref={wrapperRef} className="tableWrapper">

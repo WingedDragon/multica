@@ -21,6 +21,10 @@ type prConditionTx struct {
 	pgx.Tx
 	issue     pgtype.UUID
 	prs       [][]any
+	workspace pgtype.UUID
+	hasVCS    bool
+	vcsErr    error
+	vcsChecks int
 	queryErr  error
 	lastError pgtype.Text
 	next      pgtype.Timestamptz
@@ -43,6 +47,28 @@ func (tx *prConditionTx) Query(_ context.Context, sql string, args ...any) (pgx.
 	return &sliceRows{rows: tx.prs}, tx.queryErr
 }
 
+// QueryRow answers whether the workspace has a self-hosted VCS connection.
+func (tx *prConditionTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	if !strings.Contains(sql, "FROM vcs_connection") || len(args) != 1 || args[0] != tx.workspace {
+		return prConditionRow{err: fmt.Errorf("unexpected VCS connection scope: %s %v", sql, args)}
+	}
+	tx.vcsChecks++
+	return prConditionRow{value: tx.hasVCS, err: tx.vcsErr}
+}
+
+type prConditionRow struct {
+	value bool
+	err   error
+}
+
+func (r prConditionRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	*dest[0].(*bool) = r.value
+	return nil
+}
+
 func (tx *prConditionTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	switch {
 	case strings.Contains(sql, "NoteWakeupFailure"):
@@ -57,7 +83,12 @@ func (tx *prConditionTx) Exec(_ context.Context, sql string, args ...any) (pgcon
 }
 
 func TestWakeupConditionPREvaluation(t *testing.T) {
-	row := func(state, head, checks string) []any { return []any{int32(1), state, head, checks} }
+	row := func(state, head, checks string) []any { return []any{int32(1), state, head, checks, head, "", "p1"} }
+	// conflictRow describes a PR whose snapshot was fetched for snapshotHead
+	// while the PR's current head is "head".
+	conflictRow := func(state, snapshotHead, mergeable string) []any {
+		return []any{int32(1), state, snapshotHead, "", "head", mergeable, "p1"}
+	}
 	for _, tc := range []struct {
 		name, event string
 		available   bool
@@ -77,6 +108,17 @@ func TestWakeupConditionPREvaluation(t *testing.T) {
 		{"one matching PR", "checks_finished", true, [][]any{row("open", "", ""), row("open", "head", "SUCCESS")}, nil, true},
 		{"merge without snapshots", "merged", false, [][]any{row("merged", "", "")}, nil, true},
 		{"open without snapshots", "merged", false, [][]any{row("open", "", "")}, nil, false},
+		{"conflicts unconfigured", "conflicts", false, [][]any{conflictRow("open", "head", "CONFLICTING")}, errPRSnapshotsUnavailable, false},
+		{"conflicts unlinked", "conflicts", true, nil, errPRNotLinked, false},
+		{"conflicts no snapshot", "conflicts", true, [][]any{conflictRow("open", "", "")}, errPRSnapshotPending, false},
+		{"conflicts verdict for an older head", "conflicts", true, [][]any{conflictRow("open", "old", "CONFLICTING")}, errPRSnapshotPending, false},
+		{"mergeable", "conflicts", true, [][]any{conflictRow("open", "head", "MERGEABLE")}, nil, false},
+		{"mergeability unknown", "conflicts", true, [][]any{conflictRow("open", "head", "UNKNOWN")}, nil, false},
+		{"conflicting", "conflicts", true, [][]any{conflictRow("open", "head", "CONFLICTING")}, nil, true},
+		{"conflicting draft", "conflicts", true, [][]any{conflictRow("draft", "head", "CONFLICTING")}, nil, true},
+		{"conflicting but closed", "conflicts", true, [][]any{conflictRow("closed", "head", "CONFLICTING")}, nil, false},
+		{"conflicting but merged", "conflicts", true, [][]any{conflictRow("merged", "head", "CONFLICTING")}, nil, false},
+		{"one conflicting PR", "conflicts", true, [][]any{conflictRow("open", "old", "MERGEABLE"), conflictRow("open", "head", "CONFLICTING")}, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &IssueWakeupService{Tasks: &TaskService{PRSnapshotsEnabled: tc.available}}
@@ -88,6 +130,109 @@ func TestWakeupConditionPREvaluation(t *testing.T) {
 			}
 			if met && (fingerprint == "" || len(observed["pull_requests"].([]map[string]any)) != 1) {
 				t.Fatalf("missing terminal PR evidence: fingerprint=%q observed=%v", fingerprint, observed)
+			}
+		})
+	}
+}
+
+// Without the snapshot client an unlinked checks rule is blocked by the
+// missing client only when no self-hosted VCS PR could be linked instead;
+// otherwise the missing link is what to fix. Conflicts need snapshots
+// whichever PR is linked, so they keep the snapshot diagnostic.
+func TestWakeupConditionPRUnlinkedDiagnostic(t *testing.T) {
+	for _, event := range []string{"checks_finished", "conflicts", "merged"} {
+		for _, available := range []bool{false, true} {
+			for _, hasVCS := range []bool{false, true} {
+				// merged needs no snapshots; only checks without the client
+				// asks whether a VCS PR could be linked.
+				wantErr, wantChecks := errPRNotLinked, 0
+				switch {
+				case event == "checks_finished" && !available:
+					wantChecks = 1
+					if !hasVCS {
+						wantErr = errPRSnapshotsUnavailable
+					}
+				case event == "conflicts" && !available:
+					wantErr = errPRSnapshotsUnavailable
+				}
+				t.Run(fmt.Sprintf("%s/snapshots=%t/vcs=%t", event, available, hasVCS), func(t *testing.T) {
+					s := &IssueWakeupService{Tasks: &TaskService{PRSnapshotsEnabled: available}}
+					w := db.IssueWakeup{IssueID: dbid.NewV7(), WorkspaceID: dbid.NewV7(), Condition: condition(t, map[string]any{"type": "pull_request", "event": event})}
+					tx := &prConditionTx{issue: w.IssueID, workspace: w.WorkspaceID, hasVCS: hasVCS}
+					met, _, _, err := s.evaluateCondition(context.Background(), tx, db.New(tx), w)
+					if met || !errors.Is(err, wantErr) || tx.vcsChecks != wantChecks {
+						t.Fatalf("met=%t err=%v connection lookups=%d; want unmet with %v and %d lookups", met, err, tx.vcsChecks, wantErr, wantChecks)
+					}
+				})
+			}
+		}
+	}
+	t.Run("lookup failure", func(t *testing.T) {
+		s := &IssueWakeupService{Tasks: &TaskService{}}
+		w := db.IssueWakeup{IssueID: dbid.NewV7(), WorkspaceID: dbid.NewV7(), Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})}
+		lookupErr := errors.New("connection lookup failed")
+		tx := &prConditionTx{issue: w.IssueID, workspace: w.WorkspaceID, vcsErr: lookupErr}
+		_, _, _, err := s.evaluateCondition(context.Background(), tx, db.New(tx), w)
+		if !errors.Is(err, lookupErr) || conditionDiagnostic(err) {
+			t.Fatalf("err=%v; want the lookup failure, not a diagnostic", err)
+		}
+	})
+}
+
+func TestConditionNewlyMet(t *testing.T) {
+	for _, tc := range []struct {
+		previous, current string
+		want              bool
+	}{
+		{"", "pr:a@1:conflicting", true},
+		{"pr:a@1:conflicting", "pr:a@1:conflicting", false},
+		{"pr:a@1:conflicting,b@1:conflicting", "pr:b@1:conflicting", false},
+		{"pr:b@1:conflicting", "pr:a@1:conflicting,b@1:conflicting", true},
+		{"pr:a@1:conflicting", "pr:a@2:conflicting", true},
+		{"pr:1@h:SUCCESS,2@h:FAILURE", "pr:2@h:FAILURE", false},
+		// Number-only keys repeat across repositories; a second one is news.
+		{"pr:7", "pr:7,7", true},
+		{"pr:7,7", "pr:7", false},
+		{"pr:7,7", "pr:7,7", false},
+		{"status:todo", "status:in_review", true},
+		{"status:in_review", "status:in_review", false},
+		{`property:{"a":1,"b":2}`, `property:{"a":1,"b":2}`, false},
+		{"children:2", "children:3", true},
+	} {
+		if got := conditionNewlyMet(tc.previous, tc.current); got != tc.want {
+			t.Errorf("conditionNewlyMet(%q, %q) = %t, want %t", tc.previous, tc.current, got, tc.want)
+		}
+	}
+}
+
+func TestWakeupConditionPRConflictsAcrossRecompute(t *testing.T) {
+	ctx := context.Background()
+	s := &IssueWakeupService{Tasks: &TaskService{PRSnapshotsEnabled: true}}
+	w := db.IssueWakeup{ID: dbid.NewV7(), IssueID: dbid.NewV7(), Condition: condition(t, map[string]any{"type": "pull_request", "event": "conflicts"})}
+	tx := &prConditionTx{issue: w.IssueID}
+	q := db.New(tx)
+	snapshot := func(head, mergeable string) [][]any {
+		return [][]any{{int32(1), "open", head, "", head, mergeable, "p1"}}
+	}
+	for _, step := range []struct {
+		name, previous string
+		prs            [][]any
+		wantMet        bool
+		wantState      string
+	}{
+		{"conflict", "", snapshot("a", "CONFLICTING"), true, "pr:p1@a:conflicting"},
+		{"recompute on the same head keeps it", "pr:p1@a:conflicting", snapshot("a", "UNKNOWN"), true, "pr:p1@a:conflicting"},
+		{"resolved", "pr:p1@a:conflicting", snapshot("a", "MERGEABLE"), false, ""},
+		{"recompute after resolving stays resolved", "", snapshot("a", "UNKNOWN"), false, ""},
+		{"recompute on a new head starts over", "pr:p1@a:conflicting", snapshot("b", "UNKNOWN"), false, ""},
+		{"new head still conflicting", "pr:p1@a:conflicting", snapshot("b", "CONFLICTING"), true, "pr:p1@b:conflicting"},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			tx.prs = step.prs
+			w.ConditionState = step.previous
+			met, fingerprint, _, err := s.evaluateCondition(ctx, tx, q, w)
+			if err != nil || met != step.wantMet || (met && fingerprint != step.wantState) {
+				t.Fatalf("met=%t fingerprint=%q err=%v; want met=%t fingerprint=%q", met, fingerprint, err, step.wantMet, step.wantState)
 			}
 		})
 	}
@@ -114,8 +259,8 @@ func TestWakeupConditionPRDiagnosticPolling(t *testing.T) {
 		want error
 	}{
 		{nil, errPRNotLinked},
-		{[][]any{{int32(1), "open", "", ""}}, errPRSnapshotPending},
-		{[][]any{{int32(1), "open", "head", "PENDING"}}, nil},
+		{[][]any{{int32(1), "open", "", "", "head", "", "p1"}}, errPRSnapshotPending},
+		{[][]any{{int32(1), "open", "head", "PENDING", "head", "MERGEABLE", "p1"}}, nil},
 	} {
 		tx.prs = step.prs
 		w.LastError = tx.lastError

@@ -1,26 +1,52 @@
-/** Messaging integrations that live under the Channels page. */
+/** Messaging channels supported by the shared connect/disconnect flows. */
 export const CHANNEL_INTEGRATIONS = [
+  "lark",
+  "slack",
+  "dingtalk",
+  "wecom",
+  "telegram",
+  "weixin",
+] as const;
+
+/** Includes the self-host-only Octo settings route, which has its own UI. */
+export const SETTINGS_CHANNEL_INTEGRATIONS = [
   "lark",
   "slack",
   "octo",
   "dingtalk",
   "wecom",
   "telegram",
+  "weixin",
 ] as const;
 
 export type ChannelIntegration = (typeof CHANNEL_INTEGRATIONS)[number];
+export type SettingsChannelIntegration =
+  (typeof SETTINGS_CHANNEL_INTEGRATIONS)[number];
 
 export function isChannelIntegration(
   value: string | null,
-): value is ChannelIntegration {
-  return (CHANNEL_INTEGRATIONS as readonly string[]).includes(value ?? "");
+): value is SettingsChannelIntegration {
+  return (SETTINGS_CHANNEL_INTEGRATIONS as readonly string[]).includes(
+    value ?? "",
+  );
 }
+
+/**
+ * Preferences anchors that moved to the Appearance page, and where they land
+ * there. The light/dark picker was `theme` under Preferences; on the
+ * Appearance page that row is `mode` and `theme` is the theme gallery.
+ */
+const APPEARANCE_SECTIONS: Record<string, string | null> = {
+  appearance: null,
+  theme: "mode",
+  style: "theme",
+};
 
 export interface SettingsLocation {
   tab: string;
   /** In-page anchor to scroll to (see `SettingsSection`/`SettingsRow`). */
   section: string | null;
-  /** Detail page within Channels. */
+  /** Optional channel-specific settings page (currently self-host Octo). */
   integration: string | null;
 }
 
@@ -38,9 +64,16 @@ export function resolveSettingsLocation(
   const section = params.get("section");
   const integration = params.get("integration");
   switch (tab) {
+    case "issue-statuses":
+      return { tab: "workflows", section: null, integration: null };
     case "issue":
     case "chat":
       return { tab: "preferences", section: tab, integration: null };
+    case "preferences":
+      if (section && Object.hasOwn(APPEARANCE_SECTIONS, section)) {
+        return { tab: "appearance", section: APPEARANCE_SECTIONS[section] ?? null, integration: null };
+      }
+      return { tab, section, integration };
     case "labs":
       return { tab: "workspace", section: null, integration: null };
     case "github":
@@ -54,12 +87,21 @@ export function resolveSettingsLocation(
         section: section ?? "code-hosting",
         integration: null,
       };
+    case "channels":
+      return {
+        tab: "channels",
+        section,
+        integration: integration === "octo" ? "octo" : null,
+      };
     case "integrations": {
       const composioCallback =
         params.has("connected") ||
         params.get("error") === "composio_connect_failed";
       if (composioCallback || integration === "composio") {
         return { tab: "apps", section: null, integration: null };
+      }
+      if (integration === "octo") {
+        return { tab: "channels", section: null, integration: "octo" };
       }
       if (integration === "github") {
         return { tab: "code", section: null, integration: null };
@@ -70,12 +112,16 @@ export function resolveSettingsLocation(
       return {
         tab: "channels",
         section: null,
-        integration: isChannelIntegration(integration) ? integration : null,
+        integration: null,
       };
     }
     default:
       if (isChannelIntegration(tab)) {
-        return { tab: "channels", section: null, integration: tab };
+        return {
+          tab: "channels",
+          section: null,
+          integration: tab === "octo" ? "octo" : null,
+        };
       }
       return { tab, section, integration };
   }
@@ -92,6 +138,7 @@ export function settingsHref(
   params.set("tab", tab);
   params.delete("section");
   params.delete("integration");
+  params.delete("scope");
   if (detail.section) params.set("section", detail.section);
   if (detail.integration) params.set("integration", detail.integration);
   return `${pathname}?${params.toString()}`;

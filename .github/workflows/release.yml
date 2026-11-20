@@ -55,8 +55,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           # Keep the security floor even when the setup-go manifest lags;
-          # continue accepting newer patches within Go 1.26.
-          go-version: "~1.26.9"
+          # continue accepting newer patches within Go 1.27.
+          go-version: "~1.27.4"
           check-latest: true
           cache-dependency-path: server/go.sum
 
@@ -99,8 +99,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           # Keep the security floor even when the setup-go manifest lags;
-          # continue accepting newer patches within Go 1.26.
-          go-version: "~1.26.9"
+          # continue accepting newer patches within Go 1.27.
+          go-version: "~1.27.4"
           check-latest: true
           cache-dependency-path: server/go.sum
 
@@ -425,8 +425,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           # Keep the security floor even when the setup-go manifest lags;
-          # continue accepting newer patches within Go 1.26.
-          go-version: "~1.26.9"
+          # continue accepting newer patches within Go 1.27.
+          go-version: "~1.27.4"
           check-latest: true
           cache-dependency-path: server/go.sum
 
@@ -460,3 +460,10 @@ jobs:
           # Windows signing later.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: node scripts/package.mjs --${{ matrix.target }} --x64 --arm64 --publish always
+
+  promote:
+    needs: [verify, desktop]
+    if: needs.verify.outputs.is_stable == 'true'
+    uses: ./.github/workflows/promote-release.yml
+    with:
+      tag: ${{ needs.verify.outputs.tag_name }}

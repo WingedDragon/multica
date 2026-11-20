@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NodeViewWrapper, NodeViewContent } from "@tiptap/react";
 import type { NodeViewProps } from "@tiptap/react";
-import { Code as CodeIcon, Copy, Check, Eye, Maximize2 } from "lucide-react";
-import { Button } from "@multica/ui/components/ui/button";
+import { Code as CodeIcon, Copy, Check, Eye, Maximize2, RotateCw } from "@multica/ui/icons";
+import { IconButton } from "@multica/ui/components/common/icon-button";
+import { TooltipHint } from "@multica/ui/components/common/tooltip-hint";
 import { HtmlPreviewSurface } from "../html-preview-surface";
 import { cn } from "@multica/ui/lib/utils";
 import { copyText } from "@multica/ui/lib/clipboard";
@@ -12,6 +13,15 @@ import { useDebouncedValue } from "../../common/use-debounced-value";
 import { useT } from "../../i18n";
 import { MermaidDiagram } from "../mermaid-diagram";
 import { CodeBlockIframe } from "../code-block-iframe";
+import { useThemeVersion } from "../hooks/use-theme-version";
+import { readEmbedTheme } from "../../common/embed-theme";
+import {
+  HTML_BLOCK_EMBED_OPTIONS,
+  NO_HTML_BLOCK_THEME,
+  buildHtmlBlockDocument,
+  htmlBlockTheme,
+  mentionsThemeTokens,
+} from "../utils/html-block-document";
 
 // Coalesces fast keystrokes before re-rendering live previews.
 // `mermaid.initialize()` mutates a process-global config, so back-to-back
@@ -28,6 +38,8 @@ function CodeBlockView({ node }: NodeViewProps) {
   const { t } = useT("editor");
   const [copied, setCopied] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const reload = () => setReloadKey((key) => key + 1);
   // HTML blocks default to "preview"; the user can flip to "source" to
   // edit the markup directly. Note: the source `<pre>` MUST stay mounted
   // (just hidden) so ProseMirror keeps its NodeView bindings — unmounting
@@ -47,6 +59,24 @@ function CodeBlockView({ node }: NodeViewProps) {
     PREVIEW_DEBOUNCE_MS,
     showHtmlPreview || fullscreen,
   );
+  // The same document a read-only ```html block gets, so the embed tokens
+  // resolve while the block is being edited too. HTML that names no token
+  // gets the same document under every theme: a new srcDoc reloads the frame
+  // and loses whatever was typed or toggled in it.
+  const previewRef = useRef<HTMLDivElement>(null);
+  const themeVersion = useThemeVersion();
+  const [srcDoc, setSrcDoc] = useState("");
+  useEffect(() => {
+    const host = previewRef.current;
+    if (!host || !debouncedHtml) {
+      setSrcDoc("");
+      return;
+    }
+    const theme = mentionsThemeTokens(debouncedHtml)
+      ? htmlBlockTheme(readEmbedTheme(host, HTML_BLOCK_EMBED_OPTIONS))
+      : NO_HTML_BLOCK_THEME;
+    setSrcDoc(buildHtmlBlockDocument(debouncedHtml, theme));
+  }, [debouncedHtml, themeVersion]);
 
   const handleCopy = async () => {
     const text = node.textContent;
@@ -75,6 +105,7 @@ function CodeBlockView({ node }: NodeViewProps) {
         // unmounting either side would either lose ProseMirror bindings
         // (source) or thrash iframe.srcDoc (preview).
         <div
+          ref={previewRef}
           contentEditable={false}
           className={showHtmlPreview ? "mb-1" : undefined}
           hidden={!showHtmlPreview && !fullscreen}
@@ -83,10 +114,12 @@ function CodeBlockView({ node }: NodeViewProps) {
             open={fullscreen}
             inlineHeight={showHtmlPreview ? HTML_PREVIEW_HEIGHT_PX : 0}
             onOpenChange={setFullscreen}
+            onReload={reload}
             title={t(($) => $.code_block.html_preview)}
           >
             <CodeBlockIframe
-              html={debouncedHtml}
+              key={reloadKey}
+              html={srcDoc}
               title={t(($) => $.code_block.html_preview)}
               heightClassName={fullscreen ? "h-full" : "h-[480px]"}
               className={fullscreen ? "rounded-none border-0" : undefined}
@@ -104,54 +137,70 @@ function CodeBlockView({ node }: NodeViewProps) {
           </span>
         )}
         {isHtml && (
-          <button
-            type="button"
-            onClick={toggleView}
-            className="flex h-6 w-6 items-center justify-center rounded-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-            title={
-              view === "preview"
-                ? t(($) => $.code_block.show_source)
-                : t(($) => $.code_block.show_preview)
-            }
-            aria-label={
+          <TooltipHint
+            label={
               view === "preview"
                 ? t(($) => $.code_block.show_source)
                 : t(($) => $.code_block.show_preview)
             }
           >
-            {view === "preview" ? (
-              <CodeIcon className="h-3.5 w-3.5" />
-            ) : (
-              <Eye className="h-3.5 w-3.5" />
-            )}
-          </button>
+            <button
+              type="button"
+              onClick={toggleView}
+              className="flex h-6 w-6 items-center justify-center rounded-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              aria-label={
+                view === "preview"
+                  ? t(($) => $.code_block.show_source)
+                  : t(($) => $.code_block.show_preview)
+              }
+            >
+              {view === "preview" ? (
+                <CodeIcon className="h-3.5 w-3.5" />
+              ) : (
+                <Eye className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </TooltipHint>
         )}
         {isHtml && (
-          <Button
+          <IconButton
             type="button"
             variant="ghost"
             size="icon-xs"
             className="text-muted-foreground"
-            title={t(($) => $.code_block.fullscreen)}
-            aria-label={t(($) => $.code_block.fullscreen)}
+            disabled={!showHtmlPreview}
+            label={t(($) => $.attachment.reload)}
+            onClick={reload}
+          >
+            <RotateCw className="size-3.5" />
+          </IconButton>
+        )}
+        {isHtml && (
+          <IconButton
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground"
+            label={t(($) => $.code_block.fullscreen)}
             onClick={() => setFullscreen(true)}
           >
-            <Maximize2 className="h-3.5 w-3.5" />
-          </Button>
+            <Maximize2 className="size-3.5" />
+          </IconButton>
         )}
-        <button
-          type="button"
-          onClick={handleCopy}
-          className="flex h-6 w-6 items-center justify-center rounded-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-          title={t(($) => $.code_block.copy_code)}
-          aria-label={t(($) => $.code_block.copy_code)}
-        >
-          {copied ? (
-            <Check className="h-3.5 w-3.5" />
-          ) : (
-            <Copy className="h-3.5 w-3.5" />
-          )}
-        </button>
+        <TooltipHint label={t(($) => $.code_block.copy_code)}>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="flex h-6 w-6 items-center justify-center rounded-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+            aria-label={t(($) => $.code_block.copy_code)}
+          >
+            {copied ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+          </button>
+        </TooltipHint>
       </div>
       {/* `<pre>` + NodeViewContent must remain mounted so the user can keep
           editing the code block contents. When the HTML preview is showing

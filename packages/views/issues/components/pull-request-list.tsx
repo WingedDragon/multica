@@ -15,13 +15,12 @@ import {
   MoreHorizontal,
   Unlink,
   GitPullRequest,
-  GitPullRequestArrow,
   GitPullRequestClosed,
   GitPullRequestDraft,
   RefreshCw,
   TriangleAlert,
   XCircle,
-} from "lucide-react";
+} from "@multica/ui/icons";
 import {
   issuePullRequestsOptions,
   derivePullRequestVerdict,
@@ -43,12 +42,12 @@ import { useWorkspaceId } from "@multica/core/hooks";
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import type {
   GitHubPullRequest,
-  GitHubPullRequestState,
   GitLabMergeRequest,
   GitLabPipelineStatus,
   PRAutoComplete,
 } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
+import { IconButton } from "@multica/ui/components/common/icon-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@multica/ui/components/ui/tooltip";
 import {
   DropdownMenu,
@@ -63,6 +62,7 @@ import { useT, useTimeAgo } from "../../i18n";
 import { useStatusLabel } from "../utils/status-label";
 import { StatusIcon } from "./status-icon";
 import { GitLabMergeRequestDetails } from "./gitlab-merge-request-details";
+import { PULL_REQUEST_STATE_ICON } from "./pull-request-chips";
 
 type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 
@@ -70,18 +70,7 @@ type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 // collapse the rest once the section reaches 4 rows.
 const PR_LIMIT_BEFORE_COLLAPSE = 4;
 
-const STATE_ICON: Record<
-  GitHubPullRequestState,
-  { icon: React.ComponentType<{ className?: string }>; className: string }
-> = {
-  open: { icon: GitPullRequestArrow, className: "text-emerald-600 dark:text-emerald-400" },
-  draft: { icon: GitPullRequestDraft, className: "text-muted-foreground" },
-  merged: { icon: GitMerge, className: "text-violet-600 dark:text-violet-400" },
-  closed: { icon: GitPullRequestClosed, className: "text-rose-600 dark:text-rose-400" },
-};
-
-// One list holds both providers: a GitHub PR and a GitLab MR are rows of the
-// same sidebar section, sorted together by creation time.
+// GitHub PRs and GitLab MRs share one ordered sidebar list.
 type PullRequestRowEntry =
   | { provider: "github"; item: GitHubPullRequest }
   | { provider: "gitlab"; item: GitLabMergeRequest };
@@ -107,35 +96,37 @@ type GitLabMergeRequestStatusKind =
   | "gitlab_checking"
   | "gitlab_unknown";
 
-const GITLAB_CONFLICT_STATUSES = new Set(["conflict", "need_rebase"]);
+const GITLAB_CONFLICT_STATUSES: Record<string, true> = {
+  conflict: true,
+  need_rebase: true,
+};
 
-const GITLAB_BLOCKED_STATUSES = new Set([
-  "ci_must_pass",
-  "commits_status",
-  "discussions_not_resolved",
-  "draft_status",
-  "jira_association_missing",
-  "locked_lfs_files",
-  "locked_paths",
-  "merge_request_blocked",
-  "merge_time",
-  "not_approved",
-  "not_open",
-  "requested_changes",
-  "security_policy_pipeline_check",
-  "security_policy_violations",
-  "status_checks_must_pass",
-  "title_regex",
-]);
+const GITLAB_BLOCKED_STATUSES: Record<string, true> = {
+  ci_must_pass: true,
+  commits_status: true,
+  discussions_not_resolved: true,
+  draft_status: true,
+  jira_association_missing: true,
+  locked_lfs_files: true,
+  locked_paths: true,
+  merge_request_blocked: true,
+  merge_time: true,
+  not_approved: true,
+  not_open: true,
+  requested_changes: true,
+  security_policy_pipeline_check: true,
+  security_policy_violations: true,
+  status_checks_must_pass: true,
+  title_regex: true,
+};
 
-const GITLAB_CHECKING_STATUSES = new Set([
-  "approvals_syncing",
-  "checking",
-  "ci_still_running",
-  "preparing",
-  "unchecked",
-]);
-
+const GITLAB_CHECKING_STATUSES: Record<string, true> = {
+  approvals_syncing: true,
+  checking: true,
+  ci_still_running: true,
+  preparing: true,
+  unchecked: true,
+};
 export function PullRequestList({
   issueId,
   identifier = "",
@@ -171,7 +162,21 @@ export function PullRequestList({
   }, [issueId]);
 
   if ((includeGitHub && githubQuery.isLoading) || gitlabQuery.isLoading) {
-    return <p className="text-caption text-muted-foreground px-2">{t(($) => $.detail.pull_requests_loading)}</p>;
+    return <p className="text-label text-muted-foreground px-2">{t(($) => $.detail.pull_requests_loading)}</p>;
+  }
+  if (((includeGitHub && githubQuery.isError) || gitlabQuery.isError) && rows.length === 0) {
+    return (
+      <button
+        type="button"
+        className="flex min-h-8 w-full items-center rounded-md px-2 py-1.5 text-left text-label text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+        onClick={() => {
+          if (includeGitHub && githubQuery.isError) void githubQuery.refetch();
+          if (gitlabQuery.isError) void gitlabQuery.refetch();
+        }}
+      >
+        {t(($) => $.detail.section_load_failed_retry)}
+      </button>
+    );
   }
   if (rows.length === 0) {
     return (
@@ -228,7 +233,7 @@ export function PullRequestList({
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
-            className="block w-[calc(100%+1rem)] -mx-2 rounded-md px-2 py-1.5 text-left text-micro text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+            className="block w-full rounded-md px-2 py-2 text-left text-label text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
           >
             {expanded
               ? t(($) => $.detail.pull_request_card_show_less)
@@ -338,17 +343,17 @@ function PullRequestRowMenu({ pr, actions }: { pr: GitHubPullRequest; actions: R
     <DropdownMenu>
       <DropdownMenuTrigger
         render={
-          <Button
+          <IconButton
             variant="ghost"
             size="icon-xs"
-            aria-label={t(($) => $.pr_automation.row_menu)}
-            className="absolute top-0.5 right-0 opacity-0 group-hover/pr:opacity-100 group-focus-within/pr:opacity-100 data-popup-open:opacity-100 [@media(pointer:coarse)]:opacity-100"
+            label={t(($) => $.pr_automation.row_menu)}
+            className="absolute top-0.5 right-0 opacity-0 group-hover/pr:opacity-100 group-has-[:focus-visible]/pr:opacity-100 data-popup-open:opacity-100 [@media(pointer:coarse)]:opacity-100"
           >
             <MoreHorizontal />
-          </Button>
+          </IconButton>
         }
       />
-      <DropdownMenuContent align="end" className="w-56">
+      <DropdownMenuContent align="end" className="w-max max-w-(--available-width)">
         <DropdownMenuGroup>
           <DropdownMenuLabel className="font-normal">
             {linkSourceLabel(pr, actions.identifier, t)}
@@ -406,9 +411,9 @@ function AutoCompleteLine({
   const withTarget = (sentence: string) => {
     const [before, after = ""] = sentence.split(STATUS_SLOT);
     return (
-      <>
+      <span>
         {before}
-        <span className="inline-flex items-center gap-1 align-[-2px] font-medium text-foreground">
+        <span className="inline-flex items-center gap-1 whitespace-nowrap align-middle font-medium text-foreground">
           <StatusIcon
             status={target}
             category={catalog.categoryOf(target)}
@@ -419,7 +424,7 @@ function AutoCompleteLine({
           {statusLabel(target)}
         </span>
         {after}
-      </>
+      </span>
     );
   };
 
@@ -466,7 +471,7 @@ function AutoCompleteLine({
   return (
     <p
       data-testid="pr-auto-complete-line"
-      className="mt-1 flex items-start gap-1.5 border-t border-border pt-2 text-caption text-muted-foreground [&>svg]:mt-0.5 [&>svg]:size-3.5 [&>svg]:shrink-0"
+      className="mx-2 mt-1 flex items-start gap-1.5 border-t border-border py-2 text-caption text-muted-foreground [&>svg]:mt-px [&>svg]:size-3.5 [&>svg]:shrink-0"
     >
       {icon}
       <span className="min-w-0">{body}</span>
@@ -480,12 +485,13 @@ const PROBLEM_LIMIT = 3;
 type VerdictTone = "red" | "amber" | "green" | "violet" | "muted";
 
 // Pills reuse the state icons' palette. Their text sits one shade darker so
-// 11px copy on a 10% tint keeps AA contrast.
+// 11px copy on a 10% tint keeps AA contrast. Merged is a pull request state,
+// so it follows the theme's --pr-merged.
 const TONE_CLASS: Record<VerdictTone, string> = {
   red: "bg-rose-600/10 text-rose-700 dark:bg-rose-400/15 dark:text-rose-400",
   amber: "bg-amber-600/10 text-amber-700 dark:bg-amber-400/15 dark:text-amber-400",
   green: "bg-emerald-600/10 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-400",
-  violet: "bg-violet-600/10 text-violet-700 dark:bg-violet-400/15 dark:text-violet-400",
+  violet: "bg-pr-merged/10 text-pr-merged-text dark:bg-pr-merged-dark/15 dark:text-pr-merged-dark",
   muted: "bg-muted text-muted-foreground",
 };
 
@@ -518,7 +524,7 @@ function PullRequestRow({
 }) {
   const { t } = useT("issues");
   const timeAgo = useTimeAgo();
-  const cfg = STATE_ICON[pr.state] ?? { icon: GitPullRequest, className: "" };
+  const cfg = PULL_REQUEST_STATE_ICON[pr.state] ?? { icon: GitPullRequest, className: "" };
   const StateIcon = cfg.icon;
   const verdict = derivePullRequestVerdict(pr);
   const pill = getVerdictPill(verdict, t);
@@ -557,7 +563,7 @@ function PullRequestRow({
   // The row link and its menu are siblings: a button inside an anchor is
   // invalid HTML, and the menu must not open the PR.
   return (
-    <div className="group/pr relative -mx-2 rounded-md transition-colors hover:bg-accent/50">
+    <div className="group/pr relative rounded-md transition-colors hover:bg-accent/50">
       <Tooltip>
         <TooltipTrigger
           render={
@@ -566,20 +572,20 @@ function PullRequestRow({
               href={pr.html_url}
               target="_blank"
               rel="noreferrer noopener"
-              className="flex items-start gap-2 rounded-md px-2 py-1.5"
+              className="flex items-start gap-2 rounded-md px-2 py-2"
             />
           }
         >
           <StateIcon className={cn("mt-px size-3.5 shrink-0", cfg.className)} />
           <div className="min-w-0 flex-1">
-            <p className={cn("truncate text-caption font-medium", actions ? "pr-5" : null)}>
+            <p className={cn("truncate text-label font-medium", actions ? "pr-5" : null)}>
               {stripIssueKeyFromTitle(pr.title, identifier)}
             </p>
             <div className="mt-1 flex items-center gap-2">
               {/* The number and the pill never yield. Everything after the dot
                   is one unit: short of room, it wraps whole onto the clipped
                   second line instead of being cut mid-number (+312 → +31). */}
-              <p className="flex h-lh min-w-0 flex-1 flex-wrap items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-micro text-muted-foreground tabular-nums">
+              <p className="flex h-lh min-w-0 flex-1 flex-wrap items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-caption text-muted-foreground tabular-nums">
                 <span className="min-w-0 truncate">
                   {showRepo ? pr.repo_name : null}#{pr.number}
                 </span>
@@ -619,21 +625,30 @@ function PullRequestRow({
 /**
  * One PR on a single line — state icon, `#number`, verdict pill — for
  * surfaces with no room for PullRequestRow, such as the issue hover card.
- * Not a link: the hover card that hosts it is read-only.
+ * A plain link to the PR on GitHub, like PullRequestRow, so the browser owns
+ * Enter, modifier and middle clicks. The hover card stops click bubbling, so
+ * opening the PR never also follows the mention it hangs off.
  */
 export function PullRequestInlineSummary({ pr }: { pr: GitHubPullRequest }) {
   const { t } = useT("issues");
-  const cfg = STATE_ICON[pr.state] ?? { icon: GitPullRequest, className: "" };
+  const cfg = PULL_REQUEST_STATE_ICON[pr.state] ?? { icon: GitPullRequest, className: "" };
   const StateIcon = cfg.icon;
   const pill = getVerdictPill(derivePullRequestVerdict(pr), t);
   const isTerminal = pr.state === "merged" || pr.state === "closed";
   const stale = !isTerminal && pr.snapshot_stale === true;
   return (
-    <span className="flex min-w-0 items-center gap-1.5" title={pr.title}>
+    <a
+      data-testid="pull-request-inline-summary"
+      href={pr.html_url}
+      target="_blank"
+      rel="noreferrer noopener"
+      title={pr.title}
+      className="-mx-1 flex min-w-0 items-center gap-1.5 rounded-sm px-1 transition-colors hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-ring"
+    >
       <StateIcon className={cn("size-3.5 shrink-0", cfg.className)} />
       <span className="shrink-0 font-medium tabular-nums">{prLabel(pr)}</span>
       {pill ? <VerdictPill pill={pill} stale={stale} inline /> : null}
-    </span>
+    </a>
   );
 }
 
@@ -781,7 +796,7 @@ function GitLabMergeRequestRow({
   const { t } = useT("issues");
   const qc = useQueryClient();
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const cfg = STATE_ICON[mr.state] ?? { icon: GitPullRequest, className: "" };
+  const cfg = PULL_REQUEST_STATE_ICON[mr.state] ?? { icon: GitPullRequest, className: "" };
   const StateIcon = cfg.icon;
   const counts = getGitLabPipelineCounts(mr.pipeline_status);
   const kind = deriveGitLabMergeRequestStatusKind(mr, counts);
@@ -954,16 +969,16 @@ function deriveGitLabMergeRequestStatusKind(
   if (mr.state === "merged") return "merged";
 
   const detail = mr.detailed_merge_status ?? null;
-  if (mr.has_conflicts === true || (detail && GITLAB_CONFLICT_STATUSES.has(detail))) {
+  if (mr.has_conflicts === true || (detail && GITLAB_CONFLICT_STATUSES[detail])) {
     return "conflicts";
   }
   if (mr.state !== "open" && mr.state !== "draft") {
     return "gitlab_unknown";
   }
-  if (detail && GITLAB_BLOCKED_STATUSES.has(detail)) {
+  if (detail && GITLAB_BLOCKED_STATUSES[detail]) {
     return "gitlab_blocked";
   }
-  if (detail && GITLAB_CHECKING_STATUSES.has(detail)) {
+  if (detail && GITLAB_CHECKING_STATUSES[detail]) {
     return "gitlab_checking";
   }
   if (counts.failed > 0) return "checks_failed";

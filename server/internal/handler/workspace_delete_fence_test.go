@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -71,6 +72,9 @@ func TestTaskWriteFence_BlocksOnWorkspaceLockAlone(t *testing.T) {
 	}
 	ctx := context.Background()
 	f := newWorkspaceDeletePathFixture(t, "fenceonly")
+	// A bound agent ignores a stale runtime hint. With no binding, the hint
+	// remains the write's target, so this still isolates the runtime's fence.
+	unboundAgent := testutil.New(testPool, f.neighbourID, testUserID).Agent(t, "fence-runtime-only", "")
 
 	holder, err := testPool.Begin(ctx)
 	if err != nil {
@@ -106,7 +110,7 @@ func TestTaskWriteFence_BlocksOnWorkspaceLockAlone(t *testing.T) {
 	}
 
 	blockedEnqueue("enqueue via the victim's agent", f.victimAgent, f.neighbourRuntime, f.neighbourIssue)
-	blockedEnqueue("enqueue via the victim's runtime", f.neighbourAgent, f.victimRuntime, f.neighbourIssue)
+	blockedEnqueue("enqueue via the victim's runtime", unboundAgent, f.victimRuntime, f.neighbourIssue)
 	blockedEnqueue("enqueue via the victim's issue", f.neighbourAgent, f.neighbourRuntime, f.victimIssue)
 
 	// Reassignment onto the victim's runtime is fenced too.
@@ -360,7 +364,7 @@ func TestMergeLegacyRuntime_KeepsOldRuntimeWhenFenceRefuses(t *testing.T) {
 	// the target's workspace was torn down a moment ago.
 	vanishedTarget := parseUUID("00000000-0000-0000-0000-0000000000fe")
 
-	err := h.mergeLegacyRuntime(ctx, vanishedTarget, parseUUID(f.victimRuntime), "legacy-daemon", "delete-test")
+	err := h.mergeLegacyRuntime(ctx, vanishedTarget, parseUUID(f.victimRuntime), "legacy-daemon", "delete-test", parseUUID(testUserID))
 	if !errors.Is(err, errRuntimeMergeFenced) {
 		t.Fatalf("mergeLegacyRuntime = %v, want errRuntimeMergeFenced", err)
 	}
@@ -394,7 +398,7 @@ RETURNING id
 		t.Fatalf("create merge target: %v", err)
 	}
 	if err := h.mergeLegacyRuntime(ctx, parseUUID(freshRuntime), parseUUID(f.victimRuntime),
-		"legacy-daemon", "delete-test"); err != nil {
+		"legacy-daemon", "delete-test", parseUUID(testUserID)); err != nil {
 		t.Fatalf("merge onto a live runtime: %v", err)
 	}
 	if rowExists(t, "agent_runtime", f.victimRuntime) {
@@ -464,7 +468,7 @@ FOR EACH ROW EXECUTE FUNCTION mul5999_fail_agent_move()
 	})
 
 	err := testHandler.mergeLegacyRuntime(ctx, parseUUID(target), parseUUID(f.victimRuntime),
-		"legacy-daemon", "delete-test")
+		"legacy-daemon", "delete-test", parseUUID(testUserID))
 	if err == nil {
 		t.Fatal("merge reported success even though the agent reassignment failed")
 	}
@@ -509,7 +513,7 @@ FOR EACH ROW EXECUTE FUNCTION mul5999_fail_agent_move()
 		t.Fatalf("drop injection trigger: %v", err)
 	}
 	if err := testHandler.mergeLegacyRuntime(ctx, parseUUID(target), parseUUID(f.victimRuntime),
-		"legacy-daemon", "delete-test"); err != nil {
+		"legacy-daemon", "delete-test", parseUUID(testUserID)); err != nil {
 		t.Fatalf("merge after removing the injection: %v", err)
 	}
 	if rowExists(t, "agent_runtime", f.victimRuntime) {

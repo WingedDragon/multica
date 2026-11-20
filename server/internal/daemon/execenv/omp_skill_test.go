@@ -25,7 +25,7 @@ func TestWriteContextFilesOMPNativeSkills(t *testing.T) {
 			Content: "Use the OMP native skill path.",
 		}},
 	}
-	if err := writeContextFiles(workDir, "omp", ctx, nil); err != nil {
+	if _, err := writeContextFiles(workDir, "omp", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles: %v", err)
 	}
 
@@ -63,7 +63,7 @@ func TestOMPSkillCleanupPreservesExistingContent(t *testing.T) {
 			Content: "Multica-managed OMP skill",
 		}},
 	}
-	if err := writeContextFiles(workDir, "omp", ctx, manifest); err != nil {
+	if _, err := writeContextFiles(workDir, "omp", ctx, manifest); err != nil {
 		t.Fatalf("writeContextFiles: %v", err)
 	}
 	if err := writeSidecarManifest(envRoot, manifest); err != nil {

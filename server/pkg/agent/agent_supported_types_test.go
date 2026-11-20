@@ -45,11 +45,11 @@ func TestSupportedTypesLockstepWithNew(t *testing.T) {
 //
 // It parses the SQL on purpose. The previous version compared SupportedTypes
 // against a hand-copied map, so it kept passing while upstream migrations 370
-// and 403 rebuilt the real constraint from upstream's whitelist and silently
-// dropped this fork's `omp` entry — the same regression migration 362 had
-// already repaired once. Deriving the expected set from the migration itself
-// makes any future upstream rebuild that drops a fork-local family fail here
-// instead of in production, where the insert is rejected by Postgres.
+// and 403 rebuilt the real constraint and silently dropped this fork's `omp`,
+// the same regression migration 362 had already repaired once. Migration 656
+// repeated the replacement and omitted both `omp` and `museapp`. Deriving the
+// expected set from SQL makes future omissions fail here instead of in
+// production, where Postgres rejects the insert.
 func TestSupportedTypesMatchesMigrationWhitelist(t *testing.T) {
 	path, families := latestProtocolFamilyCheck(t)
 

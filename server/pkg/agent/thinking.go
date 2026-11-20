@@ -432,6 +432,8 @@ func normalizeCodexModelLabel(id, label string) string {
 		return "GPT-6 Astra"
 	case "gpt-6.1-sol":
 		return "GPT-6.1 Sol"
+	case "gpt-6.1-terra":
+		return "GPT-6.1 Terra"
 	case "gpt-6-sol":
 		return "GPT-6 Sol"
 	case "gpt-6-luna":
@@ -999,6 +1001,10 @@ var thinkingDynamicCatalogProviders = map[string]bool{
 	"opencode": true,
 	"omp":      true,
 	"kimi":     true,
+	// Kiro's model command options advertise per-model effortLevels. Its
+	// native effort command applies the override to fresh and loaded sessions.
+	"kiro":  true,
+	"zcode": true,
 }
 
 // acpCatalogThinkingProviders are the ACP runtimes that discover their effort

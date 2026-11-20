@@ -1,9 +1,11 @@
 "use client";
 
+import { IssueSidebarSectionHeader } from "./issue-sidebar-section";
+
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ChevronRight, CircleSlash, MoreHorizontal, Plus, RotateCcw, Settings } from "lucide-react";
+import { CircleSlash, MoreHorizontal, Plus, RotateCcw, Settings } from "@multica/ui/icons";
 import { ApiError } from "@multica/core/api";
 import {
   issuePullRequestsOptions,
@@ -13,6 +15,7 @@ import {
 } from "@multica/core/github";
 import { useWorkspacePaths } from "@multica/core/paths";
 import { Button } from "@multica/ui/components/ui/button";
+import { IconButton } from "@multica/ui/components/common/icon-button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -38,6 +41,7 @@ export function PullRequestsSection({
   open,
   onOpenChange,
   includeGitHub = true,
+  hasGitLabMergeRequests = false,
 }: {
   issueId: string;
   identifier: string;
@@ -45,9 +49,13 @@ export function PullRequestsSection({
   onOpenChange: (open: boolean) => void;
   /** GitLab merge requests stay listed when the workspace turns GitHub PRs off. */
   includeGitHub?: boolean;
+  hasGitLabMergeRequests?: boolean;
 }) {
   const { t } = useT("issues");
-  const { data } = useQuery(issuePullRequestsOptions(issueId));
+  const { data, isLoading, isError } = useQuery({
+    ...issuePullRequestsOptions(issueId),
+    enabled: includeGitHub && !!issueId,
+  });
   // Older backends have no link / auto-complete endpoints; keep the header
   // actions hidden until the server says it supports them. With GitHub PRs off
   // the section lists GitLab merge requests only, so its GitHub-only count and
@@ -55,37 +63,23 @@ export function PullRequestsSection({
   const supported = includeGitHub && !!data?.auto_complete;
   const count = includeGitHub ? data?.pull_requests.length ?? 0 : 0;
 
+  if (includeGitHub && !isLoading && !isError && count === 0 && !supported && !hasGitLabMergeRequests) return null;
+
   return (
     <div>
-      {/* Label and actions are siblings, not a button wrapping buttons. */}
-      <div className="mb-2 flex w-full items-center gap-0.5">
-        <button
-          type="button"
-          aria-expanded={open}
-          className={`flex min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1 text-caption font-medium transition-colors hover:bg-accent/70 ${open ? "" : "text-muted-foreground hover:text-foreground"}`}
-          onClick={() => onOpenChange(!open)}
-        >
-          <span className="truncate">{t(($) => $.detail.section_pull_requests)}</span>
-          {count > 0 ? (
-            <span className="shrink-0 rounded-xs bg-muted px-1 text-micro font-medium tabular-nums text-muted-foreground">
-              {count}
-            </span>
-          ) : null}
-          <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`} />
-        </button>
-        {supported ? (
-          <>
-            <LinkPullRequestPopover issueId={issueId} identifier={identifier} onLinked={() => onOpenChange(true)} />
-            <AutoCompleteMenu
-              issueId={issueId}
-              disabled={data?.auto_complete?.issue_disabled ?? false}
-              workspaceEnabled={data?.auto_complete?.workspace_enabled ?? true}
-            />
-          </>
-        ) : null}
-      </div>
-      {open && (
-        <div className="pl-2">
+      <IssueSidebarSectionHeader
+        title={t(($) => $.detail.section_pull_requests)}
+        open={open}
+        onOpenChange={onOpenChange}
+        count={count}
+        collapsible={!includeGitHub || count > 0 || isLoading || isError || supported || hasGitLabMergeRequests}
+        actions={supported ? <>
+          <LinkPullRequestPopover issueId={issueId} identifier={identifier} onLinked={() => onOpenChange(true)} />
+          <AutoCompleteMenu issueId={issueId} disabled={data?.auto_complete?.issue_disabled ?? false} workspaceEnabled={data?.auto_complete?.workspace_enabled ?? true} />
+        </> : undefined}
+      />
+      {open && (!includeGitHub || count > 0 || isLoading || isError || supported || hasGitLabMergeRequests) && (
+        <div className="px-2">
           <PullRequestList issueId={issueId} identifier={identifier} includeGitHub={includeGitHub} />
         </div>
       )}
@@ -126,9 +120,9 @@ function LinkPullRequestPopover({
     >
       <PopoverTrigger
         render={
-          <Button variant="ghost" size="icon-xs" aria-label={t(($) => $.pr_automation.link_action)}>
+          <IconButton variant="ghost" size="icon-xs" label={t(($) => $.pr_automation.link_action)}>
             <Plus />
-          </Button>
+          </IconButton>
         }
       />
       <PopoverContent align="end" className="w-80">
@@ -211,16 +205,18 @@ function AutoCompleteMenu({
   const navigation = useNavigation();
   const setAutoComplete = useSetIssuePRAutoComplete(issueId);
 
+  // The only section menu left in the sidebar: it carries a real per-issue
+  // action (keep status on merge), not just a link to settings.
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
         render={
-          <Button variant="ghost" size="icon-xs" aria-label={t(($) => $.pr_automation.section_menu)}>
+          <IconButton variant="ghost" size="icon-xs" label={t(($) => $.pr_automation.section_menu)}>
             <MoreHorizontal />
-          </Button>
+          </IconButton>
         }
       />
-      <DropdownMenuContent align="end" className="w-60">
+      <DropdownMenuContent align="end" className="w-max max-w-(--available-width)">
         {/* When the workspace leaves status alone, the issue switch changes nothing. */}
         {workspaceEnabled ? (
           <>

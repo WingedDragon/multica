@@ -39,6 +39,7 @@ import { useColorScheme } from "@/lib/use-color-scheme";
 import { THEME } from "@/lib/theme";
 import { useT } from "@/lib/i18n";
 import { useCommentSelectStore } from "@/data/comment-select-store";
+import { resolveTimelineHighlight } from "@/lib/inbox-display";
 
 interface Props {
   issue: Issue;
@@ -129,39 +130,51 @@ export function TimelineList({
   // Gates single-shot per (commentId, nonce) tuple. Re-tap from inbox
   // bumps the nonce → ref no longer matches → effect re-fires.
   const lastStampRef = useRef<string | null>(null);
-  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [highlight, setHighlight] = useState<{ id: string; stamp: string } | null>(null);
+  const highlightedId = highlight?.id ?? null;
 
   // ── "New since last view" divider ─────────────────────────────────────
   // Snapshot the last-viewed timestamp ONCE on mount. Subsequent WS
   // appends shouldn't shift the divider — the user wants a stable
   // "where I was when I came back" boundary. The store update happens on
   // unmount, gated on the user having actually scrolled past the divider.
-  const lastViewedSnapshotRef = useRef<string | null | undefined>(undefined);
-  if (lastViewedSnapshotRef.current === undefined) {
-    lastViewedSnapshotRef.current =
-      useLastViewedStore.getState().getLastViewed(issue.id) ?? null;
-  }
+  const [lastViewedSnapshot] = useState(
+    () => useLastViewedStore.getState().getLastViewed(issue.id) ?? null,
+  );
   const dividerAnchorId = useMemo(() => {
-    const snapshot = lastViewedSnapshotRef.current;
+    const snapshot = lastViewedSnapshot;
     if (!snapshot) return null;
     // First entry strictly newer than the snapshot anchors the divider;
     // divider draws ABOVE this row. If everything is older, no divider.
     const found = data.find((r) => r.entry.created_at > snapshot);
     return found ? found.entry.id : null;
-  }, [data]);
+  }, [data, lastViewedSnapshot]);
   const dividerScrolledPastRef = useRef(false);
 
+  // A cached timeline can open without the target and gain it on refresh,
+  // possibly as a reply that leaves the row count unchanged, so the
+  // highlight is consumed only once its row exists.
+  const highlightTarget = useMemo(
+    () =>
+      highlightCommentId && entries
+        ? resolveTimelineHighlight(entries, highlightCommentId)
+        : null,
+    [entries, highlightCommentId],
+  );
+
   useEffect(() => {
-    if (!highlightCommentId || data.length === 0) return;
+    if (!highlightCommentId || !highlightTarget) return;
     const stamp = `${highlightCommentId}:${highlightNonce ?? ""}`;
     if (lastStampRef.current === stamp) return;
     lastStampRef.current = stamp;
+    setHighlight({ id: highlightTarget, stamp });
+  }, [highlightCommentId, highlightNonce, highlightTarget]);
 
-    setHighlightedId(highlightCommentId);
-
-    const fade = setTimeout(() => setHighlightedId(null), HIGHLIGHT_HOLD_MS);
+  useEffect(() => {
+    if (!highlight) return;
+    const fade = setTimeout(() => setHighlight(null), HIGHLIGHT_HOLD_MS);
     return () => clearTimeout(fade);
-  }, [highlightCommentId, highlightNonce, data.length]);
+  }, [highlight]);
 
   // ── New-comment-while-reading chip ────────────────────────────────────
   // After landing, if WS appends new entries while the user is NOT at the
@@ -264,7 +277,7 @@ export function TimelineList({
     (info: { viewableItems: ViewToken[] }) => handlerRef.current(info),
     [],
   );
-  const viewabilityCallbackPairs = useRef([
+  const [viewabilityCallbackPairs] = useState(() => [
     {
       viewabilityConfig,
       onViewableItemsChanged: stableViewabilityHandler,
@@ -401,7 +414,7 @@ export function TimelineList({
         onMomentumScrollBegin={() =>
           useCommentSelectStore.getState().clear()
         }
-        viewabilityConfigCallbackPairs={viewabilityCallbackPairs.current}
+        viewabilityConfigCallbackPairs={viewabilityCallbackPairs}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }

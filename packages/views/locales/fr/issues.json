@@ -642,7 +642,8 @@
     "pull_request_card_status_unknown": "Vérifications non encore remontées",
     "pull_request_card_draft_prefix": "Brouillon · {{status}}",
     "pull_request_state_open": "Ouverte",
-    "guest_readonly_note": "Les invités peuvent consulter et commenter, mais pas modifier les propriétés de la tâche."
+    "guest_readonly_note": "Les invités peuvent consulter et commenter, mais pas modifier les propriétés de la tâche.",
+    "open_issue_page": "Ouvrir la page de la tâche"
   },
   "timeline": {
     "loading": "Chargement...",
@@ -1955,8 +1956,7 @@
       "all_issues": "Toutes les tâches",
       "my_work": "Mon travail",
       "working": "En cours d'exécution",
-      "subscribed": "Abonnements",
-      "snoozed": "Reportés"
+      "subscribed": "Abonnements"
     },
     "untitled": "Vue sans titre",
     "copy_name": "{{name}} (copie)",

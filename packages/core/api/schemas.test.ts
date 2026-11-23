@@ -34,6 +34,7 @@ import {
   ChatSessionSchema,
   PrioritizeQueuedChatTaskResponseSchema,
   CreateFeedbackResponseSchema,
+  CreateGitLabConnectionResponseSchema,
   CreateGitLabProjectResponseSchema,
   DuplicateIssueErrorBodySchema,
   EMPTY_CHAT_DRAFT_RESTORES,
@@ -1083,6 +1084,109 @@ describe("CreateFeedbackResponseSchema", () => {
 });
 
 describe("GitLab API schemas", () => {
+  it("parses multiple connections while defaulting missing legacy fields", () => {
+    const parsed = GitLabConfigResponseSchema.parse({
+      configured: false,
+      access_token: "glpat-private-token",
+      can_manage: true,
+      credential_storage_configured: true,
+      connections: [
+        {
+          id: "connection-1",
+          workspace_id: "workspace-1",
+          base_url: "https://gitlab.example.com",
+          host: "gitlab.example.com",
+          server_configured: true,
+          webhook_url:
+            "https://app.example.com/api/webhooks/gitlab/connection-1",
+          webhook_path: "/api/webhooks/gitlab/connection-1",
+          access_token: "glpat-private-token",
+        },
+      ],
+      projects: [
+        {
+          id: "binding-1",
+          workspace_id: "workspace-1",
+          connection_id: "connection-1",
+          gitlab_project_id: 42,
+          path_with_namespace: "team/project",
+          web_url: "https://gitlab.example.com/team/project",
+          hook_enabled: true,
+          created_at: "2026-07-01T00:00:00Z",
+        },
+      ],
+    });
+
+    expect(parsed.connections[0]?.host).toBe("gitlab.example.com");
+    expect(parsed.connections[0]?.server_configured).toBe(true);
+    expect(parsed.connections[0]?.webhook_url).toBe(
+      "https://app.example.com/api/webhooks/gitlab/connection-1",
+    );
+    expect(parsed.connections[0]?.webhook_path).toBe(
+      "/api/webhooks/gitlab/connection-1",
+    );
+    expect(parsed.projects[0]?.connection_id).toBe("connection-1");
+    expect(parsed.credential_storage_configured).toBe(true);
+    expect(parsed.connections[0]).not.toHaveProperty("access_token");
+    expect(parsed).not.toHaveProperty("access_token");
+
+    const legacy = GitLabConfigResponseSchema.parse({ configured: true, projects: [] });
+    expect(legacy.connections).toEqual([]);
+    expect(legacy.credential_storage_configured).toBe(false);
+    const olderWithConnection = GitLabConfigResponseSchema.parse({
+      configured: false,
+      connections: [
+        {
+          id: "old-connection",
+          workspace_id: "workspace-1",
+          base_url: "https://gitlab.example.com",
+          host: "gitlab.example.com",
+        },
+      ],
+    });
+    expect(olderWithConnection.connections[0]?.server_configured).toBeUndefined();
+  });
+
+  it("parses one-time webhook data, strips tokens, and allows absent reconnect secrets", () => {
+    const connection = {
+      id: "connection-1",
+      workspace_id: "workspace-1",
+      base_url: "https://gitlab.example.com",
+      host: "gitlab.example.com",
+    };
+    const response = {
+      connection: { ...connection, access_token: "glpat-private-token" },
+      webhook_secret: "one-time-secret",
+      webhook_url: "https://app.example.com/api/gitlab/webhook/connection-1",
+      webhook_path: "/api/gitlab/webhook/connection-1",
+      access_token: "glpat-private-token",
+    };
+
+    expect(CreateGitLabConnectionResponseSchema.parse(response)).toEqual({
+      connection,
+      webhook_secret: "one-time-secret",
+      webhook_url: "https://app.example.com/api/gitlab/webhook/connection-1",
+      webhook_path: "/api/gitlab/webhook/connection-1",
+    });
+
+    const reconnect = {
+      connection,
+      webhook_url: "https://app.example.com/api/gitlab/webhook/connection-1",
+      webhook_path: "/api/gitlab/webhook/connection-1",
+    };
+    expect(CreateGitLabConnectionResponseSchema.parse(reconnect)).toEqual(
+      reconnect,
+    );
+  });
+
+  it("rejects malformed GitLab connection create responses", () => {
+    expect(
+      CreateGitLabConnectionResponseSchema.safeParse({
+        connection: { id: "connection-1" },
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts config responses with future fields", () => {
     const parsed = GitLabConfigResponseSchema.parse({
       configured: true,

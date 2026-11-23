@@ -179,19 +179,19 @@ func (h *Handler) RefreshGitLabMergeRequestForIssue(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab merge request")
 		return
 	}
-	cfg := gitlab.LoadConfigFromEnv()
-	if !cfg.Configured() {
-		writeError(w, http.StatusServiceUnavailable, "gitlab integration is not configured")
+	cfg, err := h.gitLabConfigForMergeRequest(r.Context(), mr)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
 	api, err := newGitLabClient(cfg)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	detailAPI, err := detailGitLabAPI(api)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	refreshed, summary, err := h.refreshGitLabMergeRequest(r.Context(), detailAPI, mr)
@@ -231,19 +231,19 @@ func (h *Handler) MergeGitLabMergeRequestForIssue(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab merge request")
 		return
 	}
-	cfg := gitlab.LoadConfigFromEnv()
-	if !cfg.Configured() {
-		writeError(w, http.StatusServiceUnavailable, "gitlab integration is not configured")
+	cfg, err := h.gitLabConfigForMergeRequest(r.Context(), mr)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
 	api, err := newGitLabClient(cfg)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	detailAPI, err := detailGitLabAPI(api)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	if _, err := detailAPI.MergeMergeRequest(r.Context(), mr.GitlabProjectID, mr.MrIid, gitlab.MergeRequestMergeOptions{
@@ -289,19 +289,19 @@ func (h *Handler) RefreshGitLabProjectBinding(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab project")
 		return
 	}
-	cfg := gitlab.LoadConfigFromEnv()
-	if !cfg.Configured() {
-		writeError(w, http.StatusServiceUnavailable, "gitlab integration is not configured")
+	cfg, err := h.gitLabConfigForConnection(r.Context(), binding.WorkspaceID, binding.ConnectionID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
 	api, err := newGitLabClient(cfg)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	detailAPI, err := detailGitLabAPI(api)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	_ = h.Queries.MarkGitLabProjectRefreshStarted(r.Context(), db.MarkGitLabProjectRefreshStartedParams{
@@ -353,19 +353,19 @@ func (h *Handler) GetGitLabJobTrace(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cfg := gitlab.LoadConfigFromEnv()
-	if !cfg.Configured() {
-		writeError(w, http.StatusServiceUnavailable, "gitlab integration is not configured")
+	cfg, err := h.gitLabConfigForMergeRequest(r.Context(), mr)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
 	api, err := newGitLabClient(cfg)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	detailAPI, err := detailGitLabAPI(api)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	trace, err := detailAPI.GetJobTrace(r.Context(), mr.GitlabProjectID, job.JobID, gitLabFailedJobTraceLimit)
@@ -395,19 +395,19 @@ func (h *Handler) OpenGitLabJobArtifacts(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "gitlab artifact not found")
 		return
 	}
-	cfg := gitlab.LoadConfigFromEnv()
-	if !cfg.Configured() {
-		writeError(w, http.StatusServiceUnavailable, "gitlab integration is not configured")
+	cfg, err := h.gitLabConfigForMergeRequest(r.Context(), mr)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
 	api, err := newGitLabClient(cfg)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	detailAPI, err := detailGitLabAPI(api)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	resp, err := detailAPI.DownloadJobArtifacts(r.Context(), mr.GitlabProjectID, job.JobID)

@@ -92,6 +92,9 @@ func (h *Handler) openVCSSecret(enc string) (string, error) {
 	if enc == "" {
 		return "", nil
 	}
+	if h.VCSSecretBox == nil {
+		return "", errors.New("VCS secret storage is not configured")
+	}
 	ciphertext, err := base64.StdEncoding.DecodeString(enc)
 	if err != nil {
 		return "", err

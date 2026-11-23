@@ -264,9 +264,12 @@ export type {
   GitHubConnectResponse,
 } from "./github";
 export type {
+  CreateGitLabConnectionRequest,
+  CreateGitLabConnectionResponse,
   CreateGitLabProjectRequest,
   CreateGitLabProjectResponse,
   GitLabConfigResponse,
+  GitLabConnection,
   GitLabJobTraceResponse,
   GitLabMergeRequestDetailsResponse,
   GitLabMergeRequest,

@@ -112,3 +112,9 @@ Multica authentifie chaque livraison à l'aide du secret stocké : un webhook qu
 ## Agents qui ouvrent des pull requests
 
 La création de PR ne nécessite aucune configuration de fournisseur dans Multica. Les agents récupèrent les dépôts dans le runtime, puis poussent leurs branches et ouvrent les PR avec les identifiants Git propres à la machine du runtime. Pour permettre aux agents de travailler avec un fournisseur, assurez-vous que la machine du daemon peut s'y authentifier (par exemple avec une clé de déploiement SSH, ou un jeton dans le gestionnaire d'identifiants Git, credential helper, de la machine) et ajoutez l'URL du dépôt comme d'habitude. La récupération des dépôts fonctionne avec n'importe quelle URL Git : aucun câblage propre au fournisseur n'est nécessaire.
+
+## Connexions aux projets GitLab
+
+Dans **Paramètres → Code**, les propriétaires et administrateurs peuvent connecter plusieurs instances GitLab et ajouter des projets à chacune. Indiquez l'URL de l'instance et un jeton donnant accès à ces projets. Le serveur utilise `MULTICA_VCS_SECRET_KEY` pour chiffrer les jetons.
+
+Le secret du webhook n'est affiché qu'à la connexion de l'instance. Conservez-le si vous devez configurer un webhook de projet manuellement. Les projets déjà configurés dans les paramètres GitLab du serveur restent disponibles.

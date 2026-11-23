@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS gitlab_connection_workspace_host_uidx;

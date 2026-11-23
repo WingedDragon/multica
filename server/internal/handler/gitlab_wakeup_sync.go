@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/multica-ai/multica/server/internal/integrations/gitlab"
 	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -380,15 +379,9 @@ func (h *Handler) syncWorkspaceGitLabWakeupTarget(ctx context.Context, target vc
 	markFailure := func(err error) error {
 		return h.markGitLabMergeRequestRefreshErrorForGeneration(ctx, mr, mr.WakeupSyncGeneration, err)
 	}
-	config := gitlab.LoadConfigFromEnv()
-	if config.Token == "" || !strings.EqualFold(config.Host, connection.Host) {
-		return nil, markFailure(errors.New("GitLab credentials do not match the workspace connection"))
-	}
-	clientConfig := gitlab.Config{
-		BaseURL:  connection.BaseUrl,
-		Host:     connection.Host,
-		Token:    config.Token,
-		ProxyURL: config.ProxyURL,
+	clientConfig, err := h.gitLabConfigForConnectionRow(connection)
+	if err != nil {
+		return nil, markFailure(err)
 	}
 	api, err := newGitLabClient(clientConfig)
 	if err != nil {

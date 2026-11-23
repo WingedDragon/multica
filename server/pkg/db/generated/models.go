@@ -1083,13 +1083,15 @@ type GithubPullRequestCheckSuite struct {
 }
 
 type GitlabConnection struct {
-	ID            pgtype.UUID        `json:"id"`
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	BaseUrl       string             `json:"base_url"`
-	Host          string             `json:"host"`
-	ConnectedByID pgtype.UUID        `json:"connected_by_id"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID                     pgtype.UUID        `json:"id"`
+	WorkspaceID            pgtype.UUID        `json:"workspace_id"`
+	BaseUrl                string             `json:"base_url"`
+	Host                   string             `json:"host"`
+	ConnectedByID          pgtype.UUID        `json:"connected_by_id"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	AccessTokenEncrypted   string             `json:"access_token_encrypted"`
+	WebhookSecretEncrypted string             `json:"webhook_secret_encrypted"`
 }
 
 type GitlabMergeRequest struct {

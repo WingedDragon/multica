@@ -229,6 +229,8 @@ import type {
   ListGitHubInstallationsResponse,
   ListGitHubRepositoriesResponse,
   GitHubConnectResponse,
+  CreateGitLabConnectionRequest,
+  CreateGitLabConnectionResponse,
   CreateGitLabProjectRequest,
   CreateGitLabProjectResponse,
   GitLabConfigResponse,
@@ -590,8 +592,9 @@ import {
   EMPTY_LIST_ISSUE_STATUSES_RESPONSE,
   EMPTY_ISSUE_STATUS_ENTRY,
   EMPTY_RESOURCE_LABELS_RESPONSE,
-  CreateGitLabProjectResponseSchema,
+  CreateGitLabConnectionResponseSchema,
   EMPTY_GITLAB_CONFIG_RESPONSE,
+  CreateGitLabProjectResponseSchema,
   EMPTY_GITLAB_JOB_TRACE_RESPONSE,
   EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
   EMPTY_GITLAB_PROJECT_REFRESH_RESPONSE,
@@ -6050,6 +6053,23 @@ export class ApiClient {
     return parseWithFallback(raw, GitLabConfigResponseSchema, EMPTY_GITLAB_CONFIG_RESPONSE, {
       endpoint: "GET /api/workspaces/:id/gitlab/config",
     });
+  }
+
+  async createGitLabConnection(
+    workspaceId: string,
+    input: CreateGitLabConnectionRequest,
+  ): Promise<CreateGitLabConnectionResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/gitlab/connections`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    const parsed = CreateGitLabConnectionResponseSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error(
+        "Malformed response from POST /api/workspaces/:id/gitlab/connections",
+      );
+    }
+    return parsed.data;
   }
 
   async createGitLabProject(

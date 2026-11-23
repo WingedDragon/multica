@@ -84,7 +84,7 @@ func (q *Queries) DeleteGitLabProjectBinding(ctx context.Context, arg DeleteGitL
 }
 
 const getGitLabConnectionByID = `-- name: GetGitLabConnectionByID :one
-SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at FROM gitlab_connection
+SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted FROM gitlab_connection
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -104,12 +104,14 @@ func (q *Queries) GetGitLabConnectionByID(ctx context.Context, arg GetGitLabConn
 		&i.ConnectedByID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AccessTokenEncrypted,
+		&i.WebhookSecretEncrypted,
 	)
 	return i, err
 }
 
 const getGitLabConnectionByWorkspace = `-- name: GetGitLabConnectionByWorkspace :one
-SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at FROM gitlab_connection
+SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted FROM gitlab_connection
 WHERE workspace_id = $1
 ORDER BY created_at ASC
 LIMIT 1
@@ -126,6 +128,30 @@ func (q *Queries) GetGitLabConnectionByWorkspace(ctx context.Context, workspaceI
 		&i.ConnectedByID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AccessTokenEncrypted,
+		&i.WebhookSecretEncrypted,
+	)
+	return i, err
+}
+
+const getGitLabConnectionForWebhook = `-- name: GetGitLabConnectionForWebhook :one
+SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted FROM gitlab_connection
+WHERE id = $1 AND webhook_secret_encrypted <> ''
+`
+
+func (q *Queries) GetGitLabConnectionForWebhook(ctx context.Context, id pgtype.UUID) (GitlabConnection, error) {
+	row := q.db.QueryRow(ctx, getGitLabConnectionForWebhook, id)
+	var i GitlabConnection
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.BaseUrl,
+		&i.Host,
+		&i.ConnectedByID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AccessTokenEncrypted,
+		&i.WebhookSecretEncrypted,
 	)
 	return i, err
 }
@@ -513,6 +539,26 @@ func (q *Queries) GetIssueGitLabMRCloseAggregate(ctx context.Context, arg GetIss
 	return i, err
 }
 
+const gitLabConnectionHasProjectBindings = `-- name: GitLabConnectionHasProjectBindings :one
+SELECT EXISTS (
+    SELECT 1
+    FROM gitlab_project_binding
+    WHERE workspace_id = $1 AND connection_id = $2
+)
+`
+
+type GitLabConnectionHasProjectBindingsParams struct {
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ConnectionID pgtype.UUID `json:"connection_id"`
+}
+
+func (q *Queries) GitLabConnectionHasProjectBindings(ctx context.Context, arg GitLabConnectionHasProjectBindingsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, gitLabConnectionHasProjectBindings, arg.WorkspaceID, arg.ConnectionID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const linkIssueToGitLabMergeRequest = `-- name: LinkIssueToGitLabMergeRequest :exec
 INSERT INTO issue_gitlab_merge_request (
     workspace_id, issue_id, merge_request_id, linked_by_type, linked_by_id, close_intent
@@ -550,7 +596,7 @@ func (q *Queries) LinkIssueToGitLabMergeRequest(ctx context.Context, arg LinkIss
 }
 
 const listGitLabConnectionsByWorkspace = `-- name: ListGitLabConnectionsByWorkspace :many
-SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at FROM gitlab_connection
+SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted FROM gitlab_connection
 WHERE workspace_id = $1
 ORDER BY created_at ASC, id ASC
 `
@@ -572,6 +618,8 @@ func (q *Queries) ListGitLabConnectionsByWorkspace(ctx context.Context, workspac
 			&i.ConnectedByID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.AccessTokenEncrypted,
+			&i.WebhookSecretEncrypted,
 		); err != nil {
 			return nil, err
 		}
@@ -996,7 +1044,7 @@ func (q *Queries) ListGitLabMergeRequestsByProjectBindingSHA(ctx context.Context
 	return items, nil
 }
 
-const listGitLabMergeRequestsBySourceProjectHead = `-- name: ListGitLabMergeRequestsBySourceProjectHead :many
+const listGitLabMergeRequestsBySourceProjectHeadForBaseURL = `-- name: ListGitLabMergeRequestsBySourceProjectHeadForBaseURL :many
 SELECT mr.id, mr.workspace_id, mr.project_binding_id, mr.gitlab_project_id, mr.mr_iid, mr.title, mr.description, mr.state, mr.web_url, mr.source_branch, mr.target_branch, mr.author_username, mr.author_avatar_url, mr.sha, mr.merge_commit_sha, mr.detailed_merge_status, mr.has_conflicts, mr.additions, mr.deletions, mr.changed_files, mr.mr_created_at, mr.mr_updated_at, mr.merged_at, mr.closed_at, mr.created_at, mr.updated_at, mr.reviewers, mr.assignees, mr.labels, mr.last_refreshed_at, mr.last_refresh_error, mr.conflict_sha, mr.source_project_id, mr.source_project_path, mr.pipeline_sync_at, mr.pipeline_sync_error, mr.wakeup_sync_generation
 FROM gitlab_merge_request mr
 JOIN gitlab_project_binding pb
@@ -1005,21 +1053,101 @@ JOIN gitlab_project_binding pb
 JOIN gitlab_connection gc
   ON gc.id = pb.connection_id
  AND gc.workspace_id = pb.workspace_id
-WHERE gc.host = $1
+WHERE gc.base_url = $1
+  AND gc.access_token_encrypted = ''
+  AND gc.webhook_secret_encrypted = ''
   AND mr.source_project_id = $2
   AND mr.sha = $3
   AND mr.sha <> ''
 ORDER BY mr.mr_updated_at DESC, mr.id ASC
 `
 
-type ListGitLabMergeRequestsBySourceProjectHeadParams struct {
-	Host            string      `json:"host"`
+type ListGitLabMergeRequestsBySourceProjectHeadForBaseURLParams struct {
+	BaseUrl         string      `json:"base_url"`
 	SourceProjectID pgtype.Int8 `json:"source_project_id"`
 	Sha             string      `json:"sha"`
 }
 
-func (q *Queries) ListGitLabMergeRequestsBySourceProjectHead(ctx context.Context, arg ListGitLabMergeRequestsBySourceProjectHeadParams) ([]GitlabMergeRequest, error) {
-	rows, err := q.db.Query(ctx, listGitLabMergeRequestsBySourceProjectHead, arg.Host, arg.SourceProjectID, arg.Sha)
+// Keep the legacy source-project lookup scoped to environment-backed connections.
+func (q *Queries) ListGitLabMergeRequestsBySourceProjectHeadForBaseURL(ctx context.Context, arg ListGitLabMergeRequestsBySourceProjectHeadForBaseURLParams) ([]GitlabMergeRequest, error) {
+	rows, err := q.db.Query(ctx, listGitLabMergeRequestsBySourceProjectHeadForBaseURL, arg.BaseUrl, arg.SourceProjectID, arg.Sha)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GitlabMergeRequest{}
+	for rows.Next() {
+		var i GitlabMergeRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ProjectBindingID,
+			&i.GitlabProjectID,
+			&i.MrIid,
+			&i.Title,
+			&i.Description,
+			&i.State,
+			&i.WebUrl,
+			&i.SourceBranch,
+			&i.TargetBranch,
+			&i.AuthorUsername,
+			&i.AuthorAvatarUrl,
+			&i.Sha,
+			&i.MergeCommitSha,
+			&i.DetailedMergeStatus,
+			&i.HasConflicts,
+			&i.Additions,
+			&i.Deletions,
+			&i.ChangedFiles,
+			&i.MrCreatedAt,
+			&i.MrUpdatedAt,
+			&i.MergedAt,
+			&i.ClosedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Reviewers,
+			&i.Assignees,
+			&i.Labels,
+			&i.LastRefreshedAt,
+			&i.LastRefreshError,
+			&i.ConflictSha,
+			&i.SourceProjectID,
+			&i.SourceProjectPath,
+			&i.PipelineSyncAt,
+			&i.PipelineSyncError,
+			&i.WakeupSyncGeneration,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGitLabMergeRequestsBySourceProjectHeadForConnection = `-- name: ListGitLabMergeRequestsBySourceProjectHeadForConnection :many
+SELECT mr.id, mr.workspace_id, mr.project_binding_id, mr.gitlab_project_id, mr.mr_iid, mr.title, mr.description, mr.state, mr.web_url, mr.source_branch, mr.target_branch, mr.author_username, mr.author_avatar_url, mr.sha, mr.merge_commit_sha, mr.detailed_merge_status, mr.has_conflicts, mr.additions, mr.deletions, mr.changed_files, mr.mr_created_at, mr.mr_updated_at, mr.merged_at, mr.closed_at, mr.created_at, mr.updated_at, mr.reviewers, mr.assignees, mr.labels, mr.last_refreshed_at, mr.last_refresh_error, mr.conflict_sha, mr.source_project_id, mr.source_project_path, mr.pipeline_sync_at, mr.pipeline_sync_error, mr.wakeup_sync_generation
+FROM gitlab_merge_request mr
+JOIN gitlab_project_binding pb
+  ON pb.id = mr.project_binding_id
+ AND pb.workspace_id = mr.workspace_id
+WHERE pb.connection_id = $1
+  AND mr.source_project_id = $2
+  AND mr.sha = $3
+  AND mr.sha <> ''
+ORDER BY mr.mr_updated_at DESC, mr.id ASC
+`
+
+type ListGitLabMergeRequestsBySourceProjectHeadForConnectionParams struct {
+	ConnectionID    pgtype.UUID `json:"connection_id"`
+	SourceProjectID pgtype.Int8 `json:"source_project_id"`
+	Sha             string      `json:"sha"`
+}
+
+func (q *Queries) ListGitLabMergeRequestsBySourceProjectHeadForConnection(ctx context.Context, arg ListGitLabMergeRequestsBySourceProjectHeadForConnectionParams) ([]GitlabMergeRequest, error) {
+	rows, err := q.db.Query(ctx, listGitLabMergeRequestsBySourceProjectHeadForConnection, arg.ConnectionID, arg.SourceProjectID, arg.Sha)
 	if err != nil {
 		return nil, err
 	}
@@ -1134,22 +1262,73 @@ func (q *Queries) ListGitLabPipelineJobsByMR(ctx context.Context, arg ListGitLab
 	return items, nil
 }
 
-const listGitLabProjectBindingsByHostAndProjectID = `-- name: ListGitLabProjectBindingsByHostAndProjectID :many
+const listGitLabProjectBindingsByBaseURLAndProjectID = `-- name: ListGitLabProjectBindingsByBaseURLAndProjectID :many
 SELECT pb.id, pb.workspace_id, pb.connection_id, pb.gitlab_project_id, pb.path_with_namespace, pb.web_url, pb.hook_id, pb.hook_enabled, pb.last_sync_error, pb.created_at, pb.updated_at, pb.last_refresh_at, pb.last_refresh_error, pb.last_event_at, pb.last_event_type, pb.refresh_in_progress_at FROM gitlab_project_binding pb
 JOIN gitlab_connection gc
   ON gc.id = pb.connection_id
  AND gc.workspace_id = pb.workspace_id
-WHERE gc.host = $1 AND pb.gitlab_project_id = $2
+WHERE gc.base_url = $1 AND pb.gitlab_project_id = $2
+  AND gc.access_token_encrypted = ''
+  AND gc.webhook_secret_encrypted = ''
 ORDER BY pb.created_at ASC, pb.id ASC
 `
 
-type ListGitLabProjectBindingsByHostAndProjectIDParams struct {
-	Host            string `json:"host"`
+type ListGitLabProjectBindingsByBaseURLAndProjectIDParams struct {
+	BaseUrl         string `json:"base_url"`
 	GitlabProjectID int64  `json:"gitlab_project_id"`
 }
 
-func (q *Queries) ListGitLabProjectBindingsByHostAndProjectID(ctx context.Context, arg ListGitLabProjectBindingsByHostAndProjectIDParams) ([]GitlabProjectBinding, error) {
-	rows, err := q.db.Query(ctx, listGitLabProjectBindingsByHostAndProjectID, arg.Host, arg.GitlabProjectID)
+// The unscoped legacy webhook uses deployment credentials; exclude per-instance connections.
+func (q *Queries) ListGitLabProjectBindingsByBaseURLAndProjectID(ctx context.Context, arg ListGitLabProjectBindingsByBaseURLAndProjectIDParams) ([]GitlabProjectBinding, error) {
+	rows, err := q.db.Query(ctx, listGitLabProjectBindingsByBaseURLAndProjectID, arg.BaseUrl, arg.GitlabProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GitlabProjectBinding{}
+	for rows.Next() {
+		var i GitlabProjectBinding
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ConnectionID,
+			&i.GitlabProjectID,
+			&i.PathWithNamespace,
+			&i.WebUrl,
+			&i.HookID,
+			&i.HookEnabled,
+			&i.LastSyncError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LastRefreshAt,
+			&i.LastRefreshError,
+			&i.LastEventAt,
+			&i.LastEventType,
+			&i.RefreshInProgressAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGitLabProjectBindingsByConnectionAndProjectID = `-- name: ListGitLabProjectBindingsByConnectionAndProjectID :many
+SELECT id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, last_sync_error, created_at, updated_at, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at FROM gitlab_project_binding
+WHERE connection_id = $1 AND gitlab_project_id = $2
+ORDER BY created_at ASC, id ASC
+`
+
+type ListGitLabProjectBindingsByConnectionAndProjectIDParams struct {
+	ConnectionID    pgtype.UUID `json:"connection_id"`
+	GitlabProjectID int64       `json:"gitlab_project_id"`
+}
+
+func (q *Queries) ListGitLabProjectBindingsByConnectionAndProjectID(ctx context.Context, arg ListGitLabProjectBindingsByConnectionAndProjectIDParams) ([]GitlabProjectBinding, error) {
+	rows, err := q.db.Query(ctx, listGitLabProjectBindingsByConnectionAndProjectID, arg.ConnectionID, arg.GitlabProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1435,6 +1614,62 @@ func (q *Queries) MarkGitLabProjectRefreshStarted(ctx context.Context, arg MarkG
 	return err
 }
 
+const storeGitLabConnectionCredentials = `-- name: StoreGitLabConnectionCredentials :one
+UPDATE gitlab_connection
+SET access_token_encrypted = $3,
+    webhook_secret_encrypted = CASE
+        WHEN webhook_secret_encrypted = '' THEN $4
+        ELSE webhook_secret_encrypted
+    END,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+RETURNING gitlab_connection.id, gitlab_connection.workspace_id, gitlab_connection.base_url, gitlab_connection.host, gitlab_connection.connected_by_id, gitlab_connection.created_at, gitlab_connection.updated_at, gitlab_connection.access_token_encrypted, gitlab_connection.webhook_secret_encrypted,
+          (webhook_secret_encrypted = $4) AS webhook_secret_created
+`
+
+type StoreGitLabConnectionCredentialsParams struct {
+	ID                     pgtype.UUID `json:"id"`
+	WorkspaceID            pgtype.UUID `json:"workspace_id"`
+	AccessTokenEncrypted   string      `json:"access_token_encrypted"`
+	WebhookSecretEncrypted string      `json:"webhook_secret_encrypted"`
+}
+
+type StoreGitLabConnectionCredentialsRow struct {
+	ID                     pgtype.UUID        `json:"id"`
+	WorkspaceID            pgtype.UUID        `json:"workspace_id"`
+	BaseUrl                string             `json:"base_url"`
+	Host                   string             `json:"host"`
+	ConnectedByID          pgtype.UUID        `json:"connected_by_id"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	AccessTokenEncrypted   string             `json:"access_token_encrypted"`
+	WebhookSecretEncrypted string             `json:"webhook_secret_encrypted"`
+	WebhookSecretCreated   bool               `json:"webhook_secret_created"`
+}
+
+func (q *Queries) StoreGitLabConnectionCredentials(ctx context.Context, arg StoreGitLabConnectionCredentialsParams) (StoreGitLabConnectionCredentialsRow, error) {
+	row := q.db.QueryRow(ctx, storeGitLabConnectionCredentials,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.AccessTokenEncrypted,
+		arg.WebhookSecretEncrypted,
+	)
+	var i StoreGitLabConnectionCredentialsRow
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.BaseUrl,
+		&i.Host,
+		&i.ConnectedByID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AccessTokenEncrypted,
+		&i.WebhookSecretEncrypted,
+		&i.WebhookSecretCreated,
+	)
+	return i, err
+}
+
 const updateGitLabMergeRequestEnrichment = `-- name: UpdateGitLabMergeRequestEnrichment :one
 UPDATE gitlab_merge_request
 SET title = $3,
@@ -1607,11 +1842,10 @@ INSERT INTO gitlab_connection (
 ) VALUES (
     $1, $2, $3, $4
 )
-ON CONFLICT (workspace_id, host) DO UPDATE SET
-    base_url = EXCLUDED.base_url,
+ON CONFLICT (workspace_id, base_url) DO UPDATE SET
     connected_by_id = COALESCE(EXCLUDED.connected_by_id, gitlab_connection.connected_by_id),
     updated_at = now()
-RETURNING id, workspace_id, base_url, host, connected_by_id, created_at, updated_at
+RETURNING id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted
 `
 
 type UpsertGitLabConnectionParams struct {
@@ -1621,6 +1855,7 @@ type UpsertGitLabConnectionParams struct {
 	ConnectedByID pgtype.UUID `json:"connected_by_id"`
 }
 
+// Distinct base URLs may share a host; keep each connection identity stable.
 func (q *Queries) UpsertGitLabConnection(ctx context.Context, arg UpsertGitLabConnectionParams) (GitlabConnection, error) {
 	row := q.db.QueryRow(ctx, upsertGitLabConnection,
 		arg.WorkspaceID,
@@ -1637,6 +1872,8 @@ func (q *Queries) UpsertGitLabConnection(ctx context.Context, arg UpsertGitLabCo
 		&i.ConnectedByID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AccessTokenEncrypted,
+		&i.WebhookSecretEncrypted,
 	)
 	return i, err
 }

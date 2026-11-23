@@ -12,17 +12,58 @@ SELECT * FROM gitlab_connection
 WHERE workspace_id = $1
 ORDER BY created_at ASC, id ASC;
 
+-- Distinct base URLs may share a host; keep each connection identity stable.
 -- name: UpsertGitLabConnection :one
 INSERT INTO gitlab_connection (
     workspace_id, base_url, host, connected_by_id
 ) VALUES (
     $1, $2, $3, sqlc.narg('connected_by_id')
 )
-ON CONFLICT (workspace_id, host) DO UPDATE SET
-    base_url = EXCLUDED.base_url,
+ON CONFLICT (workspace_id, base_url) DO UPDATE SET
     connected_by_id = COALESCE(EXCLUDED.connected_by_id, gitlab_connection.connected_by_id),
     updated_at = now()
 RETURNING *;
+
+
+-- name: GitLabConnectionHasProjectBindings :one
+SELECT EXISTS (
+    SELECT 1
+    FROM gitlab_project_binding
+    WHERE workspace_id = $1 AND connection_id = $2
+);
+
+-- name: StoreGitLabConnectionCredentials :one
+UPDATE gitlab_connection
+SET access_token_encrypted = $3,
+    webhook_secret_encrypted = CASE
+        WHEN webhook_secret_encrypted = '' THEN $4
+        ELSE webhook_secret_encrypted
+    END,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+RETURNING gitlab_connection.*,
+          (webhook_secret_encrypted = $4) AS webhook_secret_created;
+
+-- name: GetGitLabConnectionForWebhook :one
+SELECT * FROM gitlab_connection
+WHERE id = $1 AND webhook_secret_encrypted <> '';
+
+-- name: ListGitLabProjectBindingsByConnectionAndProjectID :many
+SELECT * FROM gitlab_project_binding
+WHERE connection_id = $1 AND gitlab_project_id = $2
+ORDER BY created_at ASC, id ASC;
+
+-- name: ListGitLabMergeRequestsBySourceProjectHeadForConnection :many
+SELECT mr.*
+FROM gitlab_merge_request mr
+JOIN gitlab_project_binding pb
+  ON pb.id = mr.project_binding_id
+ AND pb.workspace_id = mr.workspace_id
+WHERE pb.connection_id = $1
+  AND mr.source_project_id = $2
+  AND mr.sha = $3
+  AND mr.sha <> ''
+ORDER BY mr.mr_updated_at DESC, mr.id ASC;
 
 -- name: ListGitLabProjectBindingsByWorkspace :many
 SELECT * FROM gitlab_project_binding
@@ -33,12 +74,15 @@ ORDER BY path_with_namespace ASC, id ASC;
 SELECT * FROM gitlab_project_binding
 WHERE id = $1 AND workspace_id = $2;
 
--- name: ListGitLabProjectBindingsByHostAndProjectID :many
+-- The unscoped legacy webhook uses deployment credentials; exclude per-instance connections.
+-- name: ListGitLabProjectBindingsByBaseURLAndProjectID :many
 SELECT pb.* FROM gitlab_project_binding pb
 JOIN gitlab_connection gc
   ON gc.id = pb.connection_id
  AND gc.workspace_id = pb.workspace_id
-WHERE gc.host = $1 AND pb.gitlab_project_id = $2
+WHERE gc.base_url = $1 AND pb.gitlab_project_id = $2
+  AND gc.access_token_encrypted = ''
+  AND gc.webhook_secret_encrypted = ''
 ORDER BY pb.created_at ASC, pb.id ASC;
 
 -- name: UpsertGitLabProjectBinding :one
@@ -164,7 +208,8 @@ ORDER BY mr.mr_created_at DESC, mr.id ASC;
 SELECT * FROM gitlab_merge_request
 WHERE workspace_id = $1 AND project_binding_id = $2 AND sha = $3
 ORDER BY mr_updated_at DESC, id ASC;
--- name: ListGitLabMergeRequestsBySourceProjectHead :many
+-- Keep the legacy source-project lookup scoped to environment-backed connections.
+-- name: ListGitLabMergeRequestsBySourceProjectHeadForBaseURL :many
 SELECT mr.*
 FROM gitlab_merge_request mr
 JOIN gitlab_project_binding pb
@@ -173,7 +218,9 @@ JOIN gitlab_project_binding pb
 JOIN gitlab_connection gc
   ON gc.id = pb.connection_id
  AND gc.workspace_id = pb.workspace_id
-WHERE gc.host = $1
+WHERE gc.base_url = $1
+  AND gc.access_token_encrypted = ''
+  AND gc.webhook_secret_encrypted = ''
   AND mr.source_project_id = $2
   AND mr.sha = $3
   AND mr.sha <> ''

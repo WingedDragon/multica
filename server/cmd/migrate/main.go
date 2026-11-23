@@ -140,6 +140,7 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"742_gitlab_connection_base_url_unique_index":               "gitlab_connection_workspace_base_url_uidx",
 	"736_vcs_gitlab_pipeline_identity_index":                    "vcs_gitlab_pipeline_identity_uidx",
 	"738_gitlab_mr_pipeline_identity_index":                     "gitlab_mr_pipeline_identity_uidx",
 	"739_gitlab_mr_pipeline_legacy_identity_index":              "gitlab_mr_pipeline_legacy_identity_uidx",
@@ -438,6 +439,7 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"743_gitlab_connection_drop_host_unique":                "gitlab_connection_workspace_host_uidx",
 	"730_drop_remote_app_connection_owner_idx":              "uq_remote_app_connection_owner",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",

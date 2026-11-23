@@ -3661,12 +3661,28 @@ export const EMPTY_INBOX_UNREAD_SUMMARY: InboxWorkspaceUnread[] = [];
 // the backend mirrors more GitLab fields. String enums intentionally parse as
 // plain strings and every object stays `.loose()` so a new GitLab state/status
 // or additive backend field does not white-screen older clients.
+// Connection objects are stripped to their public fields so token material can
+// never survive parsing if a backend accidentally includes it.
 // ---------------------------------------------------------------------------
+
+export const GitLabConnectionSchema = z
+  .object({
+    id: z.string(),
+    workspace_id: z.string(),
+    base_url: z.string(),
+    host: z.string(),
+    server_configured: z.boolean().optional(),
+    webhook_url: z.string().nullable().optional(),
+    webhook_path: z.string().nullable().optional(),
+  })
+  .strip();
+
 
 export const GitLabProjectBindingSchema = z
   .object({
     id: z.string(),
     workspace_id: z.string(),
+    connection_id: z.string().nullable().optional(),
     gitlab_project_id: z.number(),
     path_with_namespace: z.string(),
     web_url: z.string(),
@@ -3704,14 +3720,28 @@ export const GitLabConfigResponseSchema = z
     can_manage: z.boolean().optional(),
     base_url: z.string().optional(),
     manual_webhook_url: z.string().optional(),
+    credential_storage_configured: z.boolean().default(false),
+    connections: z.array(GitLabConnectionSchema).default([]),
     projects: z.array(GitLabProjectBindingSchema).default([]),
   })
-  .loose();
+  .strip();
 
 export const EMPTY_GITLAB_CONFIG_RESPONSE: GitLabConfigResponse = {
   configured: false,
+  credential_storage_configured: false,
+  connections: [],
   projects: [],
 };
+
+export const CreateGitLabConnectionResponseSchema = z
+  .object({
+    connection: GitLabConnectionSchema,
+    webhook_secret: z.string().min(1).optional(),
+    webhook_url: z.string(),
+    webhook_path: z.string().min(1),
+  })
+  .strip();
+
 
 export const CreateGitLabProjectResponseSchema = z
   .object({

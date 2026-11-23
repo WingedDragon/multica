@@ -113,3 +113,9 @@ Multica authenticates every delivery against the stored secret, so a webhook wit
 ## Agents opening pull requests
 
 Agents need no provider configuration in Multica to open PRs. They check out repositories in the runtime and push branches and open PRs using the runtime host's own Git credentials. To let agents work against a provider, ensure the daemon host can authenticate to it (for example with an SSH deploy key, or a token in the host's Git credential helper) and add the repository URL as usual. Repository checkout works with any Git URL, so no provider-specific wiring is required.
+
+## GitLab project connections
+
+In **Settings → Code**, workspace owners and admins can connect multiple GitLab instances in the GitLab section and add projects under each instance. Enter the instance URL and an access token with access to those projects. The server needs `MULTICA_VCS_SECRET_KEY` to encrypt the tokens.
+
+The webhook secret is shown only when the instance is connected. Save it if you need to configure a project webhook manually. Existing projects configured through the server's GitLab settings remain available.

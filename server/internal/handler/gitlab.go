@@ -24,6 +24,7 @@ import (
 
 type gitLabAPI interface {
 	GetProject(context.Context, string) (gitlab.Project, error)
+	ValidateCredentials(context.Context) error
 	CreateProjectHook(context.Context, int64, string, string) (gitlab.ProjectHook, error)
 	DeleteProjectHook(context.Context, int64, int64) error
 }
@@ -50,19 +51,33 @@ type GitLabProjectBindingResponse struct {
 	CreatedAt           string  `json:"created_at"`
 }
 type GitLabConnectionResponse struct {
-	ID          string `json:"id"`
-	WorkspaceID string `json:"workspace_id"`
-	BaseURL     string `json:"base_url"`
-	Host        string `json:"host"`
+	ID               string `json:"id"`
+	WorkspaceID      string `json:"workspace_id"`
+	BaseURL          string `json:"base_url"`
+	Host             string `json:"host"`
+	ServerConfigured bool   `json:"server_configured"`
+	WebhookURL       string `json:"webhook_url,omitempty"`
+	WebhookPath      string `json:"webhook_path,omitempty"`
 }
 
 type GitLabConfigResponse struct {
-	Configured       bool                           `json:"configured"`
-	CanManage        bool                           `json:"can_manage"`
-	BaseURL          string                         `json:"base_url,omitempty"`
-	ManualWebhookURL string                         `json:"manual_webhook_url,omitempty"`
-	Connections      []GitLabConnectionResponse     `json:"connections"`
-	Projects         []GitLabProjectBindingResponse `json:"projects"`
+	Configured                  bool                           `json:"configured"`
+	CanManage                   bool                           `json:"can_manage"`
+	CredentialStorageConfigured bool                           `json:"credential_storage_configured"`
+	BaseURL                     string                         `json:"base_url,omitempty"`
+	ManualWebhookURL            string                         `json:"manual_webhook_url,omitempty"`
+	Connections                 []GitLabConnectionResponse     `json:"connections"`
+	Projects                    []GitLabProjectBindingResponse `json:"projects"`
+}
+
+type createGitLabConnectionRequest struct {
+	BaseURL     string `json:"base_url"`
+	AccessToken string `json:"access_token"`
+}
+
+type createGitLabProjectRequest struct {
+	ConnectionID string `json:"connection_id"`
+	Project      string `json:"project"`
 }
 
 type GitLabMergeRequestResponse struct {
@@ -95,10 +110,6 @@ type GitLabMergeRequestResponse struct {
 	ClosedAt            *string         `json:"closed_at"`
 	MRCreatedAt         string          `json:"mr_created_at"`
 	MRUpdatedAt         string          `json:"mr_updated_at"`
-}
-
-type createGitLabProjectRequest struct {
-	Project string `json:"project"`
 }
 
 func gitLabProjectBindingToResponse(row db.GitlabProjectBinding) GitLabProjectBindingResponse {
@@ -172,11 +183,57 @@ func normalizeGitLabProjectInput(raw string, baseHost string) (string, bool) {
 	return s, true
 }
 
-func (h *Handler) gitLabWebhookURL() string {
-	if h.cfg.PublicURL != "" {
-		return strings.TrimRight(h.cfg.PublicURL, "/") + "/api/webhooks/gitlab"
+func (h *Handler) gitLabWebhookPath(connectionID string) string {
+	path := "/api/webhooks/gitlab"
+	if connectionID != "" {
+		path += "/" + connectionID
 	}
-	return "/api/webhooks/gitlab"
+	return path
+}
+
+func (h *Handler) gitLabWebhookURL(connectionID ...string) string {
+	id := ""
+	if len(connectionID) > 0 {
+		id = connectionID[0]
+	}
+	path := h.gitLabWebhookPath(id)
+	if h.cfg.PublicURL == "" {
+		return path
+	}
+	return strings.TrimRight(h.cfg.PublicURL, "/") + path
+}
+
+func normalizeGitLabConnectionBaseURL(raw string) (string, string, bool) {
+	baseURL := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if baseURL == "" {
+		return "", "", false
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", "", false
+	}
+	return baseURL, strings.ToLower(u.Host), true
+}
+
+func (h *Handler) gitLabConnectionToResponse(row db.GitlabConnection, includeWebhook bool) GitLabConnectionResponse {
+	response := GitLabConnectionResponse{
+		ID:               uuidToString(row.ID),
+		WorkspaceID:      uuidToString(row.WorkspaceID),
+		BaseURL:          row.BaseUrl,
+		Host:             row.Host,
+		ServerConfigured: gitLabConnectionServerConfigured(row),
+	}
+	if includeWebhook {
+		if row.WebhookSecretEncrypted != "" {
+			response.WebhookURL = h.gitLabWebhookURL(response.ID)
+			response.WebhookPath = h.gitLabWebhookPath(response.ID)
+		} else {
+			response.WebhookURL = h.gitLabWebhookURL()
+			response.WebhookPath = h.gitLabWebhookPath("")
+		}
+	}
+	return response
 }
 
 func (h *Handler) GetGitLabConfig(w http.ResponseWriter, r *http.Request) {
@@ -194,14 +251,13 @@ func (h *Handler) GetGitLabConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list gitlab connections")
 		return
 	}
+	configured := cfg.Configured()
 	connectionResponses := make([]GitLabConnectionResponse, 0, len(connections))
 	for _, row := range connections {
-		connectionResponses = append(connectionResponses, GitLabConnectionResponse{
-			ID:          uuidToString(row.ID),
-			WorkspaceID: uuidToString(row.WorkspaceID),
-			BaseURL:     row.BaseUrl,
-			Host:        row.Host,
-		})
+		if row.AccessTokenEncrypted != "" {
+			configured = true
+		}
+		connectionResponses = append(connectionResponses, h.gitLabConnectionToResponse(row, true))
 	}
 	rows, err := h.Queries.ListGitLabProjectBindingsByWorkspace(r.Context(), wsUUID)
 	if err != nil {
@@ -213,12 +269,13 @@ func (h *Handler) GetGitLabConfig(w http.ResponseWriter, r *http.Request) {
 		projects = append(projects, gitLabProjectBindingToResponse(row))
 	}
 	writeJSON(w, http.StatusOK, GitLabConfigResponse{
-		Configured:       cfg.Configured(),
-		CanManage:        canManage,
-		BaseURL:          cfg.BaseURL,
-		ManualWebhookURL: h.gitLabWebhookURL(),
-		Connections:      connectionResponses,
-		Projects:         projects,
+		Configured:                  configured,
+		CanManage:                   canManage,
+		CredentialStorageConfigured: h.VCSSecretBox != nil,
+		BaseURL:                     cfg.BaseURL,
+		ManualWebhookURL:            h.gitLabWebhookURL(),
+		Connections:                 connectionResponses,
+		Projects:                    projects,
 	})
 }
 
@@ -228,14 +285,42 @@ func (h *Handler) CreateGitLabProjectBinding(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	cfg := gitlab.LoadConfigFromEnv()
-	if !cfg.Configured() {
-		writeError(w, http.StatusServiceUnavailable, "gitlab integration is not configured")
-		return
-	}
 	var req createGitLabProjectRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	cfg := gitlab.LoadConfigFromEnv()
+	var connection db.GitlabConnection
+	connectionRequested := req.ConnectionID != ""
+	useScopedWebhook := false
+	var err error
+	if connectionRequested {
+		connectionID, ok := parseUUIDOrBadRequest(w, req.ConnectionID, "connection id")
+		if !ok {
+			return
+		}
+		connection, err = h.Queries.GetGitLabConnectionByID(r.Context(), db.GetGitLabConnectionByIDParams{
+			ID:          connectionID,
+			WorkspaceID: wsUUID,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "gitlab connection not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to load gitlab connection")
+			return
+		}
+		cfg, err = h.gitLabConfigForConnectionRow(connection)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
+			return
+		}
+		useScopedWebhook = connection.WebhookSecretEncrypted != ""
+	} else if !cfg.Configured() {
+		writeError(w, http.StatusServiceUnavailable, "gitlab integration is not configured")
 		return
 	}
 	projectPath, ok := normalizeGitLabProjectInput(req.Project, cfg.Host)
@@ -245,43 +330,52 @@ func (h *Handler) CreateGitLabProjectBinding(w http.ResponseWriter, r *http.Requ
 	}
 	api, err := newGitLabClient(cfg)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	project, err := api.GetProject(r.Context(), projectPath)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 
-	connectedBy := pgtype.UUID{}
-	if member, ok := ctxMember(r.Context()); ok {
-		connectedBy = member.UserID
-	} else if userID := requestUserID(r); userID != "" {
-		if u, err := parseStrictUUID(userID); err == nil {
-			connectedBy = u
+	if !connection.ID.Valid {
+		connectedBy := pgtype.UUID{}
+		if member, ok := ctxMember(r.Context()); ok {
+			connectedBy = member.UserID
+		} else if userID := requestUserID(r); userID != "" {
+			if u, err := parseStrictUUID(userID); err == nil {
+				connectedBy = u
+			}
 		}
-	}
-	conn, err := h.Queries.UpsertGitLabConnection(r.Context(), db.UpsertGitLabConnectionParams{
-		WorkspaceID:   wsUUID,
-		BaseUrl:       cfg.BaseURL,
-		Host:          cfg.Host,
-		ConnectedByID: connectedBy,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save gitlab connection")
-		return
+		connection, err = h.Queries.UpsertGitLabConnection(r.Context(), db.UpsertGitLabConnectionParams{
+			WorkspaceID:   wsUUID,
+			BaseUrl:       cfg.BaseURL,
+			Host:          cfg.Host,
+			ConnectedByID: connectedBy,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusConflict, "a GitLab connection already exists for this host with a different base URL")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to save gitlab connection")
+			}
+			return
+		}
 	}
 
 	webhookURL := h.gitLabWebhookURL()
+	if useScopedWebhook {
+		webhookURL = h.gitLabWebhookURL(uuidToString(connection.ID))
+	}
 	hookEnabled := false
 	hookID := pgtype.Int8{}
 	lastSyncError := pgtype.Text{}
-	if existing, ok := h.findExistingGitLabProjectBinding(r.Context(), wsUUID, conn.ID, project.ID); ok && existing.HookEnabled && existing.HookID.Valid {
+	if existing, ok := h.findExistingGitLabProjectBinding(r.Context(), wsUUID, connection.ID, project.ID); ok && existing.HookEnabled && existing.HookID.Valid {
 		hookEnabled = true
 		hookID = existing.HookID
 		lastSyncError = existing.LastSyncError
-	} else if h.cfg.PublicURL != "" {
+	} else if h.cfg.PublicURL != "" && cfg.WebhookSecret != "" {
 		hook, err := api.CreateProjectHook(r.Context(), project.ID, webhookURL, cfg.WebhookSecret)
 		if err != nil {
 			lastSyncError = strToText(redact.Text(err.Error()))
@@ -291,14 +385,15 @@ func (h *Handler) CreateGitLabProjectBinding(w http.ResponseWriter, r *http.Requ
 			lastSyncError = pgtype.Text{}
 		}
 	} else {
-		lastSyncError = pgtype.Text{
-			String: "MULTICA_PUBLIC_URL is not configured; create the GitLab webhook manually",
-			Valid:  true,
+		message := "MULTICA_PUBLIC_URL is not configured; create the GitLab webhook manually"
+		if cfg.WebhookSecret == "" {
+			message = "GitLab webhook secret is unavailable; create the GitLab webhook manually"
 		}
+		lastSyncError = pgtype.Text{String: message, Valid: true}
 	}
 	binding, err := h.Queries.UpsertGitLabProjectBinding(r.Context(), db.UpsertGitLabProjectBindingParams{
 		WorkspaceID:       wsUUID,
-		ConnectionID:      conn.ID,
+		ConnectionID:      connection.ID,
 		GitlabProjectID:   project.ID,
 		PathWithNamespace: project.PathWithNamespace,
 		WebUrl:            project.WebURL,
@@ -414,20 +509,20 @@ func (h *Handler) DeleteGitLabProjectBinding(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to remove gitlab project")
 		return
 	}
-	cfg := gitlab.LoadConfigFromEnv()
 	if binding.HookID.Valid {
-		if cfg.BaseURL == "" || cfg.Token == "" {
-			writeError(w, http.StatusServiceUnavailable, "gitlab api is not configured")
+		cfg, err := h.gitLabConfigForConnection(r.Context(), wsUUID, binding.ConnectionID)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "gitlab credentials are unavailable")
 			return
 		}
 		api, err := newGitLabClient(cfg)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 			return
 		}
 		if err := api.DeleteProjectHook(r.Context(), binding.GitlabProjectID, binding.HookID.Int64); err != nil {
 			if err.Error() != "gitlab project not found" {
-				writeError(w, http.StatusBadGateway, err.Error())
+				writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 				return
 			}
 		}
@@ -451,8 +546,25 @@ func (h *Handler) DeleteGitLabProjectBinding(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *Handler) HandleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
+	connectionID := pgtype.UUID{}
 	cfg := gitlab.LoadConfigFromEnv()
-	if cfg.WebhookSecret == "" {
+	if rawConnectionID := chi.URLParam(r, "connectionId"); rawConnectionID != "" {
+		var ok bool
+		connectionID, ok = parseUUIDOrBadRequest(w, rawConnectionID, "connection id")
+		if !ok {
+			return
+		}
+		_, webhookConfig, err := h.gitLabWebhookConnectionConfig(r.Context(), connectionID)
+		if err != nil {
+			if gitLabConnectionNotFound(err) || h.VCSSecretBox == nil {
+				writeError(w, http.StatusNotFound, "unknown GitLab connection")
+			} else {
+				writeError(w, http.StatusInternalServerError, "GitLab webhook credentials are unavailable")
+			}
+			return
+		}
+		cfg = webhookConfig
+	} else if cfg.WebhookSecret == "" {
 		writeError(w, http.StatusServiceUnavailable, "gitlab webhooks not configured")
 		return
 	}
@@ -473,7 +585,7 @@ func (h *Handler) HandleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Header.Get("X-Gitlab-Event") {
 	case "Merge Request Hook":
-		valid, err := h.handleGitLabMergeRequestEvent(r.Context(), cfg, body)
+		valid, err := h.handleGitLabMergeRequestEvent(r.Context(), cfg, body, connectionID)
 		if err != nil {
 			slog.Warn("gitlab: merge request webhook persistence failed", "reason", gitLabWakeupFailureMessage(err))
 			writeError(w, http.StatusServiceUnavailable, "merge request sync failed")
@@ -485,7 +597,7 @@ func (h *Handler) HandleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusAccepted)
 	case "Pipeline Hook":
-		valid, err := h.handleGitLabPipelineEvent(r.Context(), cfg, body)
+		valid, err := h.handleGitLabPipelineEvent(r.Context(), cfg, body, connectionID)
 		if err != nil {
 			slog.Warn("gitlab: pipeline webhook refresh failed", "reason", gitLabWakeupFailureMessage(err))
 			writeError(w, http.StatusServiceUnavailable, "pipeline sync failed")
@@ -506,7 +618,7 @@ func (h *Handler) HandleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		switch event.ObjectKind {
 		case "merge_request":
-			valid, err := h.handleGitLabMergeRequestEvent(r.Context(), cfg, body)
+			valid, err := h.handleGitLabMergeRequestEvent(r.Context(), cfg, body, connectionID)
 			if err != nil {
 				slog.Warn("gitlab: merge request system hook persistence failed", "reason", gitLabWakeupFailureMessage(err))
 				writeError(w, http.StatusServiceUnavailable, "merge request sync failed")
@@ -518,7 +630,7 @@ func (h *Handler) HandleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 			}
 			w.WriteHeader(http.StatusAccepted)
 		case "pipeline":
-			valid, err := h.handleGitLabPipelineEvent(r.Context(), cfg, body)
+			valid, err := h.handleGitLabPipelineEvent(r.Context(), cfg, body, connectionID)
 			if err != nil {
 				slog.Warn("gitlab: pipeline system hook refresh failed", "reason", gitLabWakeupFailureMessage(err))
 				writeError(w, http.StatusServiceUnavailable, "pipeline sync failed")
@@ -533,13 +645,13 @@ func (h *Handler) HandleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		}
 	case "Job Hook":
-		if !h.handleGitLabJobEvent(r.Context(), cfg, body) {
+		if !h.handleGitLabJobEvent(r.Context(), cfg, body, connectionID) {
 			writeError(w, http.StatusBadRequest, "invalid job payload")
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
 	case "Note Hook":
-		if !h.handleGitLabNoteEvent(r.Context(), cfg, body) {
+		if !h.handleGitLabNoteEvent(r.Context(), cfg, body, connectionID) {
 			writeError(w, http.StatusBadRequest, "invalid note payload")
 			return
 		}
@@ -594,15 +706,25 @@ type gitLabMRWebhookPayload struct {
 	} `json:"changes"`
 }
 
-func (h *Handler) handleGitLabMergeRequestEvent(ctx context.Context, cfg gitlab.Config, body []byte) (bool, error) {
+func (h *Handler) gitLabProjectBindingsForEvent(ctx context.Context, cfg gitlab.Config, connectionID pgtype.UUID, projectID int64) ([]db.GitlabProjectBinding, error) {
+	if connectionID.Valid {
+		return h.Queries.ListGitLabProjectBindingsByConnectionAndProjectID(ctx, db.ListGitLabProjectBindingsByConnectionAndProjectIDParams{
+			ConnectionID:    connectionID,
+			GitlabProjectID: projectID,
+		})
+	}
+	return h.Queries.ListGitLabProjectBindingsByBaseURLAndProjectID(ctx, db.ListGitLabProjectBindingsByBaseURLAndProjectIDParams{
+		BaseUrl:         cfg.BaseURL,
+		GitlabProjectID: projectID,
+	})
+}
+
+func (h *Handler) handleGitLabMergeRequestEvent(ctx context.Context, cfg gitlab.Config, body []byte, connectionID pgtype.UUID) (bool, error) {
 	var p gitLabMRWebhookPayload
 	if err := json.Unmarshal(body, &p); err != nil || p.Project.ID <= 0 || p.ObjectAttributes.IID <= 0 {
 		return false, nil
 	}
-	bindings, err := h.Queries.ListGitLabProjectBindingsByHostAndProjectID(ctx, db.ListGitLabProjectBindingsByHostAndProjectIDParams{
-		Host:            cfg.Host,
-		GitlabProjectID: p.Project.ID,
-	})
+	bindings, err := h.gitLabProjectBindingsForEvent(ctx, cfg, connectionID, p.Project.ID)
 	if err != nil {
 		slog.Warn("gitlab: lookup project bindings failed", "err", err, "project_id", p.Project.ID)
 		return false, err
@@ -757,7 +879,7 @@ type gitLabPipelineWebhookPayload struct {
 	} `json:"project"`
 }
 
-func (h *Handler) handleGitLabPipelineEvent(ctx context.Context, cfg gitlab.Config, body []byte) (bool, error) {
+func (h *Handler) handleGitLabPipelineEvent(ctx context.Context, cfg gitlab.Config, body []byte, connectionID pgtype.UUID) (bool, error) {
 	var p gitLabPipelineWebhookPayload
 	if err := json.Unmarshal(body, &p); err != nil || p.Project.ID <= 0 || p.ObjectAttributes.ID <= 0 || p.ObjectAttributes.SHA == "" {
 		return false, nil
@@ -772,10 +894,7 @@ func (h *Handler) handleGitLabPipelineEvent(ctx context.Context, cfg gitlab.Conf
 	if !pipelineUpdatedAt.Valid {
 		return false, nil
 	}
-	bindings, err := h.Queries.ListGitLabProjectBindingsByHostAndProjectID(ctx, db.ListGitLabProjectBindingsByHostAndProjectIDParams{
-		Host:            cfg.Host,
-		GitlabProjectID: p.Project.ID,
-	})
+	bindings, err := h.gitLabProjectBindingsForEvent(ctx, cfg, connectionID, p.Project.ID)
 	if err != nil {
 		slog.Warn("gitlab: lookup project bindings for pipeline failed", "err", err, "project_id", p.Project.ID)
 		return false, err
@@ -806,11 +925,20 @@ func (h *Handler) handleGitLabPipelineEvent(ctx context.Context, cfg gitlab.Conf
 			addCandidate(mr)
 		}
 	}
-	sourceMRs, err := h.Queries.ListGitLabMergeRequestsBySourceProjectHead(ctx, db.ListGitLabMergeRequestsBySourceProjectHeadParams{
-		Host:            cfg.Host,
-		SourceProjectID: pgtype.Int8{Int64: p.Project.ID, Valid: p.Project.ID > 0},
-		Sha:             p.ObjectAttributes.SHA,
-	})
+	var sourceMRs []db.GitlabMergeRequest
+	if connectionID.Valid {
+		sourceMRs, err = h.Queries.ListGitLabMergeRequestsBySourceProjectHeadForConnection(ctx, db.ListGitLabMergeRequestsBySourceProjectHeadForConnectionParams{
+			ConnectionID:    connectionID,
+			SourceProjectID: pgtype.Int8{Int64: p.Project.ID, Valid: p.Project.ID > 0},
+			Sha:             p.ObjectAttributes.SHA,
+		})
+	} else {
+		sourceMRs, err = h.Queries.ListGitLabMergeRequestsBySourceProjectHeadForBaseURL(ctx, db.ListGitLabMergeRequestsBySourceProjectHeadForBaseURLParams{
+			BaseUrl:         cfg.BaseURL,
+			SourceProjectID: pgtype.Int8{Int64: p.Project.ID, Valid: p.Project.ID > 0},
+			Sha:             p.ObjectAttributes.SHA,
+		})
+	}
 	if err != nil {
 		return false, err
 	}
@@ -918,7 +1046,7 @@ type gitLabWebhookArtifactFilePayload struct {
 	Size     int64  `json:"size"`
 }
 
-func (h *Handler) handleGitLabJobEvent(ctx context.Context, cfg gitlab.Config, body []byte) bool {
+func (h *Handler) handleGitLabJobEvent(ctx context.Context, cfg gitlab.Config, body []byte, connectionID pgtype.UUID) bool {
 	var p gitLabJobWebhookPayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return false
@@ -930,10 +1058,7 @@ func (h *Handler) handleGitLabJobEvent(ctx context.Context, cfg gitlab.Config, b
 	if projectID == 0 || p.BuildID == 0 || p.BuildSHA == "" {
 		return false
 	}
-	bindings, err := h.Queries.ListGitLabProjectBindingsByHostAndProjectID(ctx, db.ListGitLabProjectBindingsByHostAndProjectIDParams{
-		Host:            cfg.Host,
-		GitlabProjectID: projectID,
-	})
+	bindings, err := h.gitLabProjectBindingsForEvent(ctx, cfg, connectionID, projectID)
 	if err != nil {
 		slog.Warn("gitlab: lookup project bindings for job failed", "err", err, "project_id", projectID)
 		return true
@@ -961,6 +1086,7 @@ func (h *Handler) handleGitLabJobEvent(ctx context.Context, cfg gitlab.Config, b
 					WorkspaceID:          mr.WorkspaceID,
 					WakeupSyncGeneration: mr.WakeupSyncGeneration,
 					PipelineID:           p.PipelineID,
+					PipelineProjectID:    projectID,
 					Sha:                  p.BuildSHA,
 					Status:               normalizeGitLabPipelineStatus(p.BuildStatus),
 					PipelineUpdatedAt:    parseGitLabTimeRequired(firstNonEmpty(p.BuildFinishedAt, p.BuildStartedAt)),
@@ -1025,7 +1151,7 @@ type gitLabNoteWebhookPayload struct {
 	} `json:"object_attributes"`
 }
 
-func (h *Handler) handleGitLabNoteEvent(ctx context.Context, cfg gitlab.Config, body []byte) bool {
+func (h *Handler) handleGitLabNoteEvent(ctx context.Context, cfg gitlab.Config, body []byte, connectionID pgtype.UUID) bool {
 	var p gitLabNoteWebhookPayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return false
@@ -1050,10 +1176,7 @@ func (h *Handler) handleGitLabNoteEvent(ctx context.Context, cfg gitlab.Config, 
 		slog.Warn("gitlab: detail client for note refresh unavailable", "err", err)
 		return true
 	}
-	bindings, err := h.Queries.ListGitLabProjectBindingsByHostAndProjectID(ctx, db.ListGitLabProjectBindingsByHostAndProjectIDParams{
-		Host:            cfg.Host,
-		GitlabProjectID: p.Project.ID,
-	})
+	bindings, err := h.gitLabProjectBindingsForEvent(ctx, cfg, connectionID, p.Project.ID)
 	if err != nil {
 		slog.Warn("gitlab: lookup project bindings for note failed", "err", err, "project_id", p.Project.ID)
 		return true

@@ -10,6 +10,7 @@ export const gitlabKeys = {
   jobTrace: (issueId: string, jobId: string) => ["gitlab", "job-trace", issueId, jobId] as const,
 };
 
+/** Workspace snapshot of deployment and per-instance GitLab project bindings. */
 export const gitlabConfigOptions = (wsId: string) =>
   queryOptions({
     queryKey: gitlabKeys.config(wsId),

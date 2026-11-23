@@ -1757,6 +1757,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// HMAC-SHA256 signature in the handler) and post-install setup callback.
 	r.Post("/api/webhooks/github", h.HandleGitHubWebhook)
 	r.Post("/api/webhooks/gitlab", h.HandleGitLabWebhook)
+	// Workspace GitLab connections use a connection-scoped path and encrypted
+	// per-connection webhook token; the legacy env-configured path above remains.
+	r.Post("/api/webhooks/gitlab/{connectionId}", h.HandleGitLabWebhook)
 	r.Get("/api/github/setup", h.GitHubSetupCallback)
 	// Slack OAuth callback (no Multica auth in the path — it is hit by Slack's
 	// browser redirect; the workspace/agent/initiator are recovered from the
@@ -2065,6 +2068,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/github/connect", h.GitHubConnect)
 					r.Get("/github/installations/{installationId}/repositories", h.ListGitHubInstallationRepositories)
 					r.Delete("/github/installations/{installationId}", h.DeleteGitHubInstallation)
+					r.Post("/gitlab/connections", h.CreateGitLabConnection)
 					r.Post("/gitlab/projects", h.CreateGitLabProjectBinding)
 					r.Post("/gitlab/projects/{bindingId}/refresh", h.RefreshGitLabProjectBinding)
 					r.Delete("/gitlab/projects/{bindingId}", h.DeleteGitLabProjectBinding)

@@ -112,3 +112,9 @@ Multica는 저장된 secret으로 모든 delivery를 검증하므로 일치하�
 ## 에이전트의 Pull Request 생성
 
 PR을 만드는 데 Multica의 Git 코드 호스팅 설정은 필요하지 않습니다. 에이전트는 런타임에서 저장소를 checkout하고 런타임 host 자체의 Git 자격 증명으로 브랜치를 push하고 PR을 만듭니다. 에이전트가 특정 코드 호스팅에서 작업하게 하려면 SSH deploy key 또는 host의 Git credential helper에 저장된 token 등을 사용해 데몬 host가 해당 서비스에 인증할 수 있게 하고 평소처럼 저장소 URL을 추가하세요. 저장소 checkout은 모든 Git URL을 지원하므로 제공자별 설정이 필요하지 않습니다.
+
+## GitLab 프로젝트 연결
+
+**설정 → 코드**의 GitLab 영역에서 워크스페이스 소유자와 관리자는 여러 GitLab 인스턴스를 연결하고 각 인스턴스에 프로젝트를 추가할 수 있습니다. 인스턴스 URL과 해당 프로젝트에 접근할 수 있는 토큰을 입력하세요. 서버는 `MULTICA_VCS_SECRET_KEY`로 토큰을 암호화합니다.
+
+Webhook secret은 인스턴스를 연결할 때 한 번만 표시됩니다. 프로젝트 Webhook을 직접 설정해야 한다면 저장해 두세요. 서버의 GitLab 설정으로 등록한 기존 프로젝트도 계속 사용할 수 있습니다.

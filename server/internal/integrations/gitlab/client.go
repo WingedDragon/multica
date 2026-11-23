@@ -24,6 +24,9 @@ const (
 	gitLabMaxTraceReadSize = 1 << 20
 )
 
+// ErrUnauthorized indicates that GitLab rejected the supplied access token.
+var ErrUnauthorized = errors.New("gitlab token invalid")
+
 type Client struct {
 	cfg        Config
 	httpClient *http.Client
@@ -84,6 +87,11 @@ func (c *Client) GetProject(ctx context.Context, projectPath string) (Project, e
 	var out Project
 	err := c.doJSON(ctx, http.MethodGet, "/api/v4/projects/"+url.PathEscape(projectPath), nil, &out)
 	return out, err
+}
+
+// ValidateCredentials confirms that the token can authenticate to this instance.
+func (c *Client) ValidateCredentials(ctx context.Context) error {
+	return c.doJSON(ctx, http.MethodGet, "/api/v4/user", nil, nil)
 }
 
 func (c *Client) GetMergeRequest(ctx context.Context, projectID int64, iid int32) (MergeRequest, error) {
@@ -284,7 +292,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, in any) (*http.
 		_ = resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:
-			return nil, errors.New("gitlab token invalid")
+			return nil, ErrUnauthorized
 		case http.StatusForbidden:
 			return nil, errors.New("gitlab token lacks required project permission")
 		case http.StatusNotFound:

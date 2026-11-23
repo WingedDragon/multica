@@ -16,7 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/gitlab"
+	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/util/secretbox"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -95,6 +97,15 @@ type fakeGitLabAPI struct {
 	createHookCalls int
 	deleteHookCalls int
 	deleteErr       error
+	createHookErr   error
+	validationErr   error
+	validationCalls int
+	clientConfig    gitlab.Config
+}
+
+func (f *fakeGitLabAPI) ValidateCredentials(context.Context) error {
+	f.validationCalls++
+	return f.validationErr
 }
 
 func (f *fakeGitLabAPI) GetProject(context.Context, string) (gitlab.Project, error) {
@@ -103,6 +114,9 @@ func (f *fakeGitLabAPI) GetProject(context.Context, string) (gitlab.Project, err
 
 func (f *fakeGitLabAPI) CreateProjectHook(context.Context, int64, string, string) (gitlab.ProjectHook, error) {
 	f.createHookCalls++
+	if f.createHookErr != nil {
+		return gitlab.ProjectHook{}, f.createHookErr
+	}
 	return gitlab.ProjectHook{ID: f.createHookID}, nil
 }
 
@@ -229,7 +243,8 @@ func installFakeGitLabClient(t *testing.T, fake *fakeGitLabAPI) {
 	prev := newGitLabClient
 	prevOverride := gitLabClientOverrideForTest
 	gitLabClientOverrideForTest = true
-	newGitLabClient = func(gitlab.Config) (gitLabAPI, error) {
+	newGitLabClient = func(cfg gitlab.Config) (gitLabAPI, error) {
+		fake.clientConfig = cfg
 		return fake, nil
 	}
 	t.Cleanup(func() {
@@ -778,6 +793,8 @@ func TestRefreshGitLabMergeRequestForIssueUpdatesCachedContext(t *testing.T) {
 	fake := &fakeGitLabDetailAPI{
 		mr: gitlab.MergeRequest{
 			IID:                 9,
+			SourceProjectID:     projectID,
+			SourceProject:       gitlab.Project{ID: projectID, PathWithNamespace: "group/project-99103"},
 			Title:               "Fresh GitLab title",
 			Description:         "fresh description",
 			State:               "opened",
@@ -815,6 +832,7 @@ func TestRefreshGitLabMergeRequestForIssueUpdatesCachedContext(t *testing.T) {
 		}},
 		pipelines: []gitlab.Pipeline{{
 			ID:        88,
+			ProjectID: projectID,
 			SHA:       "newsha",
 			Ref:       "feature/fresh",
 			Status:    "failed",
@@ -986,13 +1004,16 @@ func TestRefreshGitLabProjectBindingRefreshesKnownMergeRequests(t *testing.T) {
 
 	installFakeGitLabDetailClient(t, &fakeGitLabDetailAPI{
 		mr: gitlab.MergeRequest{
-			IID:       20,
-			Title:     "Project refresh title",
-			State:     "opened",
-			WebURL:    "https://code.mlamp.cn/group/project-99114/-/merge_requests/20",
-			SHA:       "newsha",
-			CreatedAt: "2026-04-28T00:00:00Z",
-			UpdatedAt: "2026-04-30T00:00:00Z",
+			IID:             20,
+			Title:           "Project refresh title",
+			State:           "opened",
+			WebURL:          "https://code.mlamp.cn/group/project-99114/-/merge_requests/20",
+			SourceProjectID: projectID,
+			SourceProject:   gitlab.Project{ID: projectID, PathWithNamespace: "group/project-99114"},
+			SourceBranch:    "feature/project-refresh",
+			SHA:             "newsha",
+			CreatedAt:       "2026-04-28T00:00:00Z",
+			UpdatedAt:       "2026-04-30T00:00:00Z",
 		},
 		changes: gitlab.MergeRequestChanges{Changes: []gitlab.MergeRequestChange{{
 			OldPath: "a.go",
@@ -1002,6 +1023,8 @@ func TestRefreshGitLabProjectBindingRefreshesKnownMergeRequests(t *testing.T) {
 		discussions: []gitlab.Discussion{{ID: "project-refresh-discussion"}},
 		pipelines: []gitlab.Pipeline{{
 			ID:        99,
+			ProjectID: projectID,
+			Ref:       "feature/project-refresh",
 			SHA:       "newsha",
 			Status:    "failed",
 			UpdatedAt: "2026-04-30T00:01:00Z",
@@ -1445,6 +1468,87 @@ func TestCreateGitLabProjectBindingReusesExistingHook(t *testing.T) {
 	}
 	if !matches[0].HookID.Valid || matches[0].HookID.Int64 != 88001 || !matches[0].HookEnabled {
 		t.Fatalf("binding hook state = id %+v enabled %v, want id 88001 enabled", matches[0].HookID, matches[0].HookEnabled)
+	}
+	previousSecretBox := testHandler.VCSSecretBox
+	testHandler.VCSSecretBox = nil
+	t.Cleanup(func() { testHandler.VCSSecretBox = previousSecretBox })
+	configRec := httptest.NewRecorder()
+	configReq := withURLParam(httptest.NewRequest(http.MethodGet, "/api/workspaces/"+testWorkspaceID+"/gitlab/config", nil), "id", testWorkspaceID)
+	testHandler.GetGitLabConfig(configRec, configReq)
+	if configRec.Code != http.StatusOK {
+		t.Fatalf("GetGitLabConfig: %d %s", configRec.Code, configRec.Body.String())
+	}
+	var config struct {
+		CredentialStorageConfigured bool                       `json:"credential_storage_configured"`
+		Connections                 []GitLabConnectionResponse `json:"connections"`
+	}
+	if err := json.Unmarshal(configRec.Body.Bytes(), &config); err != nil {
+		t.Fatalf("decode GitLab config: %v", err)
+	}
+	if config.CredentialStorageConfigured {
+		t.Fatal("environment-backed connection should not require a configured secret box")
+	}
+	connectionID := uuidToString(matches[0].ConnectionID)
+	foundLegacyConnection := false
+	for _, connection := range config.Connections {
+		if connection.ID == connectionID {
+			foundLegacyConnection = true
+			if !connection.ServerConfigured {
+				t.Fatal("legacy environment connection was not marked server_configured without a secret box")
+			}
+			if connection.WebhookURL != "https://multica.example/api/webhooks/gitlab" || connection.WebhookPath != "/api/webhooks/gitlab" {
+				t.Fatalf("legacy connection webhook endpoint = %q (%q)", connection.WebhookURL, connection.WebhookPath)
+			}
+		}
+	}
+	if !foundLegacyConnection {
+		t.Fatalf("legacy GitLab connection %s missing from config", connectionID)
+	}
+}
+
+func TestGitLabProjectHookFailureReturnsSelectedConnectionURL(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	withGitLabSecretBox(t)
+	withPublicURLForGitLabTest(t, "https://webhooks.example")
+	t.Setenv("GITLAB_BASE_URL", "")
+	t.Setenv("GITLAB_TOKEN", "")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "")
+	host := "gitlab-hook-error-" + randomID() + ".invalid"
+	baseURL := "https://" + host
+	connection := seedGitLabConnectionWithCredentials(t, baseURL, host, "token", "webhook-secret")
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM gitlab_connection WHERE id = $1`, connection.ID)
+	})
+	fake := &fakeGitLabAPI{
+		project: gitlab.Project{
+			ID:                98003,
+			PathWithNamespace: "group/hook-error",
+			WebURL:            baseURL + "/group/hook-error",
+		},
+		createHookErr: errors.New("hook creation failed"),
+	}
+	installFakeGitLabClient(t, fake)
+	req := newRequest(http.MethodPost, "/api/workspaces/"+testWorkspaceID+"/gitlab/projects", map[string]any{
+		"connection_id": uuidToString(connection.ID),
+		"project":       "group/hook-error",
+	})
+	req = withURLParam(req, "id", testWorkspaceID)
+	rec := httptest.NewRecorder()
+	testHandler.CreateGitLabProjectBinding(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("CreateGitLabProjectBinding: %d %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		ManualWebhookURL string `json:"manual_webhook_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode project response: %v", err)
+	}
+	wantURL := "https://webhooks.example/api/webhooks/gitlab/" + uuidToString(connection.ID)
+	if response.ManualWebhookURL != wantURL {
+		t.Fatalf("manual webhook URL = %q, want selected connection URL %q", response.ManualWebhookURL, wantURL)
 	}
 }
 
@@ -2083,5 +2187,675 @@ func TestNormalizeGitLabPipelineStatus(t *testing.T) {
 		if got := normalizeGitLabPipelineStatus(tc.status); got != tc.want {
 			t.Errorf("normalizeGitLabPipelineStatus(%q) = %q, want %q", tc.status, got, tc.want)
 		}
+	}
+}
+
+func withGitLabSecretBox(t *testing.T) {
+	t.Helper()
+	box, err := secretbox.New(bytes.Repeat([]byte{9}, secretbox.KeySize))
+	if err != nil {
+		t.Fatalf("secretbox.New: %v", err)
+	}
+	previous := testHandler.VCSSecretBox
+	testHandler.VCSSecretBox = box
+	t.Cleanup(func() { testHandler.VCSSecretBox = previous })
+}
+
+func seedGitLabConnectionWithCredentials(t *testing.T, baseURL, host, token, webhookSecret string) db.GitlabConnection {
+	t.Helper()
+	ctx := context.Background()
+	connection, err := testHandler.Queries.UpsertGitLabConnection(ctx, db.UpsertGitLabConnectionParams{
+		WorkspaceID: parseUUID(testWorkspaceID),
+		BaseUrl:     baseURL,
+		Host:        host,
+	})
+	if err != nil {
+		t.Fatalf("UpsertGitLabConnection: %v", err)
+	}
+	tokenEncrypted, err := testHandler.sealVCSSecret(token)
+	if err != nil {
+		t.Fatalf("encrypt GitLab token: %v", err)
+	}
+	webhookEncrypted, err := testHandler.sealVCSSecret(webhookSecret)
+	if err != nil {
+		t.Fatalf("encrypt GitLab webhook secret: %v", err)
+	}
+	if _, err := testHandler.Queries.StoreGitLabConnectionCredentials(ctx, db.StoreGitLabConnectionCredentialsParams{
+		ID:                     connection.ID,
+		WorkspaceID:            parseUUID(testWorkspaceID),
+		AccessTokenEncrypted:   tokenEncrypted,
+		WebhookSecretEncrypted: webhookEncrypted,
+	}); err != nil {
+		t.Fatalf("StoreGitLabConnectionCredentials: %v", err)
+	}
+	return connection
+}
+
+func TestCreateGitLabConnectionEncryptsAccessTokenAndOnlyReturnsWebhookSecretOnCreate(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	withGitLabSecretBox(t)
+	t.Setenv("GITLAB_BASE_URL", "")
+	t.Setenv("GITLAB_TOKEN", "")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "")
+	t.Setenv("GITLAB_PROXY_URL", "http://proxy.gitlab.invalid:8080")
+	fake := &fakeGitLabAPI{}
+	installFakeGitLabClient(t, fake)
+
+	host := "gitlab-credentials-" + randomID() + ".invalid"
+	baseURL := "https://" + host
+	accessToken := "private-access-token-" + randomID()
+	var connectionID string
+	t.Cleanup(func() {
+		if connectionID != "" {
+			_, _ = testPool.Exec(context.Background(), `DELETE FROM gitlab_connection WHERE id = $1`, connectionID)
+		}
+	})
+
+	create := func(token string) (*httptest.ResponseRecorder, struct {
+		Connection    GitLabConnectionResponse `json:"connection"`
+		WebhookSecret string                   `json:"webhook_secret"`
+		WebhookURL    string                   `json:"webhook_url"`
+		WebhookPath   string                   `json:"webhook_path"`
+	}) {
+		rec := httptest.NewRecorder()
+		req := withURLParam(httptest.NewRequest(http.MethodPost, "/api/workspaces/"+testWorkspaceID+"/gitlab/connections", strings.NewReader(
+			fmt.Sprintf(`{"base_url":%q,"access_token":%q}`, baseURL, token),
+		)), "id", testWorkspaceID)
+		testHandler.CreateGitLabConnection(rec, req)
+		var response struct {
+			Connection    GitLabConnectionResponse `json:"connection"`
+			WebhookSecret string                   `json:"webhook_secret"`
+			WebhookURL    string                   `json:"webhook_url"`
+			WebhookPath   string                   `json:"webhook_path"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode GitLab connection response: %v", err)
+		}
+		return rec, response
+	}
+
+	firstRec, first := create(accessToken)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("CreateGitLabConnection: %d %s", firstRec.Code, firstRec.Body.String())
+	}
+	connectionID = first.Connection.ID
+	if first.WebhookSecret == "" || first.WebhookURL != first.WebhookPath || first.WebhookPath != "/api/webhooks/gitlab/"+connectionID {
+		t.Fatalf("unexpected one-time webhook details: %+v", first)
+	}
+	if fake.validationCalls != 1 || fake.clientConfig.ProxyURL != "http://proxy.gitlab.invalid:8080" {
+		t.Fatalf("GitLab validation did not use the configured client proxy: calls=%d proxy=%q", fake.validationCalls, fake.clientConfig.ProxyURL)
+	}
+	if strings.Contains(firstRec.Body.String(), accessToken) {
+		t.Fatal("GitLab access token was returned")
+	}
+
+	var encryptedToken, encryptedWebhook string
+	if err := testPool.QueryRow(context.Background(), `
+SELECT access_token_encrypted, webhook_secret_encrypted
+FROM gitlab_connection WHERE id = $1 AND workspace_id = $2`, connectionID, testWorkspaceID).Scan(&encryptedToken, &encryptedWebhook); err != nil {
+		t.Fatalf("read stored GitLab credentials: %v", err)
+	}
+	if encryptedToken == "" || encryptedToken == accessToken || encryptedWebhook == "" || encryptedWebhook == first.WebhookSecret {
+		t.Fatal("GitLab credentials were not encrypted at rest")
+	}
+	if plaintext, err := testHandler.openVCSSecret(encryptedToken); err != nil || plaintext != accessToken {
+		t.Fatalf("decrypt stored GitLab token: plaintext=%q err=%v", plaintext, err)
+	}
+	if plaintext, err := testHandler.openVCSSecret(encryptedWebhook); err != nil || plaintext != first.WebhookSecret {
+		t.Fatalf("decrypt stored webhook secret: plaintext=%q err=%v", plaintext, err)
+	}
+
+	secondToken := "replacement-access-token-" + randomID()
+	secondRec, second := create(secondToken)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("reconnect GitLab: %d %s", secondRec.Code, secondRec.Body.String())
+	}
+	if second.Connection.ID != connectionID || second.WebhookSecret != "" {
+		t.Fatalf("reconnect should preserve connection identity and not re-disclose the webhook secret: %+v", second)
+	}
+	if err := testPool.QueryRow(context.Background(), `
+SELECT access_token_encrypted, webhook_secret_encrypted
+FROM gitlab_connection WHERE id = $1`, connectionID).Scan(&encryptedToken, &encryptedWebhook); err != nil {
+		t.Fatalf("read reconnected GitLab credentials: %v", err)
+	}
+	if plaintext, err := testHandler.openVCSSecret(encryptedToken); err != nil || plaintext != secondToken {
+		t.Fatalf("decrypt replacement GitLab token: plaintext=%q err=%v", plaintext, err)
+	}
+	if plaintext, err := testHandler.openVCSSecret(encryptedWebhook); err != nil || plaintext != first.WebhookSecret {
+		t.Fatalf("webhook secret changed during token update: plaintext=%q err=%v", plaintext, err)
+	}
+	fake.validationErr = gitlab.ErrUnauthorized
+	rejectedRec, _ := create("rejected-token")
+	if rejectedRec.Code != http.StatusBadRequest {
+		t.Fatalf("rejected token should fail before saving, got %d (%s)", rejectedRec.Code, rejectedRec.Body.String())
+	}
+	if err := testPool.QueryRow(context.Background(), `
+SELECT access_token_encrypted, webhook_secret_encrypted
+FROM gitlab_connection WHERE id = $1`, connectionID).Scan(&encryptedToken, &encryptedWebhook); err != nil {
+		t.Fatalf("read credentials after rejected token: %v", err)
+	}
+	if plaintext, err := testHandler.openVCSSecret(encryptedToken); err != nil || plaintext != secondToken {
+		t.Fatalf("rejected token replaced the valid token: plaintext=%q err=%v", plaintext, err)
+	}
+	if plaintext, err := testHandler.openVCSSecret(encryptedWebhook); err != nil || plaintext != first.WebhookSecret {
+		t.Fatalf("rejected token changed the webhook secret: plaintext=%q err=%v", plaintext, err)
+	}
+
+	configRec := httptest.NewRecorder()
+	configReq := withURLParam(httptest.NewRequest(http.MethodGet, "/api/workspaces/"+testWorkspaceID+"/gitlab/config", nil), "id", testWorkspaceID)
+	testHandler.GetGitLabConfig(configRec, configReq)
+	if configRec.Code != http.StatusOK {
+		t.Fatalf("GetGitLabConfig: %d %s", configRec.Code, configRec.Body.String())
+	}
+	var config struct {
+		CredentialStorageConfigured bool `json:"credential_storage_configured"`
+		Connections                 []struct {
+			ID               string `json:"id"`
+			WorkspaceID      string `json:"workspace_id"`
+			BaseURL          string `json:"base_url"`
+			Host             string `json:"host"`
+			ServerConfigured bool   `json:"server_configured"`
+			WebhookURL       string `json:"webhook_url"`
+			WebhookPath      string `json:"webhook_path"`
+		} `json:"connections"`
+	}
+	if err := json.Unmarshal(configRec.Body.Bytes(), &config); err != nil {
+		t.Fatalf("decode GitLab config: %v", err)
+	}
+	if !config.CredentialStorageConfigured || !strings.Contains(configRec.Body.String(), connectionID) {
+		t.Fatalf("GitLab config omitted storage status or the connection: %s", configRec.Body.String())
+	}
+	if strings.Contains(configRec.Body.String(), accessToken) || strings.Contains(configRec.Body.String(), secondToken) || strings.Contains(configRec.Body.String(), first.WebhookSecret) {
+		t.Fatal("GitLab config disclosed a stored credential")
+	}
+	webhookPath := "/api/webhooks/gitlab/" + connectionID
+	webhookURL := webhookPath
+	if publicURL := strings.TrimRight(testHandler.cfg.PublicURL, "/"); publicURL != "" {
+		webhookURL = publicURL + webhookPath
+	}
+	foundConnection := false
+	for _, connection := range config.Connections {
+		if connection.ID == connectionID {
+			foundConnection = true
+			if connection.WorkspaceID != testWorkspaceID || connection.BaseURL != baseURL || connection.Host != host ||
+				connection.WebhookURL != webhookURL || connection.WebhookPath != webhookPath || connection.ServerConfigured {
+				t.Fatalf("unexpected GitLab connection config: %+v", connection)
+			}
+		}
+	}
+	if !foundConnection {
+		t.Fatalf("GitLab connection %s missing from config", connectionID)
+	}
+}
+
+func TestCreateGitLabConnectionAllowsSameHostWithoutRetargetingExistingProjects(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	withGitLabSecretBox(t)
+	host := "gitlab-retarget-" + randomID() + ".invalid"
+	oldBaseURL := "https://" + host + "/instance-a"
+	newBaseURL := "https://" + host + "/instance-b"
+	connection, err := testHandler.Queries.UpsertGitLabConnection(context.Background(), db.UpsertGitLabConnectionParams{
+		WorkspaceID: parseUUID(testWorkspaceID),
+		BaseUrl:     oldBaseURL,
+		Host:        host,
+	})
+	if err != nil {
+		t.Fatalf("seed GitLab connection: %v", err)
+	}
+	projectID := int64(987654321)
+	binding, err := testHandler.Queries.UpsertGitLabProjectBinding(context.Background(), db.UpsertGitLabProjectBindingParams{
+		WorkspaceID:       parseUUID(testWorkspaceID),
+		ConnectionID:      connection.ID,
+		GitlabProjectID:   projectID,
+		PathWithNamespace: "group/retarget-test",
+		WebUrl:            oldBaseURL + "/group/retarget-test",
+	})
+	if err != nil {
+		t.Fatalf("seed GitLab project binding: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM gitlab_connection WHERE id = $1 OR base_url = $2`, connection.ID, newBaseURL)
+	})
+
+	req := withURLParam(httptest.NewRequest(http.MethodPost, "/api/workspaces/"+testWorkspaceID+"/gitlab/connections", strings.NewReader(
+		fmt.Sprintf(`{"base_url":%q,"access_token":"token"}`, newBaseURL),
+	)), "id", testWorkspaceID)
+	rec := httptest.NewRecorder()
+	installFakeGitLabClient(t, &fakeGitLabAPI{})
+	testHandler.CreateGitLabConnection(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-host new instance should be created, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var newConnectionID string
+	if err := testPool.QueryRow(context.Background(), `SELECT id::text FROM gitlab_connection WHERE workspace_id = $1 AND base_url = $2`, parseUUID(testWorkspaceID), newBaseURL).Scan(&newConnectionID); err != nil {
+		t.Fatalf("read new GitLab connection: %v", err)
+	}
+	if newConnectionID == uuidToString(connection.ID) {
+		t.Fatal("new GitLab instance reused the existing connection")
+	}
+	var storedBaseURL string
+	var storedConnectionID pgtype.UUID
+	if err := testPool.QueryRow(context.Background(), `SELECT base_url FROM gitlab_connection WHERE id = $1`, connection.ID).Scan(&storedBaseURL); err != nil {
+		t.Fatalf("read original GitLab connection: %v", err)
+	}
+	if err := testPool.QueryRow(context.Background(), `SELECT connection_id FROM gitlab_project_binding WHERE id = $1`, binding.ID).Scan(&storedConnectionID); err != nil {
+		t.Fatalf("read original GitLab binding: %v", err)
+	}
+	if storedBaseURL != oldBaseURL || storedConnectionID != connection.ID {
+		t.Fatalf("existing project was retargeted: base_url=%q connection_id=%s", storedBaseURL, uuidToString(storedConnectionID))
+	}
+}
+
+func TestCreateGitLabConnectionRejectsTakeoverOfEnvConnectionWithProjects(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	withGitLabSecretBox(t)
+	host := "gitlab-env-takeover-" + randomID() + ".invalid"
+	baseURL := "https://" + host
+	t.Setenv("GITLAB_BASE_URL", baseURL)
+	t.Setenv("GITLAB_TOKEN", "deployment-token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "deployment-secret")
+	connection, err := testHandler.Queries.UpsertGitLabConnection(context.Background(), db.UpsertGitLabConnectionParams{
+		WorkspaceID: parseUUID(testWorkspaceID),
+		BaseUrl:     baseURL,
+		Host:        host,
+	})
+	if err != nil {
+		t.Fatalf("seed env-backed GitLab connection: %v", err)
+	}
+	binding, err := testHandler.Queries.UpsertGitLabProjectBinding(context.Background(), db.UpsertGitLabProjectBindingParams{
+		WorkspaceID:       parseUUID(testWorkspaceID),
+		ConnectionID:      connection.ID,
+		GitlabProjectID:   987654330,
+		PathWithNamespace: "group/env-project",
+		WebUrl:            baseURL + "/group/env-project",
+		HookID:            pgtype.Int8{Int64: 77, Valid: true},
+		HookEnabled:       true,
+	})
+	if err != nil {
+		t.Fatalf("seed env-backed project binding: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM gitlab_connection WHERE id = $1`, connection.ID)
+	})
+
+	fake := &fakeGitLabAPI{}
+	installFakeGitLabClient(t, fake)
+	req := withURLParam(httptest.NewRequest(http.MethodPost, "/api/workspaces/"+testWorkspaceID+"/gitlab/connections", strings.NewReader(
+		fmt.Sprintf(`{"base_url":%q,"access_token":"replacement-token"}`, baseURL),
+	)), "id", testWorkspaceID)
+	rec := httptest.NewRecorder()
+	testHandler.CreateGitLabConnection(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "deployment webhook") {
+		t.Fatalf("unsafe env connection takeover: %d %s", rec.Code, rec.Body.String())
+	}
+	if fake.createHookCalls != 0 {
+		t.Fatalf("connection takeover unexpectedly touched project hooks: %d calls", fake.createHookCalls)
+	}
+
+	var storedID pgtype.UUID
+	var storedBaseURL, tokenEncrypted, secretEncrypted string
+	if err := testPool.QueryRow(context.Background(), `
+SELECT id, base_url, access_token_encrypted, webhook_secret_encrypted
+FROM gitlab_connection WHERE workspace_id = $1 AND base_url = $2`,
+		parseUUID(testWorkspaceID), baseURL).Scan(&storedID, &storedBaseURL, &tokenEncrypted, &secretEncrypted); err != nil {
+		t.Fatalf("read env connection after rejected takeover: %v", err)
+	}
+	if storedID != connection.ID || storedBaseURL != baseURL || tokenEncrypted != "" || secretEncrypted != "" {
+		t.Fatalf("rejected takeover changed the env connection: id=%s base_url=%q token=%q secret=%q",
+			uuidToString(storedID), storedBaseURL, tokenEncrypted, secretEncrypted)
+	}
+	var storedHookID pgtype.Int8
+	var storedHookEnabled bool
+	if err := testPool.QueryRow(context.Background(), `
+SELECT hook_id, hook_enabled FROM gitlab_project_binding WHERE id = $1`, binding.ID).Scan(&storedHookID, &storedHookEnabled); err != nil {
+		t.Fatalf("read env project hook after rejected takeover: %v", err)
+	}
+	if !storedHookID.Valid || storedHookID.Int64 != 77 || !storedHookEnabled {
+		t.Fatalf("rejected takeover changed the existing project hook: id=%+v enabled=%v", storedHookID, storedHookEnabled)
+	}
+}
+
+func TestGitLabConnectionScopedWebhookDoesNotMixInstancesWithSameProjectID(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	withGitLabSecretBox(t)
+	t.Setenv("GITLAB_BASE_URL", "")
+	t.Setenv("GITLAB_TOKEN", "")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "")
+	host := "gitlab-webhook-" + randomID() + ".invalid"
+	connectionA := seedGitLabConnectionWithCredentials(t, "https://"+host+"/instance-a", host, "token-a", "webhook-secret-a")
+	connectionB := seedGitLabConnectionWithCredentials(t, "https://"+host+"/instance-b", host, "token-b", "webhook-secret-b")
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM gitlab_connection WHERE id = $1 OR id = $2`, connectionA.ID, connectionB.ID)
+	})
+	const projectID int64 = 987654321
+	bindingA, err := testHandler.Queries.UpsertGitLabProjectBinding(context.Background(), db.UpsertGitLabProjectBindingParams{
+		WorkspaceID:       parseUUID(testWorkspaceID),
+		ConnectionID:      connectionA.ID,
+		GitlabProjectID:   projectID,
+		PathWithNamespace: "group/shared-project",
+		WebUrl:            "https://" + host + "/instance-a/group/shared-project",
+	})
+	if err != nil {
+		t.Fatalf("seed first GitLab project binding: %v", err)
+	}
+	bindingB, err := testHandler.Queries.UpsertGitLabProjectBinding(context.Background(), db.UpsertGitLabProjectBindingParams{
+		WorkspaceID:       parseUUID(testWorkspaceID),
+		ConnectionID:      connectionB.ID,
+		GitlabProjectID:   projectID,
+		PathWithNamespace: "group/shared-project",
+		WebUrl:            "https://" + host + "/instance-b/group/shared-project",
+	})
+	if err != nil {
+		t.Fatalf("seed second GitLab project binding: %v", err)
+	}
+	installFakeGitLabClient(t, &fakeGitLabAPI{})
+	payload, err := json.Marshal(map[string]any{
+		"object_kind": "merge_request",
+		"project":     map[string]any{"id": projectID},
+		"user":        map[string]any{"username": "test-user"},
+		"object_attributes": map[string]any{
+			"iid":           7,
+			"title":         "shared identity",
+			"state":         "opened",
+			"url":           "https://" + host + "/instance-a/group/shared-project/-/merge_requests/7",
+			"created_at":    "2026-05-01T00:00:00Z",
+			"updated_at":    "2026-05-02T00:00:00Z",
+			"source_branch": "feature/test",
+			"last_commit":   map[string]any{"id": "same-sha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal GitLab webhook: %v", err)
+	}
+	req := withURLParam(httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab/"+uuidToString(connectionA.ID), bytes.NewReader(payload)), "connectionId", uuidToString(connectionA.ID))
+	req.Header.Set("X-Gitlab-Token", "webhook-secret-a")
+	req.Header.Set("X-Gitlab-Event", "Merge Request Hook")
+	rec := httptest.NewRecorder()
+	testHandler.HandleGitLabWebhook(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("scoped GitLab webhook: %d %s", rec.Code, rec.Body.String())
+	}
+	var countA, countB int
+	if err := testPool.QueryRow(context.Background(), `SELECT count(*) FROM gitlab_merge_request WHERE project_binding_id = $1`, bindingA.ID).Scan(&countA); err != nil {
+		t.Fatalf("count first instance MRs: %v", err)
+	}
+	if err := testPool.QueryRow(context.Background(), `SELECT count(*) FROM gitlab_merge_request WHERE project_binding_id = $1`, bindingB.ID).Scan(&countB); err != nil {
+		t.Fatalf("count second instance MRs: %v", err)
+	}
+	if countA != 1 || countB != 0 {
+		t.Fatalf("connection-scoped webhook crossed instances: first=%d second=%d", countA, countB)
+	}
+}
+
+func TestGitLabWakeupRefreshUsesTheSelectedConnectionCredentials(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	withGitLabSecretBox(t)
+	t.Setenv("GITLAB_BASE_URL", "")
+	t.Setenv("GITLAB_TOKEN", "")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "")
+	t.Setenv("GITLAB_PROXY_URL", "")
+	host := "gitlab-wakeup-" + randomID() + ".invalid"
+	baseURL := "https://" + host
+	token := "wakeup-token-" + randomID()
+	connection := seedGitLabConnectionWithCredentials(t, baseURL, host, token, "wakeup-webhook-secret")
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM gitlab_connection WHERE id = $1`, connection.ID)
+	})
+	projectID := int64(987654322)
+	projectPath := "group/wakeup-project"
+	binding, err := testHandler.Queries.UpsertGitLabProjectBinding(context.Background(), db.UpsertGitLabProjectBindingParams{
+		WorkspaceID:       parseUUID(testWorkspaceID),
+		ConnectionID:      connection.ID,
+		GitlabProjectID:   projectID,
+		PathWithNamespace: projectPath,
+		WebUrl:            baseURL + "/" + projectPath,
+	})
+	if err != nil {
+		t.Fatalf("seed GitLab wakeup project binding: %v", err)
+	}
+	mr, err := testHandler.Queries.UpsertGitLabMergeRequest(context.Background(), db.UpsertGitLabMergeRequestParams{
+		WorkspaceID:      parseUUID(testWorkspaceID),
+		ProjectBindingID: binding.ID,
+		GitlabProjectID:  projectID,
+		MrIid:            9,
+		Title:            "wakeup target",
+		State:            "open",
+		WebUrl:           baseURL + "/" + projectPath + "/-/merge_requests/9",
+		Sha:              "old-head",
+		Additions:        0,
+		Deletions:        0,
+		ChangedFiles:     0,
+		MrCreatedAt:      parseGitLabTimeRequired("2026-05-01T00:00:00Z"),
+		MrUpdatedAt:      parseGitLabTimeRequired("2026-05-01T00:00:00Z"),
+		SourceBranch:     strToText("feature/wakeup"),
+		TargetBranch:     strToText("main"),
+	})
+	if err != nil {
+		t.Fatalf("seed GitLab wakeup MR: %v", err)
+	}
+	fake := &fakeGitLabDetailAPI{
+		fakeGitLabAPI: fakeGitLabAPI{
+			project: gitlab.Project{ID: projectID, PathWithNamespace: projectPath},
+		},
+		mr: gitlab.MergeRequest{
+			IID:                 9,
+			Title:               "wakeup target refreshed",
+			State:               "opened",
+			WebURL:              baseURL + "/" + projectPath + "/-/merge_requests/9",
+			SourceBranch:        "feature/wakeup",
+			TargetBranch:        "main",
+			SHA:                 "new-head",
+			SourceProjectID:     projectID,
+			TargetProjectID:     projectID,
+			SourceProject:       gitlab.Project{ID: projectID, PathWithNamespace: projectPath},
+			DetailedMergeStatus: "mergeable",
+			CreatedAt:           "2026-05-01T00:00:00Z",
+			UpdatedAt:           "2026-05-03T00:00:00Z",
+		},
+	}
+	previousClient := newGitLabClient
+	var captured gitlab.Config
+	newGitLabClient = func(config gitlab.Config) (gitLabAPI, error) {
+		captured = config
+		return fake, nil
+	}
+	t.Cleanup(func() { newGitLabClient = previousClient })
+
+	err = testHandler.SyncGitLabWakeupTarget(context.Background(), vcs.GitLabWakeupTarget{
+		Source:         vcs.GitLabWakeupSourceWorkspaceConnection,
+		WorkspaceID:    testWorkspaceID,
+		ConnectionID:   uuidToString(connection.ID),
+		Repository:     projectPath,
+		Number:         9,
+		MergeRequestID: uuidToString(mr.ID),
+	})
+	if err != nil {
+		t.Fatalf("SyncGitLabWakeupTarget: %v", err)
+	}
+	if captured.Token != token || captured.BaseURL != baseURL || captured.Host != host {
+		t.Fatalf("wakeup used the wrong GitLab connection: base_url=%q host=%q token=%q", captured.BaseURL, captured.Host, captured.Token)
+	}
+	updated, err := testHandler.Queries.GetGitLabMergeRequestByID(context.Background(), db.GetGitLabMergeRequestByIDParams{
+		ID:          mr.ID,
+		WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("reload GitLab wakeup MR: %v", err)
+	}
+	if updated.Sha != "new-head" || updated.PipelineSyncError.Valid {
+		t.Fatalf("wakeup did not persist the selected instance's refreshed state: sha=%q pipeline_error=%v", updated.Sha, updated.PipelineSyncError)
+	}
+}
+
+func TestGitLabConnectionConfigMatchesLegacyEnvByExactBaseURL(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	t.Setenv("GITLAB_BASE_URL", "https://gitlab-legacy.invalid/root")
+	t.Setenv("GITLAB_TOKEN", "legacy-token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "legacy-webhook-secret")
+	connection := db.GitlabConnection{
+		BaseUrl: "https://gitlab-legacy.invalid/root",
+		Host:    "gitlab-legacy.invalid",
+	}
+	config, err := testHandler.gitLabConfigForConnectionRow(connection)
+	if err != nil {
+		t.Fatalf("matching legacy GitLab environment config: %v", err)
+	}
+	if config.Token != "legacy-token" || config.WebhookSecret != "legacy-webhook-secret" {
+		t.Fatalf("legacy credentials were not matched: token=%q webhook=%q", config.Token, config.WebhookSecret)
+	}
+	connection.BaseUrl = "https://gitlab-legacy.invalid/other"
+	if _, err := testHandler.gitLabConfigForConnectionRow(connection); err == nil {
+		t.Fatal("legacy credentials matched a different GitLab base URL on the same host")
+	}
+}
+
+func TestGitLabConnectionConfigWithoutSecretBoxReturnsUnavailable(t *testing.T) {
+	t.Setenv("GITLAB_BASE_URL", "")
+	t.Setenv("GITLAB_TOKEN", "")
+	connection := db.GitlabConnection{
+		BaseUrl:                "https://gitlab-secret.invalid",
+		Host:                   "gitlab-secret.invalid",
+		AccessTokenEncrypted:   "encrypted-token",
+		WebhookSecretEncrypted: "encrypted-webhook",
+	}
+	_, err := (&Handler{}).gitLabConfigForConnectionRow(connection)
+	if err == nil || err.Error() != "GitLab connection credentials are unavailable" {
+		t.Fatalf("missing secret box error = %v, want credentials unavailable", err)
+	}
+}
+
+func TestLegacyGitLabWebhookOnlyMatchesEnvironmentConnections(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("handler test fixture not initialized (no DB?)")
+	}
+	withGitLabSecretBox(t)
+	host := "gitlab-legacy-webhook-" + randomID() + ".invalid"
+	baseURL := "https://" + host
+	t.Setenv("GITLAB_BASE_URL", baseURL)
+	t.Setenv("GITLAB_TOKEN", "deployment-token")
+	t.Setenv("GITLAB_WEBHOOK_SECRET", "deployment-webhook-secret")
+
+	ctx := context.Background()
+	workspace, err := testHandler.Queries.CreateWorkspace(ctx, db.CreateWorkspaceParams{
+		Name:        "GitLab webhook isolation " + randomID(),
+		Slug:        "gitlab-webhook-isolation-" + randomID(),
+		Description: pgtype.Text{String: "", Valid: true},
+		Context:     pgtype.Text{String: "", Valid: true},
+		IssuePrefix: "GL" + strings.ToUpper(strings.ReplaceAll(randomID(), "-", "")),
+	})
+	if err != nil {
+		t.Fatalf("create second workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM workspace WHERE id = $1`, workspace.ID)
+	})
+
+	legacyConnection, err := testHandler.Queries.UpsertGitLabConnection(ctx, db.UpsertGitLabConnectionParams{
+		WorkspaceID: parseUUID(testWorkspaceID),
+		BaseUrl:     baseURL,
+		Host:        host,
+	})
+	if err != nil {
+		t.Fatalf("seed legacy connection: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM gitlab_connection WHERE id = $1`, legacyConnection.ID)
+	})
+	independentConnection, err := testHandler.Queries.UpsertGitLabConnection(ctx, db.UpsertGitLabConnectionParams{
+		WorkspaceID: workspace.ID,
+		BaseUrl:     baseURL,
+		Host:        host,
+	})
+	if err != nil {
+		t.Fatalf("seed independent connection: %v", err)
+	}
+	tokenEncrypted, err := testHandler.sealVCSSecret("independent-token")
+	if err != nil {
+		t.Fatalf("encrypt independent token: %v", err)
+	}
+	secretEncrypted, err := testHandler.sealVCSSecret("independent-webhook-secret")
+	if err != nil {
+		t.Fatalf("encrypt independent webhook secret: %v", err)
+	}
+	if _, err := testHandler.Queries.StoreGitLabConnectionCredentials(ctx, db.StoreGitLabConnectionCredentialsParams{
+		ID:                     independentConnection.ID,
+		WorkspaceID:            workspace.ID,
+		AccessTokenEncrypted:   tokenEncrypted,
+		WebhookSecretEncrypted: secretEncrypted,
+	}); err != nil {
+		t.Fatalf("store independent connection credentials: %v", err)
+	}
+
+	const projectID int64 = 987654329
+	legacyBinding, err := testHandler.Queries.UpsertGitLabProjectBinding(ctx, db.UpsertGitLabProjectBindingParams{
+		WorkspaceID:       parseUUID(testWorkspaceID),
+		ConnectionID:      legacyConnection.ID,
+		GitlabProjectID:   projectID,
+		PathWithNamespace: "group/legacy-project",
+		WebUrl:            baseURL + "/group/legacy-project",
+	})
+	if err != nil {
+		t.Fatalf("seed legacy binding: %v", err)
+	}
+	independentBinding, err := testHandler.Queries.UpsertGitLabProjectBinding(ctx, db.UpsertGitLabProjectBindingParams{
+		WorkspaceID:       workspace.ID,
+		ConnectionID:      independentConnection.ID,
+		GitlabProjectID:   projectID,
+		PathWithNamespace: "group/legacy-project",
+		WebUrl:            baseURL + "/group/legacy-project",
+	})
+	if err != nil {
+		t.Fatalf("seed independent binding: %v", err)
+	}
+
+	installFakeGitLabClient(t, &fakeGitLabAPI{})
+	payload, err := json.Marshal(map[string]any{
+		"object_kind": "merge_request",
+		"project":     map[string]any{"id": projectID},
+		"user":        map[string]any{"username": "test-user"},
+		"object_attributes": map[string]any{
+			"iid":           7,
+			"title":         "legacy webhook",
+			"state":         "opened",
+			"url":           baseURL + "/group/legacy-project/-/merge_requests/7",
+			"created_at":    "2026-05-01T00:00:00Z",
+			"updated_at":    "2026-05-02T00:00:00Z",
+			"source_branch": "feature/legacy-webhook",
+			"last_commit":   map[string]any{"id": "legacy-sha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal GitLab webhook: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab", bytes.NewReader(payload))
+	req.Header.Set("X-Gitlab-Token", "deployment-webhook-secret")
+	req.Header.Set("X-Gitlab-Event", "Merge Request Hook")
+	rec := httptest.NewRecorder()
+	testHandler.HandleGitLabWebhook(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("legacy webhook: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var legacyCount, independentCount int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM gitlab_merge_request WHERE project_binding_id = $1`, legacyBinding.ID).Scan(&legacyCount); err != nil {
+		t.Fatalf("count legacy MRs: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM gitlab_merge_request WHERE project_binding_id = $1`, independentBinding.ID).Scan(&independentCount); err != nil {
+		t.Fatalf("count independent MRs: %v", err)
+	}
+	if legacyCount != 1 || independentCount != 0 {
+		t.Fatalf("legacy webhook crossed into encrypted connection: legacy=%d independent=%d", legacyCount, independentCount)
 	}
 }

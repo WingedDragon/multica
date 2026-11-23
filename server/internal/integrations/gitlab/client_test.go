@@ -38,6 +38,42 @@ func TestNewClientRejectsUnsupportedProxyScheme(t *testing.T) {
 	}
 }
 
+func TestValidateCredentialsUsesCurrentUserEndpoint(t *testing.T) {
+	var gotPath, gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotToken = r.Header.Get("PRIVATE-TOKEN")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Token: "secret-token"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := client.ValidateCredentials(context.Background()); err != nil {
+		t.Fatalf("ValidateCredentials: %v", err)
+	}
+	if gotPath != "/api/v4/user" || gotToken != "secret-token" {
+		t.Fatalf("validation request path=%q token=%q", gotPath, gotToken)
+	}
+}
+
+func TestValidateCredentialsReturnsUnauthorizedForRejectedToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Token: "bad-token"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := client.ValidateCredentials(context.Background()); err != ErrUnauthorized {
+		t.Fatalf("ValidateCredentials error = %v, want ErrUnauthorized", err)
+	}
+}
+
 func TestNewClientRejectsInvalidBaseURL(t *testing.T) {
 	tests := []struct {
 		name    string

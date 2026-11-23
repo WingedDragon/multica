@@ -16,8 +16,8 @@ test('one process syncs each workspace using its own token and state', { timeout
     const workspace = req.headers['x-workspace-id'];
     requests.push({ path, workspace, token: req.headers.authorization });
     let result;
-    if (path === '/fleet/api/v1/tasks') result = { data: [{ id: 'same-task-id' }], pagination: { page: 1, page_size: 100, total: 1 } };
-    else if (path === '/fleet/api/v1/tasks/same-task-id') result = { data: { id: 'same-task-id', title: workspace, description: 'Work' } };
+    if (path === '/fleet/api/v1/tasks') result = { data: [{ task_id: 'same-task-id' }], pagination: { page: 1, page_size: 100, total: 1 } };
+    else if (path === '/fleet/api/v1/tasks/same-task-id') result = { data: { task_id: 'same-task-id', title: workspace, description: 'Work' } };
     else if (path === '/fleet/api/v1/tasks/same-task-id/comments') result = { data: [], pagination: { page: 1, page_size: 100, total: 0 } };
     else if (path === '/api/issues' && req.method === 'POST') { const fields = JSON.parse(body); created.push({ workspace, ...fields }); result = { id: `issue-${workspace}`, ...fields }; }
     else if (path.startsWith('/api/issues/issue-') && path.endsWith('/comments')) result = [];

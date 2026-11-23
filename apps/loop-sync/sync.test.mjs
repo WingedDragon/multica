@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { sync } from './sync.mjs';
 
 function fixture() {
-  const loopTask = { id: 'l1', title: 'Original', description: 'Details' };
+  const loopTask = { task_id: 'l1', title: 'Original', description: 'Details' };
   const issue = { id: 'm1', title: 'Original', description: 'Details' };
   const created = [];
   const updated = [];
   const state = { tasks: {}, pending: null };
   const loop = {
     async listOpenTasks() { return [loopTask]; },
-    async getTask() { return loopTask; },
+    async getTask(id) { assert.equal(id, 'l1'); return loopTask; },
     async listComments() { return []; },
   };
   const multica = {
@@ -55,7 +55,7 @@ test('an unconfirmed create is not attempted again', async () => {
 
 test('copies comments once without echoing them back', async () => {
   const f = fixture();
-  const sourceComments = [{ id: 'lc1', content: 'Requirement' }];
+  const sourceComments = [{ comment_id: 'lc1', content: 'Requirement' }];
   const targetComments = [{ id: 'mc1', author_type: 'agent', content: 'Result' }];
   f.loop.listComments = async () => sourceComments;
   f.multica.listComments = async () => targetComments;
@@ -66,7 +66,7 @@ test('copies comments once without echoing them back', async () => {
   };
   f.loop.previewComment = async () => ({ agents: [] });
   f.loop.createComment = async (_id, content) => {
-    const c = { id: 'lc2', content };
+    const c = { comment_id: 'lc2', content };
     sourceComments.push(c);
     return c;
   };

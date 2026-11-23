@@ -1,6 +1,6 @@
 ---
 name: multica-selfhost-release
-description: This skill should be used when the user asks to "deploy Multica self-hosted", "sync upstream/main", "update dj", "run a selfhost release", "package Multica desktop", or "merge or rebase a selfhost branch". It deploys through direct SSH to dj and packages the self-hosted Multica app.
+description: This skill should be used when the user asks to "deploy Multica self-hosted", "sync upstream/main", "update dj", "run a selfhost release", "package Multica desktop", "deploy Loop sync", or "merge or rebase a selfhost branch". It deploys through direct SSH to dj, manages Loop sync on my-mini, and packages the self-hosted Multica app.
 ---
 
 # Multica Selfhost Release
@@ -39,7 +39,27 @@ Use this decision order:
 
 The script's `auto` mode uses published state as a conservative mechanical proxy: published branch -> merge; unpublished branch -> rebase. For a known long-lived branch, explicitly set `MULTICA_UPSTREAM_SYNC_STRATEGY=merge` rather than relying only on the proxy.
 
-`dj` is directly reachable from this Mac with `ssh dj`; use that route for the deployment checkout, protected release window, and remote verification. `my-mini` remains only the target for the separately installed and signed CLI.
+`dj` is directly reachable from this Mac with `ssh dj`; use that route for the deployment checkout, protected release window, and remote verification. `my-mini` hosts the separately installed and signed CLI and the independent Loop sync service.
+
+## Loop Sync on my-mini
+
+`apps/loop-sync` runs as the user-level Super service `multica-loop-sync`, independently of the `dj` backend and web release. Deploy only when Loop sync is in scope; it does not require the full Multica release workflow.
+
+- Code: `my-mini:~/apps/loop-sync/`.
+- Configuration: `my-mini:~/.config/loop-sync/config.json`; each binding has a Loop credential environment-variable name, both workspace IDs, member mappings and its own state file. See `apps/loop-sync/README.md`.
+- Credentials: `my-mini:~/.config/loop-sync/tokens.env`, mode 600. Super sources this file without printing its values. Keep credentials and state off the repository; never replace existing config, tokens or state during code deployment.
+- State: one file per binding under `~/.config/loop-sync/state/`; retain it across deployments. Confirm the intended mappings before enabling a binding: the first scan imports all matching open Loop tasks.
+- Super declaration: `~/.super/conf/conf.d/loop-sync.toml`, `prune = false`, `autostart = true`, command `/Users/dong/.local/bin/node /Users/dong/apps/loop-sync/main.mjs /Users/dong/.config/loop-sync/config.json`.
+
+Run the focused tests and update the service without syncing configuration or state:
+
+```bash
+node --test apps/loop-sync/*.test.mjs
+rsync -az apps/loop-sync/ my-mini:apps/loop-sync/
+ssh my-mini 'export PATH="$HOME/.local/bin:$PATH" SUPER_ROOT="$HOME/.super"; super restart multica-loop-sync --wait-healthy --timeout 30; super info multica-loop-sync; super logs multica-loop-sync --tail 50'
+```
+
+If the service is not registered, create the user-level Super declaration with the paths above and apply it with `super apply --file ~/.super/conf/conf.d/loop-sync.toml`. An empty `bindings` array keeps the service running but does not synchronize anything. After editing configuration or credentials, restart the service; check logs and verify actual task synchronization separately from Super's process health.
 
 ## Important Judgement
 

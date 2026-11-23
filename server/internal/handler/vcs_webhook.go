@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -142,49 +144,87 @@ func (h *Handler) HandleVCSWebhook(w http.ResponseWriter, r *http.Request) {
 	systemHook := conn.Provider == string(vcs.KindGitLab) && r.Header.Get("X-Gitlab-Event") == "System Hook"
 	switch provider.EventKind(r.Header, body) {
 	case vcs.EventPullRequest:
-		if pr, err := provider.ParsePullRequest(body); err != nil {
+		pr, err := provider.ParsePullRequest(body)
+		if err != nil {
 			slog.Warn("vcs: bad pull_request payload", "provider", conn.Provider, "err", err)
-		} else {
-			if systemHook {
-				ws, err := h.Queries.GetWorkspace(r.Context(), conn.WorkspaceID)
-				if err != nil {
-					slog.Warn("vcs: load workspace for system hook failed", "err", err)
-					writeError(w, http.StatusServiceUnavailable, "workspace lookup failed")
-					return
-				}
-				if !gitLabSystemHookRepoAllowed(ws.Repos, conn.InstanceUrl, pr.RepoOwner, pr.RepoName) {
-					break
-				}
-				if checker, ok := provider.(vcs.RepositoryAccessChecker); ok {
-					token, err := h.openVCSSecret(conn.AccessTokenEncrypted)
-					if err != nil || token == "" {
-						slog.Warn("vcs: open access token for system hook failed", "err", err)
-						writeError(w, http.StatusInternalServerError, "access token error")
-						return
-					}
-					readable, err := checker.RepositoryReadable(r.Context(), conn.InstanceUrl, pr.RepoOwner, pr.RepoName, token)
-					if err != nil {
-						slog.Warn("vcs: system-hook repository access lookup failed", "provider", conn.Provider, "err", err)
-						writeError(w, http.StatusServiceUnavailable, "repository access lookup failed")
-						return
-					}
-					if !readable {
-						break
-					}
-				}
+			if conn.Provider == string(vcs.KindGitLab) {
+				writeError(w, http.StatusBadRequest, "invalid merge request payload")
+				return
 			}
-			h.mirrorVCSPullRequest(r.Context(), conn, pr)
+			break
+		}
+		if pr.RepoOwner == "" || pr.RepoName == "" || pr.Number <= 0 {
+			if conn.Provider == string(vcs.KindGitLab) {
+				writeError(w, http.StatusBadRequest, "merge request identity missing")
+				return
+			}
+			break
+		}
+		if systemHook {
+			allowed, err := h.authorizeGitLabSystemHook(r.Context(), conn, provider, pr.RepoOwner, pr.RepoName, nil)
+			if err != nil {
+				slog.Warn("vcs: system-hook repository validation failed", "reason", gitLabWakeupFailureMessage(err))
+				writeError(w, gitLabSystemHookFailureStatus(err), "system hook validation failed")
+				return
+			}
+			if !allowed {
+				break
+			}
+		}
+		if err := h.mirrorVCSPullRequest(r.Context(), conn, pr); err != nil {
+			if conn.Provider == string(vcs.KindGitLab) {
+				slog.Warn("vcs: merge request mirror failed", "reason", gitLabWakeupFailureMessage(err))
+				writeError(w, http.StatusServiceUnavailable, "merge request sync failed")
+				return
+			}
+			slog.Warn("vcs: upsert pr failed", "err", err)
 		}
 	case vcs.EventCIStatus:
-		if st, err := provider.ParseCIStatus(body); err != nil {
+		status, err := provider.ParseCIStatus(body)
+		if err != nil {
 			slog.Warn("vcs: bad status payload", "provider", conn.Provider, "err", err)
-		} else {
-			h.mirrorVCSCIStatus(r.Context(), conn, st)
+			if conn.Provider == string(vcs.KindGitLab) {
+				writeError(w, http.StatusBadRequest, "invalid pipeline payload")
+				return
+			}
+			break
+		}
+		if conn.Provider == string(vcs.KindGitLab) && (status.SHA == "" || status.PipelineID <= 0 || status.ProjectID <= 0 || status.RepoOwner == "" || status.RepoName == "") {
+			writeError(w, http.StatusBadRequest, "pipeline identity missing")
+			return
+		}
+		if systemHook {
+			allowed, err := h.authorizeGitLabSystemHook(r.Context(), conn, provider, status.RepoOwner, status.RepoName, &status)
+			if err != nil {
+				slog.Warn("vcs: system-hook pipeline validation failed", "reason", gitLabWakeupFailureMessage(err))
+				writeError(w, gitLabSystemHookFailureStatus(err), "system hook validation failed")
+				return
+			}
+			if !allowed {
+				break
+			}
+		}
+		if err := h.mirrorVCSCIStatus(r.Context(), conn, status); err != nil {
+			if conn.Provider == string(vcs.KindGitLab) {
+				slog.Warn("vcs: pipeline mirror failed", "reason", gitLabWakeupFailureMessage(err))
+				writeError(w, http.StatusServiceUnavailable, "pipeline sync failed")
+				return
+			}
+			slog.Warn("vcs: upsert commit status failed", "err", err)
 		}
 	default:
 		// Acknowledge unmodelled events so the provider doesn't flag the hook.
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+var errGitLabSystemHookCredential = errors.New("GitLab system-hook credentials are unavailable")
+
+func gitLabSystemHookFailureStatus(err error) int {
+	if errors.Is(err, errGitLabSystemHookCredential) {
+		return http.StatusInternalServerError
+	}
+	return http.StatusServiceUnavailable
 }
 
 // A system hook covers the entire GitLab instance. Only repositories explicitly
@@ -241,76 +281,172 @@ func gitLabRepoURLMatchesInstance(repo, instance *url.URL) bool {
 	return false
 }
 
-func (h *Handler) mirrorVCSPullRequest(ctx context.Context, conn db.VcsConnection, ev vcs.PullRequestEvent) {
-	if ev.RepoOwner == "" || ev.RepoName == "" || ev.Number == 0 {
-		slog.Warn("vcs: pull_request missing repo identity", "provider", conn.Provider)
-		return
+func (h *Handler) authorizeGitLabSystemHook(ctx context.Context, conn db.VcsConnection, provider vcs.Provider, owner, name string, pipeline *vcs.CIStatusEvent) (bool, error) {
+	workspace, err := h.Queries.GetWorkspace(ctx, conn.WorkspaceID)
+	if err != nil {
+		return false, fmt.Errorf("load workspace for GitLab system hook: %w", err)
+	}
+	candidates := make(map[string]db.VcsPullRequest)
+	if pipeline != nil && pipeline.ProjectID > 0 && pipeline.SHA != "" {
+		byProject, err := h.Queries.ListVCSGitLabPullRequestsByProjectHead(ctx, db.ListVCSGitLabPullRequestsByProjectHeadParams{
+			WorkspaceID:  conn.WorkspaceID,
+			ConnectionID: conn.ID,
+			RepoOwner:    owner,
+			RepoName:     name,
+			HeadSha:      pipeline.SHA,
+		})
+		if err != nil {
+			return false, fmt.Errorf("find configured GitLab target pipelines: %w", err)
+		}
+		for _, candidate := range byProject {
+			candidates[uuidToString(candidate.ID)] = candidate
+		}
+		bySource, err := h.Queries.ListVCSGitLabPullRequestsBySourceProjectHead(ctx, db.ListVCSGitLabPullRequestsBySourceProjectHeadParams{
+			WorkspaceID:     conn.WorkspaceID,
+			ConnectionID:    conn.ID,
+			SourceProjectID: pgtype.Int8{Int64: pipeline.ProjectID, Valid: true},
+			HeadSha:         pipeline.SHA,
+		})
+		if err != nil {
+			return false, fmt.Errorf("find configured GitLab source pipelines: %w", err)
+		}
+		for _, candidate := range bySource {
+			candidates[uuidToString(candidate.ID)] = candidate
+		}
+	}
+	allowed := gitLabSystemHookRepoAllowed(workspace.Repos, conn.InstanceUrl, owner, name)
+	for _, candidate := range candidates {
+		if gitLabSystemHookRepoAllowed(workspace.Repos, conn.InstanceUrl, candidate.RepoOwner, candidate.RepoName) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return false, nil
+	}
+	checker, ok := provider.(vcs.RepositoryAccessChecker)
+	if !ok {
+		return true, nil
+	}
+	token, err := h.openVCSSecret(conn.AccessTokenEncrypted)
+	if err != nil || token == "" {
+		if err == nil {
+			err = errors.New("empty GitLab access token")
+		}
+		return false, errors.Join(errGitLabSystemHookCredential, fmt.Errorf("open GitLab access token: %w", err))
+	}
+	readable, err := checker.RepositoryReadable(ctx, conn.InstanceUrl, owner, name, token)
+	if err == nil && !readable {
+		return false, nil
+	}
+	if err != nil {
+		if pipeline != nil {
+			for _, candidate := range candidates {
+				if gitLabSystemHookRepoAllowed(workspace.Repos, conn.InstanceUrl, candidate.RepoOwner, candidate.RepoName) {
+					_, _ = h.Queries.MarkGitLabVCSPullRequestPipelineSync(ctx, db.MarkGitLabVCSPullRequestPipelineSyncParams{
+						ID:                   candidate.ID,
+						WorkspaceID:          conn.WorkspaceID,
+						PipelineSyncError:    strToText(gitLabWakeupFailureMessage(err)),
+						WakeupSyncGeneration: candidate.WakeupSyncGeneration,
+						HeadSha:              candidate.HeadSha,
+					})
+				}
+			}
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (h *Handler) mirrorVCSPullRequest(ctx context.Context, conn db.VcsConnection, ev vcs.PullRequestEvent) error {
+	if ev.RepoOwner == "" || ev.RepoName == "" || ev.Number <= 0 {
+		return errors.New("vcs: pull_request missing repository identity")
 	}
 
-	// The stored state before this event, so a merge completes issues once —
-	// when it happens — and not again on a later event of a merged PR.
 	prevState := ""
-	if prev, err := h.Queries.GetVCSPullRequestByKey(ctx, db.GetVCSPullRequestByKeyParams{
+	prev, err := h.Queries.GetVCSPullRequestByKey(ctx, db.GetVCSPullRequestByKeyParams{
 		ConnectionID: conn.ID,
 		RepoOwner:    ev.RepoOwner,
 		RepoName:     ev.RepoName,
 		PrNumber:     ev.Number,
-	}); err == nil {
+	})
+	if err == nil {
 		prevState = prev.State
+	} else if conn.Provider == string(vcs.KindGitLab) && !errors.Is(err, pgx.ErrNoRows) {
+		return err
 	}
 
+	conflictState := ev.HasConflicts
+	conflictHeadSHA := ""
+	if conflictState != nil && ev.HeadSHA != "" {
+		conflictHeadSHA = ev.HeadSHA
+	} else {
+		conflictState = nil
+	}
+	sourceProjectID := pgtype.Int8{}
+	if ev.SourceProjectID > 0 {
+		sourceProjectID = pgtype.Int8{Int64: ev.SourceProjectID, Valid: true}
+	}
 	pr, err := h.Queries.UpsertVCSPullRequest(ctx, db.UpsertVCSPullRequestParams{
-		WorkspaceID:     conn.WorkspaceID,
-		ConnectionID:    conn.ID,
-		Provider:        conn.Provider,
-		RepoOwner:       ev.RepoOwner,
-		RepoName:        ev.RepoName,
-		PrNumber:        ev.Number,
-		Title:           ev.Title,
-		State:           ev.State,
-		HtmlUrl:         ev.HTMLURL,
-		Branch:          ptrToText(strPtrOrNil(ev.Branch)),
-		AuthorLogin:     ptrToText(strPtrOrNil(ev.AuthorLogin)),
-		AuthorAvatarUrl: ptrToText(strPtrOrNil(ev.AuthorAvatarURL)),
-		MergedAt:        parseGHTime(ev.MergedAt),
-		ClosedAt:        parseGHTime(ev.ClosedAt),
-		PrCreatedAt:     parseGHTimeRequired(ev.CreatedAt),
-		PrUpdatedAt:     parseGHTimeRequired(ev.UpdatedAt),
-		Additions:       ev.Additions,
-		Deletions:       ev.Deletions,
-		ChangedFiles:    ev.ChangedFiles,
-		HeadSha:         ev.HeadSHA,
+		WorkspaceID:       conn.WorkspaceID,
+		ConnectionID:      conn.ID,
+		Provider:          conn.Provider,
+		RepoOwner:         ev.RepoOwner,
+		RepoName:          ev.RepoName,
+		PrNumber:          ev.Number,
+		Title:             ev.Title,
+		State:             ev.State,
+		HtmlUrl:           ev.HTMLURL,
+		Branch:            ptrToText(strPtrOrNil(ev.Branch)),
+		AuthorLogin:       ptrToText(strPtrOrNil(ev.AuthorLogin)),
+		AuthorAvatarUrl:   ptrToText(strPtrOrNil(ev.AuthorAvatarURL)),
+		MergedAt:          parseGHTime(ev.MergedAt),
+		ClosedAt:          parseGHTime(ev.ClosedAt),
+		PrCreatedAt:       parseGHTimeRequired(ev.CreatedAt),
+		PrUpdatedAt:       parseGHTimeRequired(ev.UpdatedAt),
+		Additions:         ev.Additions,
+		Deletions:         ev.Deletions,
+		ChangedFiles:      ev.ChangedFiles,
+		HeadSha:           ev.HeadSHA,
+		HasConflicts:      boolToPg(conflictState),
+		ConflictHeadSha:   conflictHeadSHA,
+		SourceProjectID:   sourceProjectID,
+		SourceProjectPath: strToText(ev.SourceProjectPath),
 	})
 	if err != nil {
-		slog.Warn("vcs: upsert pr failed", "err", err)
-		return
+		return err
 	}
 
-	// Out-of-order guard for the link write. UpsertVCSPullRequest keeps the
-	// newer persisted row on a stale redelivery, so `pr` may reflect a newer
-	// event than this `ev`. Everything the link pass decides below comes from
-	// `ev`, so acting on a stale event would undo what the newer one already
-	// recorded (e.g. a redelivered older event dropping a link the newer title
-	// carries). If the persisted row is strictly newer than this event, the
-	// newer event already linked and published — stop here. (An event with no
-	// usable timestamp falls back to now(), which is never strictly after the
-	// stored value, so it proceeds.)
 	evUpdatedAt := parseGHTimeRequired(ev.UpdatedAt)
 	if pr.PrUpdatedAt.Valid && evUpdatedAt.Valid && pr.PrUpdatedAt.Time.After(evUpdatedAt.Time) {
-		return
+		return nil
+	}
+
+	var pendingGitLabPipelineSync *vcsGitLabWakeupPipelineSync
+	if conn.Provider == string(vcs.KindGitLab) {
+		pendingGitLabPipelineSync, err = h.beginGitLabWakeupTargetForMergeRequestWebhook(ctx, vcs.GitLabWakeupTarget{
+			Source:         vcs.GitLabWakeupSourceVCSConnection,
+			WorkspaceID:    uuidToString(conn.WorkspaceID),
+			ConnectionID:   uuidToString(conn.ID),
+			MergeRequestID: uuidToString(pr.ID),
+			Repository:     ev.RepoOwner + "/" + ev.RepoName,
+			Number:         ev.Number,
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	workspaceID := uuidToString(conn.WorkspaceID)
 	resp := vcsPullRequestToResponse(pr)
-
-	// Auto-link to issues by identifiers in the title, branch, and closing
-	// keywords. Connecting a provider is the opt-in, so there is no separate
-	// per-workspace flag. The issue-side machinery is shared with GitHub
-	// (reconcileAutoLinks, maybeAutoCompleteIssue). A connection belongs to
-	// exactly one workspace, so there is no cross-workspace ambiguity to settle.
 	linkedIssueIDs := make([]string, 0)
 	ws, err := h.Queries.GetWorkspace(ctx, conn.WorkspaceID)
-	if err == nil {
+	if err != nil {
+		if conn.Provider == string(vcs.KindGitLab) {
+			return err
+		}
+		slog.Warn("vcs: load workspace failed", "err", err)
+	} else {
 		var touched map[pgtype.UUID]struct{}
 		idents := prClaimedIdentifiers(ev.Title, ev.Body, ev.Branch)
 		linkedIssueIDs, touched = h.reconcileAutoLinks(ctx, ws, pr.ID, ev.State, prAutoLinkInput{
@@ -330,6 +466,9 @@ func (h *Handler) mirrorVCSPullRequest(ctx context.Context, conn db.VcsConnectio
 		if ev.State == "merged" && prevState != "merged" {
 			issueIDs, err := h.Queries.ListIssueIDsForVCSPullRequest(ctx, pr.ID)
 			if err != nil {
+				if conn.Provider == string(vcs.KindGitLab) {
+					return err
+				}
 				slog.Warn("vcs: list linked issues failed", "err", err)
 			}
 			for _, id := range issueIDs {
@@ -340,24 +479,30 @@ func (h *Handler) mirrorVCSPullRequest(ctx context.Context, conn db.VcsConnectio
 		for issueID := range touched {
 			h.maybeAutoCompleteIssue(ctx, conn.WorkspaceID, issueID, resolver)
 		}
-	} else {
-		slog.Warn("vcs: load workspace failed", "err", err)
 	}
 
 	h.publish(protocol.EventPullRequestUpdated, workspaceID, "system", "", map[string]any{
 		"pull_request":     resp,
 		"linked_issue_ids": linkedIssueIDs,
 	})
+	if pendingGitLabPipelineSync != nil {
+		if err := h.syncVCSGitLabWakeupPipelines(ctx, pendingGitLabPipelineSync); err != nil {
+			if isGitLabRefreshPersistenceError(err) {
+				return err
+			}
+			slog.Warn("vcs: merge request Pipeline refresh failed", "reason", gitLabWakeupFailureMessage(err), "pr_id", uuidToString(pr.ID))
+		}
+	}
+	return nil
 }
 
-func (h *Handler) mirrorVCSCIStatus(ctx context.Context, conn db.VcsConnection, ev vcs.CIStatusEvent) {
+func (h *Handler) mirrorVCSCIStatus(ctx context.Context, conn db.VcsConnection, ev vcs.CIStatusEvent) error {
 	if ev.SHA == "" || ev.State == "" {
-		return
+		return nil
 	}
-	// Use the provider's own event timestamp so UpsertVCSCommitStatus's
-	// monotonic guard has something real to compare — writing time.Now() here
-	// made the guard always true, so an out-of-order redelivery could regress a
-	// status. Falls back to now() only when the payload carried no timestamp.
+	if conn.Provider == string(vcs.KindGitLab) {
+		return h.syncGitLabPipelineEvent(ctx, conn, ev)
+	}
 	if err := h.Queries.UpsertVCSCommitStatus(ctx, db.UpsertVCSCommitStatusParams{
 		ConnectionID: conn.ID,
 		Sha:          ev.SHA,
@@ -367,8 +512,7 @@ func (h *Handler) mirrorVCSCIStatus(ctx context.Context, conn db.VcsConnection, 
 		Description:  ptrToText(strPtrOrNil(ev.Description)),
 		UpdatedAt:    parseGHTimeRequired(ev.UpdatedAt),
 	}); err != nil {
-		slog.Warn("vcs: upsert commit status failed", "err", err)
-		return
+		return err
 	}
 
 	issueIDs, err := h.Queries.ListIssueIDsForVCSPRHead(ctx, db.ListIssueIDsForVCSPRHeadParams{
@@ -376,8 +520,7 @@ func (h *Handler) mirrorVCSCIStatus(ctx context.Context, conn db.VcsConnection, 
 		HeadSha:      ev.SHA,
 	})
 	if err != nil {
-		slog.Warn("vcs: lookup issues for status failed", "err", err)
-		return
+		return err
 	}
 	workspaceID := uuidToString(conn.WorkspaceID)
 	for _, issueID := range issueIDs {
@@ -385,4 +528,66 @@ func (h *Handler) mirrorVCSCIStatus(ctx context.Context, conn db.VcsConnection, 
 			"issue_id": uuidToString(issueID),
 		})
 	}
+	return nil
+}
+
+func (h *Handler) syncGitLabPipelineEvent(ctx context.Context, conn db.VcsConnection, ev vcs.CIStatusEvent) error {
+	candidates := make(map[string]db.VcsPullRequest)
+	byProject, err := h.Queries.ListVCSGitLabPullRequestsByProjectHead(ctx, db.ListVCSGitLabPullRequestsByProjectHeadParams{
+		WorkspaceID:  conn.WorkspaceID,
+		ConnectionID: conn.ID,
+		RepoOwner:    ev.RepoOwner,
+		RepoName:     ev.RepoName,
+		HeadSha:      ev.SHA,
+	})
+	if err != nil {
+		return err
+	}
+	for _, pr := range byProject {
+		if vcsGitLabPipelineRefMayMatchMR(ev.Ref, pr) {
+			candidates[uuidToString(pr.ID)] = pr
+		}
+	}
+	bySource, err := h.Queries.ListVCSGitLabPullRequestsBySourceProjectHead(ctx, db.ListVCSGitLabPullRequestsBySourceProjectHeadParams{
+		WorkspaceID:     conn.WorkspaceID,
+		ConnectionID:    conn.ID,
+		SourceProjectID: pgtype.Int8{Int64: ev.ProjectID, Valid: ev.ProjectID > 0},
+		HeadSha:         ev.SHA,
+	})
+	if err != nil {
+		return err
+	}
+	for _, pr := range bySource {
+		if vcsGitLabPipelineRefMayMatchMR(ev.Ref, pr) {
+			candidates[uuidToString(pr.ID)] = pr
+		}
+	}
+	for _, pr := range candidates {
+		if err := h.syncGitLabWakeupTargetForWebhook(ctx, vcs.GitLabWakeupTarget{
+			Source:         vcs.GitLabWakeupSourceVCSConnection,
+			WorkspaceID:    uuidToString(conn.WorkspaceID),
+			ConnectionID:   uuidToString(conn.ID),
+			MergeRequestID: uuidToString(pr.ID),
+			Repository:     pr.RepoOwner + "/" + pr.RepoName,
+			Number:         pr.PrNumber,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func vcsGitLabPipelineRefMayMatchMR(ref string, pr db.VcsPullRequest) bool {
+	if ref == "" {
+		return true
+	}
+	if pr.Branch.Valid && strings.TrimPrefix(ref, "refs/heads/") == pr.Branch.String {
+		return true
+	}
+	parts := strings.Split(ref, "/")
+	if len(parts) == 4 && parts[0] == "refs" && parts[1] == "merge-requests" && (parts[3] == "head" || parts[3] == "merge") {
+		number, err := strconv.ParseInt(parts[2], 10, 32)
+		return err == nil && int32(number) == pr.PrNumber
+	}
+	return false
 }

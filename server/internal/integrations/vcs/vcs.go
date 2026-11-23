@@ -27,6 +27,92 @@ const (
 	KindGitLab  Kind = "gitlab"
 )
 
+// GitLabWakeupSource identifies which of the two workspace GitLab integrations
+// owns a wakeup target. These sources keep separate credentials and mirrors.
+type GitLabWakeupSource string
+
+const (
+	GitLabWakeupSourceVCSConnection       GitLabWakeupSource = "vcs_connection"
+	GitLabWakeupSourceWorkspaceConnection GitLabWakeupSource = "gitlab_connection"
+)
+
+// GitLabWakeupTarget identifies one exact merge request in one workspace
+// connection. Repository is the full GitLab path, including all subgroups.
+type GitLabWakeupTarget struct {
+	Source         GitLabWakeupSource
+	WorkspaceID    string
+	ConnectionID   string
+	MergeRequestID string
+	Repository     string
+	Number         int32
+}
+
+// GitLabWakeupSyncer performs a targeted authoritative refresh for a single MR.
+// Implementations must not hold a database transaction open during network I/O.
+type GitLabWakeupSyncer interface {
+	SyncGitLabWakeupTarget(context.Context, GitLabWakeupTarget) error
+}
+
+// GitLabWakeupMergeRequest is the authoritative status returned by GitLab's
+// REST API for one merge request.
+type GitLabWakeupMergeRequest struct {
+	State             string
+	HeadSHA           string
+	SourceBranch      string
+	SourceProjectID   int64
+	SourceProjectPath string
+	HasConflicts      *bool
+	UpdatedAt         string
+	MergedAt          string
+	ClosedAt          string
+}
+
+// GitLabWakeupPipeline is one pipeline observed for a target MR. ProjectID and
+// ProjectPath identify the project that owns the pipeline, which can be a fork.
+type GitLabWakeupPipeline struct {
+	ID          int64
+	ProjectID   int64
+	ProjectPath string
+	SHA         string
+	Ref         string
+	Status      string
+	WebURL      string
+	UpdatedAt   string
+}
+
+// GitLabWakeupMergeRequestSnapshot carries the authoritative MR state and the
+// target-project identity needed by the later, supplementary pipeline read.
+type GitLabWakeupMergeRequestSnapshot struct {
+	MergeRequest      GitLabWakeupMergeRequest
+	TargetProjectID   int64
+	TargetProjectPath string
+	// pipelineError preserves MR/source identity diagnostics for the optional
+	// pipeline phase without rejecting valid authoritative MR state.
+	pipelineError error
+}
+
+// GitLabWakeupPipelineSnapshot reports pipeline discovery separately from MR
+// state, so callers can persist the MR before making supplementary CI requests.
+type GitLabWakeupPipelineSnapshot struct {
+	Pipelines     []GitLabWakeupPipeline
+	PipelineError error
+}
+
+// GitLabWakeupSnapshot combines the separate MR and pipeline reads for handler
+// validation and persistence.
+type GitLabWakeupSnapshot struct {
+	MergeRequest  GitLabWakeupMergeRequest
+	Pipelines     []GitLabWakeupPipeline
+	PipelineError error
+}
+
+// GitLabWakeupSnapshotReader separates authoritative MR reads from optional
+// pipeline discovery. The caller persists the MR between these two methods.
+type GitLabWakeupSnapshotReader interface {
+	ReadGitLabWakeupMergeRequest(context.Context, string, string, string, int32) (GitLabWakeupMergeRequestSnapshot, error)
+	ReadGitLabWakeupPipelines(context.Context, string, string, int32, GitLabWakeupMergeRequestSnapshot) GitLabWakeupPipelineSnapshot
+}
+
 // Valid reports whether k is a known provider kind.
 func (k Kind) Valid() bool {
 	switch k {
@@ -58,25 +144,28 @@ const (
 type PullRequestEvent struct {
 	// Action is the raw provider action (e.g. "opened", "closed", "merge").
 	// The handler only needs to know whether it is terminal; see Terminal.
-	Action          string
-	RepoOwner       string
-	RepoName        string
-	Number          int32
-	Title           string
-	Body            string
-	State           string // open | closed | merged | draft
-	HTMLURL         string
-	Branch          string
-	HeadSHA         string
-	AuthorLogin     string
-	AuthorAvatarURL string
-	Additions       int32
-	Deletions       int32
-	ChangedFiles    int32
-	MergedAt        string // RFC3339 or empty
-	ClosedAt        string
-	CreatedAt       string
-	UpdatedAt       string
+	Action            string
+	RepoOwner         string
+	RepoName          string
+	Number            int32
+	Title             string
+	Body              string
+	State             string // open | closed | merged | draft
+	HTMLURL           string
+	Branch            string
+	HeadSHA           string
+	HasConflicts      *bool
+	SourceProjectID   int64
+	SourceProjectPath string
+	AuthorLogin       string
+	AuthorAvatarURL   string
+	Additions         int32
+	Deletions         int32
+	ChangedFiles      int32
+	MergedAt          string // RFC3339 or empty
+	ClosedAt          string
+	CreatedAt         string
+	UpdatedAt         string
 }
 
 // Terminal reports whether this event is the PR's merge/close event, after
@@ -100,6 +189,12 @@ type CIStatusEvent struct {
 	State       string // passed | failed | pending
 	TargetURL   string
 	Description string
+	PipelineID  int64
+	ProjectID   int64
+	ProjectPath string
+	Ref         string
+	RepoOwner   string
+	RepoName    string
 	// UpdatedAt is the provider's own event timestamp (RFC3339 or empty). It
 	// feeds the commit-status monotonic guard so an out-of-order redelivery
 	// can't regress a status; empty means "unknown", and the handler falls back

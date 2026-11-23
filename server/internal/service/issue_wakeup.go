@@ -624,6 +624,9 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 		return out, err
 	}
 	s.publishWakeupActivities(activities...)
+	if _, syncErr := s.syncGitLabConditionTargets(ctx, out); syncErr != nil {
+		slog.DebugContext(ctx, "issue wakeup: GitLab post-save refresh deferred", "wakeup_id", util.UUIDToString(out.ID))
+	}
 	return out, nil
 }
 
@@ -826,6 +829,14 @@ func (s *IssueWakeupService) finishTick(ctx context.Context, workspaceIDs []pgty
 // outcome on the rule.
 func (s *IssueWakeupService) dispatchFromTick(ctx context.Context, w db.IssueWakeup) []error {
 	var errs []error
+	if !w.SystemRule.Valid && isGitLabPullRequestCondition(w.Condition) {
+		failures, syncErr := s.syncGitLabConditionTargets(ctx, w)
+		if syncErr != nil {
+			failures = gitLabWakeupSyncFailures{"*": fmt.Errorf("%w: GitLab condition refresh failed", errGitLabStatusPending)}
+			slog.DebugContext(ctx, "issue wakeup: GitLab condition refresh deferred", "wakeup_id", util.UUIDToString(w.ID))
+		}
+		ctx = withGitLabWakeupSyncFailures(ctx, failures)
+	}
 	// Outcome writes must not turn a busy rule row into another batch-wide
 	// wait. Use the batch context, not dispatch's expired per-rule context.
 	dispatch := s.dispatch

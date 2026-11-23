@@ -294,6 +294,7 @@
     "reminder_at": "напомнит {{relative}}",
     "next_check": "следующая проверка {{relative}}",
     "last_check": "Последняя проверка: {{note}}",
+    "gitlab_target": "GitLab {{repo}}!{{number}} ({{event}}, подключение {{connectionId}})",
     "cancel": "Отменить напоминание",
     "cancel_failed": "Не удалось отменить напоминание",
     "retry": "Повторить",

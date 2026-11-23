@@ -24,9 +24,12 @@ type MergeRequest struct {
 	SourceBranch        string    `json:"source_branch"`
 	TargetBranch        string    `json:"target_branch"`
 	SHA                 string    `json:"sha"`
+	SourceProjectID     int64     `json:"source_project_id"`
+	TargetProjectID     int64     `json:"target_project_id"`
+	SourceProject       Project   `json:"source_project"`
 	MergeCommitSHA      string    `json:"merge_commit_sha"`
 	DetailedMergeStatus string    `json:"detailed_merge_status"`
-	HasConflicts        bool      `json:"has_conflicts"`
+	HasConflicts        *bool     `json:"has_conflicts"`
 	ChangesCount        string    `json:"changes_count"`
 	CreatedAt           string    `json:"created_at"`
 	UpdatedAt           string    `json:"updated_at"`
@@ -41,17 +44,37 @@ type MergeRequest struct {
 	} `json:"author"`
 }
 
+// MergeRequestConflictState only returns a value when GitLab's mergeability
+// check is authoritative. has_conflicts can be false while the check is still
+// queued, so callers must treat nil as unknown and version known results to the
+// MR head SHA before using them.
+func MergeRequestConflictState(hasConflicts *bool, detailedStatus string) *bool {
+	switch strings.ToLower(strings.TrimSpace(detailedStatus)) {
+	case "can_be_merged", "mergeable":
+		noConflicts := false
+		return &noConflicts
+	case "cannot_be_merged", "not_mergeable", "conflict", "rebase_conflict":
+		if hasConflicts != nil && *hasConflicts {
+			return hasConflicts
+		}
+	}
+	return nil
+}
+
 type MergeRequestMergeOptions struct {
 	ShouldRemoveSourceBranch bool `json:"should_remove_source_branch"`
 }
 
 type Pipeline struct {
-	ID        int64  `json:"id"`
-	SHA       string `json:"sha"`
-	Ref       string `json:"ref"`
-	Status    string `json:"status"`
-	WebURL    string `json:"web_url"`
-	UpdatedAt string `json:"updated_at"`
+	ID         int64  `json:"id"`
+	ProjectID  int64  `json:"project_id"`
+	SHA        string `json:"sha"`
+	Ref        string `json:"ref"`
+	Status     string `json:"status"`
+	WebURL     string `json:"web_url"`
+	CreatedAt  string `json:"created_at"`
+	FinishedAt string `json:"finished_at"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 type PipelineFilters struct {

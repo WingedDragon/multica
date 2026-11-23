@@ -114,6 +114,44 @@ describe("ChatWakeupStrip", () => {
     );
   });
 
+  it("shows a GitLab target and connection while preserving legacy GitHub rows", () => {
+    const target = "GitLab group/subgroup/project!17 (closed, connection gitlab-connection)";
+    renderWithI18n(
+      <ChatWakeupStrip
+        sessionId="session-1"
+        wakeups={[
+          wakeup({
+            id: "gitlab",
+            title: "GitLab MR wait",
+            last_error: "The GitLab pipeline is temporarily unavailable",
+            condition: {
+              type: "pull_request",
+              provider: "gitlab",
+              connection_id: "gitlab-connection",
+              repo: "group/subgroup/project",
+              number: 17,
+              event: "closed",
+            },
+          }),
+          wakeup({
+            id: "github",
+            title: "GitHub PR wait",
+            condition: { type: "pull_request", repo: "octo/widgets", number: 17, event: "merged" },
+          }),
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Wakeups" }));
+
+    expect(screen.getByText(target)).toHaveAttribute("title", target);
+    expect(screen.getByText("The GitLab pipeline is temporarily unavailable")).toHaveAttribute("title", "The GitLab pipeline is temporarily unavailable");
+    const githubRow = screen.getByText("GitHub PR wait").closest('[data-slot="chat-wakeup-row"]');
+    expect(githubRow).not.toBeNull();
+    expect(githubRow?.textContent).not.toContain("GitLab");
+    expect(githubRow?.querySelector("[title]")).toBeNull();
+  });
+
   it("renders nothing without an active wakeup", () => {
     const { container } = renderWithI18n(
       <ChatWakeupStrip sessionId="session-1" wakeups={[wakeup({ id: "a", status: "cancelled" })]} />,

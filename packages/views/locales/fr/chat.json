@@ -284,6 +284,7 @@
     "reminder_at": "rappel {{relative}}",
     "next_check": "prochaine vérification {{relative}}",
     "last_check": "Dernière vérification : {{note}}",
+    "gitlab_target": "GitLab {{repo}}!{{number}} ({{event}}, connexion {{connectionId}})",
     "cancel": "Annuler le réveil",
     "cancel_failed": "Impossible d'annuler le réveil",
     "retry": "Réessayer",

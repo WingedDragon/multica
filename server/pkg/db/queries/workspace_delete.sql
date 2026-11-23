@@ -480,6 +480,10 @@ deleted_vcs_commit_statuses AS (
     DELETE FROM vcs_commit_status
     WHERE connection_id IN (SELECT id FROM ws_vcs_connections)
 ),
+deleted_vcs_gitlab_pipelines AS (
+    DELETE FROM vcs_gitlab_pipeline
+    WHERE workspace_id = $1
+),
 deleted_channel_chat_bindings AS (
     DELETE FROM channel_chat_session_binding
     WHERE installation_id IN (SELECT id FROM ws_channel_installations)
@@ -672,6 +676,10 @@ DELETE FROM autopilot WHERE autopilot.workspace_id = $1;
 WITH deleted_github_prs AS (
     DELETE FROM github_pull_request
     WHERE github_pull_request.workspace_id = $1
+),
+deleted_vcs_gitlab_pipelines AS (
+    DELETE FROM vcs_gitlab_pipeline
+    WHERE workspace_id = $1
 )
 DELETE FROM vcs_pull_request WHERE vcs_pull_request.workspace_id = $1;
 

@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS vcs_gitlab_pipeline_identity_uidx;

@@ -3,6 +3,9 @@ SELECT * FROM gitlab_connection
 WHERE workspace_id = $1
 ORDER BY created_at ASC
 LIMIT 1;
+-- name: GetGitLabConnectionByID :one
+SELECT * FROM gitlab_connection
+WHERE id = $1 AND workspace_id = $2;
 
 -- name: ListGitLabConnectionsByWorkspace :many
 SELECT * FROM gitlab_connection
@@ -69,7 +72,8 @@ INSERT INTO gitlab_merge_request (
     title, description, state, web_url, source_branch, target_branch,
     author_username, author_avatar_url, sha, merge_commit_sha,
     detailed_merge_status, has_conflicts, additions, deletions, changed_files,
-    mr_created_at, mr_updated_at, merged_at, closed_at
+    mr_created_at, mr_updated_at, merged_at, closed_at, conflict_sha,
+    source_project_id, source_project_path
 ) VALUES (
     $1, $2, $3, $4,
     $5, sqlc.narg('description'), $6, $7,
@@ -78,10 +82,10 @@ INSERT INTO gitlab_merge_request (
     $8, sqlc.narg('merge_commit_sha'),
     sqlc.narg('detailed_merge_status'), sqlc.narg('has_conflicts'),
     $9, $10, $11, $12, $13,
-    sqlc.narg('merged_at'), sqlc.narg('closed_at')
+    sqlc.narg('merged_at'), sqlc.narg('closed_at'), COALESCE(sqlc.narg('conflict_sha'), ''),
+    sqlc.narg('source_project_id'), sqlc.narg('source_project_path')
 )
 ON CONFLICT (workspace_id, project_binding_id, mr_iid) DO UPDATE SET
-    project_binding_id = EXCLUDED.project_binding_id,
     title = EXCLUDED.title,
     description = EXCLUDED.description,
     state = EXCLUDED.state,
@@ -94,6 +98,9 @@ ON CONFLICT (workspace_id, project_binding_id, mr_iid) DO UPDATE SET
     merge_commit_sha = EXCLUDED.merge_commit_sha,
     detailed_merge_status = EXCLUDED.detailed_merge_status,
     has_conflicts = EXCLUDED.has_conflicts,
+    conflict_sha = EXCLUDED.conflict_sha,
+    source_project_id = EXCLUDED.source_project_id,
+    source_project_path = EXCLUDED.source_project_path,
     additions = EXCLUDED.additions,
     deletions = EXCLUDED.deletions,
     changed_files = EXCLUDED.changed_files,
@@ -101,12 +108,23 @@ ON CONFLICT (workspace_id, project_binding_id, mr_iid) DO UPDATE SET
     merged_at = EXCLUDED.merged_at,
     closed_at = EXCLUDED.closed_at,
     updated_at = now()
+WHERE EXCLUDED.mr_updated_at >= gitlab_merge_request.mr_updated_at
 RETURNING *;
 
 -- name: GetGitLabMergeRequestByBinding :one
 SELECT * FROM gitlab_merge_request
 WHERE workspace_id = $1 AND project_binding_id = $2 AND mr_iid = $3;
 
+-- name: GetGitLabMergeRequestForWakeup :one
+SELECT mr.*
+FROM gitlab_merge_request mr
+JOIN gitlab_project_binding pb
+  ON pb.id = mr.project_binding_id
+ AND pb.workspace_id = mr.workspace_id
+WHERE mr.workspace_id = $1
+  AND pb.connection_id = $2
+  AND pb.path_with_namespace = $3
+  AND mr.mr_iid = $4;
 -- name: ListGitLabMergeRequestsByIssue :many
 WITH issue_mrs AS (
     SELECT mr.id, mr.sha
@@ -146,21 +164,71 @@ ORDER BY mr.mr_created_at DESC, mr.id ASC;
 SELECT * FROM gitlab_merge_request
 WHERE workspace_id = $1 AND project_binding_id = $2 AND sha = $3
 ORDER BY mr_updated_at DESC, id ASC;
+-- name: ListGitLabMergeRequestsBySourceProjectHead :many
+SELECT mr.*
+FROM gitlab_merge_request mr
+JOIN gitlab_project_binding pb
+  ON pb.id = mr.project_binding_id
+ AND pb.workspace_id = mr.workspace_id
+JOIN gitlab_connection gc
+  ON gc.id = pb.connection_id
+ AND gc.workspace_id = pb.workspace_id
+WHERE gc.host = $1
+  AND mr.source_project_id = $2
+  AND mr.sha = $3
+  AND mr.sha <> ''
+ORDER BY mr.mr_updated_at DESC, mr.id ASC;
+
+-- name: LockGitLabMergeRequestWakeupSync :one
+SELECT id FROM gitlab_merge_request
+WHERE id = $1
+  AND workspace_id = $2
+  AND wakeup_sync_generation = $3
+  AND sha = $4
+FOR UPDATE;
+
+-- name: DeleteGitLabMRPipelinesByMR :execrows
+DELETE FROM gitlab_mr_pipeline
+WHERE merge_request_id = $1;
 
 -- name: UpsertGitLabMRPipeline :exec
 INSERT INTO gitlab_mr_pipeline (
-    merge_request_id, pipeline_id, sha, ref, status, web_url, pipeline_updated_at
-) VALUES (
-    $1, $2, $3, sqlc.narg('ref'), $4, sqlc.narg('web_url'), $5
+    merge_request_id, pipeline_id, pipeline_project_id, sha, ref, status,
+    web_url, pipeline_updated_at
 )
-ON CONFLICT (merge_request_id, pipeline_id) DO UPDATE SET
+SELECT sqlc.arg('merge_request_id')::UUID,
+       sqlc.arg('pipeline_id')::BIGINT,
+       sqlc.arg('pipeline_project_id')::BIGINT,
+       sqlc.arg('sha')::TEXT,
+       sqlc.narg('ref')::TEXT,
+       sqlc.arg('status')::TEXT,
+       sqlc.narg('web_url')::TEXT,
+       sqlc.arg('pipeline_updated_at')::TIMESTAMPTZ
+WHERE EXISTS (
+    SELECT 1
+    FROM gitlab_merge_request mr
+    WHERE mr.id = sqlc.arg('merge_request_id')::UUID
+      AND mr.workspace_id = sqlc.arg('workspace_id')::UUID
+      AND mr.wakeup_sync_generation = sqlc.arg('wakeup_sync_generation')::BIGINT
+      AND mr.sha = sqlc.arg('sha')::TEXT
+)
+ON CONFLICT (merge_request_id, pipeline_project_id, pipeline_id) DO UPDATE SET
+    pipeline_project_id = EXCLUDED.pipeline_project_id,
     sha = EXCLUDED.sha,
     ref = EXCLUDED.ref,
     status = EXCLUDED.status,
     web_url = EXCLUDED.web_url,
     pipeline_updated_at = EXCLUDED.pipeline_updated_at,
     updated_at = now()
-WHERE EXCLUDED.pipeline_updated_at >= gitlab_mr_pipeline.pipeline_updated_at;
+WHERE EXCLUDED.pipeline_updated_at >= gitlab_mr_pipeline.pipeline_updated_at
+  AND EXISTS (
+      SELECT 1
+      FROM gitlab_merge_request mr
+      WHERE mr.id = sqlc.arg('merge_request_id')::UUID
+        AND mr.workspace_id = sqlc.arg('workspace_id')::UUID
+        AND mr.wakeup_sync_generation = sqlc.arg('wakeup_sync_generation')::BIGINT
+        AND mr.sha = sqlc.arg('sha')::TEXT
+  );
 
 -- name: LinkIssueToGitLabMergeRequest :exec
 INSERT INTO issue_gitlab_merge_request (
@@ -221,6 +289,17 @@ WHERE workspace_id = $1 AND project_binding_id = $2
 ORDER BY mr_updated_at DESC, id ASC
 LIMIT $3;
 
+-- name: BeginGitLabMergeRequestWakeupSync :one
+UPDATE gitlab_merge_request
+SET wakeup_sync_generation = wakeup_sync_generation + 1,
+    last_refreshed_at = now(),
+    last_refresh_error = 'MR refresh pending',
+    pipeline_sync_at = now(),
+    pipeline_sync_error = 'Pipeline refresh pending',
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+RETURNING wakeup_sync_generation;
+
 -- name: UpdateGitLabMergeRequestEnrichment :one
 UPDATE gitlab_merge_request
 SET title = $3,
@@ -235,6 +314,9 @@ SET title = $3,
     merge_commit_sha = sqlc.narg('merge_commit_sha'),
     detailed_merge_status = sqlc.narg('detailed_merge_status'),
     has_conflicts = sqlc.narg('has_conflicts'),
+    conflict_sha = COALESCE(sqlc.narg('conflict_sha'), ''),
+    source_project_id = sqlc.narg('source_project_id'),
+    source_project_path = sqlc.narg('source_project_path'),
     additions = $7,
     deletions = $8,
     changed_files = $9,
@@ -246,16 +328,39 @@ SET title = $3,
     closed_at = sqlc.narg('closed_at'),
     last_refreshed_at = now(),
     last_refresh_error = NULL,
+    pipeline_sync_at = now(),
+    pipeline_sync_error = 'pipeline refresh pending',
     updated_at = now()
 WHERE id = $1 AND workspace_id = $2
+  AND mr_updated_at <= $13
+  AND wakeup_sync_generation = $14
 RETURNING *;
 
--- name: MarkGitLabMergeRequestRefreshError :exec
+-- name: MarkGitLabMergeRequestRefreshError :execrows
 UPDATE gitlab_merge_request
 SET last_refreshed_at = now(),
     last_refresh_error = $3,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $2;
+WHERE id = $1 AND workspace_id = $2
+  AND wakeup_sync_generation = $4;
+
+-- name: MarkGitLabMergeRequestPipelineSync :execrows
+UPDATE gitlab_merge_request
+SET pipeline_sync_at = now(),
+    pipeline_sync_error = $3,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+  AND wakeup_sync_generation = $4
+  AND sha = $5;
+
+-- name: MarkGitLabMergeRequestPipelineSyncSuccess :execrows
+UPDATE gitlab_merge_request
+SET pipeline_sync_at = now(),
+    pipeline_sync_error = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+  AND wakeup_sync_generation = $3
+  AND sha = $4;
 
 -- name: UpsertGitLabMRApprovalState :one
 INSERT INTO gitlab_mr_approval_state (

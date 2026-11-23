@@ -11,6 +11,30 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const beginGitLabVCSPullRequestWakeupSync = `-- name: BeginGitLabVCSPullRequestWakeupSync :one
+UPDATE vcs_pull_request
+SET wakeup_sync_generation = wakeup_sync_generation + 1,
+    status_sync_at = now(),
+    status_sync_error = 'MR refresh pending',
+    pipeline_sync_at = now(),
+    pipeline_sync_error = 'Pipeline refresh pending',
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND provider = 'gitlab'
+RETURNING wakeup_sync_generation
+`
+
+type BeginGitLabVCSPullRequestWakeupSyncParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) BeginGitLabVCSPullRequestWakeupSync(ctx context.Context, arg BeginGitLabVCSPullRequestWakeupSyncParams) (int64, error) {
+	row := q.db.QueryRow(ctx, beginGitLabVCSPullRequestWakeupSync, arg.ID, arg.WorkspaceID)
+	var wakeup_sync_generation int64
+	err := row.Scan(&wakeup_sync_generation)
+	return wakeup_sync_generation, err
+}
+
 const deleteVCSConnection = `-- name: DeleteVCSConnection :exec
 WITH target AS (
     SELECT vcs_connection.id FROM vcs_connection WHERE vcs_connection.id = $1 AND vcs_connection.workspace_id = $2
@@ -25,6 +49,9 @@ cleared_links AS (
 cleared_statuses AS (
     DELETE FROM vcs_commit_status WHERE connection_id IN (SELECT target.id FROM target)
 ),
+cleared_pipelines AS (
+    DELETE FROM vcs_gitlab_pipeline WHERE connection_id IN (SELECT target.id FROM target)
+),
 cleared_prs AS (
     DELETE FROM vcs_pull_request WHERE connection_id IN (SELECT target.id FROM target)
 )
@@ -36,19 +63,34 @@ type DeleteVCSConnectionParams struct {
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
 }
 
-// These tables carry no FKs, so the cascade that once removed the connection's
-// mirrored PRs, their issue links, and CI statuses is gone (migration 213). Do
-// that cleanup explicitly here, in one statement so it commits or rolls back
-// atomically with the connection row. The target CTE also scopes every child
-// delete to a connection that actually belongs to the workspace, so a wrong
-// workspace_id is a no-op rather than deleting another tenant's child rows.
+// The VCS mirror tables intentionally have no foreign keys. Remove the
+// connection's MR pipeline ledger, issue links, commit statuses, and MRs in
+// the same statement as the connection, scoped to the owning workspace.
 func (q *Queries) DeleteVCSConnection(ctx context.Context, arg DeleteVCSConnectionParams) error {
 	_, err := q.db.Exec(ctx, deleteVCSConnection, arg.ID, arg.WorkspaceID)
 	return err
 }
 
+const deleteVCSGitLabPipelinesByMR = `-- name: DeleteVCSGitLabPipelinesByMR :execrows
+DELETE FROM vcs_gitlab_pipeline
+WHERE workspace_id = $1 AND pull_request_id = $2
+`
+
+type DeleteVCSGitLabPipelinesByMRParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	PullRequestID pgtype.UUID `json:"pull_request_id"`
+}
+
+func (q *Queries) DeleteVCSGitLabPipelinesByMR(ctx context.Context, arg DeleteVCSGitLabPipelinesByMRParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteVCSGitLabPipelinesByMR, arg.WorkspaceID, arg.PullRequestID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const findVCSPullRequestByURL = `-- name: FindVCSPullRequestByURL :one
-SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at FROM vcs_pull_request
+SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, has_conflicts, conflict_head_sha, source_project_id, source_project_path, status_sync_at, status_sync_error, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM vcs_pull_request
 WHERE workspace_id = $1
   AND lower(rtrim(html_url, '/')) = lower($2::text)
 ORDER BY pr_updated_at DESC
@@ -87,6 +129,15 @@ func (q *Queries) FindVCSPullRequestByURL(ctx context.Context, arg FindVCSPullRe
 		&i.ChangedFiles,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.HasConflicts,
+		&i.ConflictHeadSha,
+		&i.SourceProjectID,
+		&i.SourceProjectPath,
+		&i.StatusSyncAt,
+		&i.StatusSyncError,
+		&i.PipelineSyncAt,
+		&i.PipelineSyncError,
+		&i.WakeupSyncGeneration,
 	)
 	return i, err
 }
@@ -114,8 +165,72 @@ func (q *Queries) GetVCSConnectionByID(ctx context.Context, id pgtype.UUID) (Vcs
 	return i, err
 }
 
+const getVCSGitLabPullRequestByWakeupIdentity = `-- name: GetVCSGitLabPullRequestByWakeupIdentity :one
+SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, has_conflicts, conflict_head_sha, source_project_id, source_project_path, status_sync_at, status_sync_error, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM vcs_pull_request
+WHERE workspace_id = $1
+  AND connection_id = $2
+  AND provider = 'gitlab'
+  AND repo_owner = $3
+  AND repo_name = $4
+  AND pr_number = $5
+`
+
+type GetVCSGitLabPullRequestByWakeupIdentityParams struct {
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ConnectionID pgtype.UUID `json:"connection_id"`
+	RepoOwner    string      `json:"repo_owner"`
+	RepoName     string      `json:"repo_name"`
+	PrNumber     int32       `json:"pr_number"`
+}
+
+func (q *Queries) GetVCSGitLabPullRequestByWakeupIdentity(ctx context.Context, arg GetVCSGitLabPullRequestByWakeupIdentityParams) (VcsPullRequest, error) {
+	row := q.db.QueryRow(ctx, getVCSGitLabPullRequestByWakeupIdentity,
+		arg.WorkspaceID,
+		arg.ConnectionID,
+		arg.RepoOwner,
+		arg.RepoName,
+		arg.PrNumber,
+	)
+	var i VcsPullRequest
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ConnectionID,
+		&i.Provider,
+		&i.RepoOwner,
+		&i.RepoName,
+		&i.PrNumber,
+		&i.Title,
+		&i.State,
+		&i.HtmlUrl,
+		&i.Branch,
+		&i.HeadSha,
+		&i.AuthorLogin,
+		&i.AuthorAvatarUrl,
+		&i.MergedAt,
+		&i.ClosedAt,
+		&i.PrCreatedAt,
+		&i.PrUpdatedAt,
+		&i.Additions,
+		&i.Deletions,
+		&i.ChangedFiles,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.HasConflicts,
+		&i.ConflictHeadSha,
+		&i.SourceProjectID,
+		&i.SourceProjectPath,
+		&i.StatusSyncAt,
+		&i.StatusSyncError,
+		&i.PipelineSyncAt,
+		&i.PipelineSyncError,
+		&i.WakeupSyncGeneration,
+	)
+	return i, err
+}
+
 const getVCSPullRequestByKey = `-- name: GetVCSPullRequestByKey :one
-SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at FROM vcs_pull_request
+SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, has_conflicts, conflict_head_sha, source_project_id, source_project_path, status_sync_at, status_sync_error, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM vcs_pull_request
 WHERE connection_id = $1 AND repo_owner = $2 AND repo_name = $3 AND pr_number = $4
 `
 
@@ -160,12 +275,21 @@ func (q *Queries) GetVCSPullRequestByKey(ctx context.Context, arg GetVCSPullRequ
 		&i.ChangedFiles,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.HasConflicts,
+		&i.ConflictHeadSha,
+		&i.SourceProjectID,
+		&i.SourceProjectPath,
+		&i.StatusSyncAt,
+		&i.StatusSyncError,
+		&i.PipelineSyncAt,
+		&i.PipelineSyncError,
+		&i.WakeupSyncGeneration,
 	)
 	return i, err
 }
 
 const getVCSPullRequestInWorkspace = `-- name: GetVCSPullRequestInWorkspace :one
-SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at FROM vcs_pull_request
+SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, has_conflicts, conflict_head_sha, source_project_id, source_project_path, status_sync_at, status_sync_error, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM vcs_pull_request
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -201,6 +325,15 @@ func (q *Queries) GetVCSPullRequestInWorkspace(ctx context.Context, arg GetVCSPu
 		&i.ChangedFiles,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.HasConflicts,
+		&i.ConflictHeadSha,
+		&i.SourceProjectID,
+		&i.SourceProjectPath,
+		&i.StatusSyncAt,
+		&i.StatusSyncError,
+		&i.PipelineSyncAt,
+		&i.PipelineSyncError,
+		&i.WakeupSyncGeneration,
 	)
 	return i, err
 }
@@ -384,6 +517,206 @@ func (q *Queries) ListVCSConnectionsByWorkspace(ctx context.Context, workspaceID
 	return items, nil
 }
 
+const listVCSGitLabPipelinesByMR = `-- name: ListVCSGitLabPipelinesByMR :many
+SELECT workspace_id, connection_id, pull_request_id, pipeline_id, pipeline_project_id, pipeline_project_path, sha, ref, status, web_url, pipeline_updated_at, created_at, updated_at FROM vcs_gitlab_pipeline
+WHERE workspace_id = $1 AND pull_request_id = $2
+ORDER BY pipeline_updated_at DESC, pipeline_id DESC
+`
+
+type ListVCSGitLabPipelinesByMRParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	PullRequestID pgtype.UUID `json:"pull_request_id"`
+}
+
+func (q *Queries) ListVCSGitLabPipelinesByMR(ctx context.Context, arg ListVCSGitLabPipelinesByMRParams) ([]VcsGitlabPipeline, error) {
+	rows, err := q.db.Query(ctx, listVCSGitLabPipelinesByMR, arg.WorkspaceID, arg.PullRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []VcsGitlabPipeline{}
+	for rows.Next() {
+		var i VcsGitlabPipeline
+		if err := rows.Scan(
+			&i.WorkspaceID,
+			&i.ConnectionID,
+			&i.PullRequestID,
+			&i.PipelineID,
+			&i.PipelineProjectID,
+			&i.PipelineProjectPath,
+			&i.Sha,
+			&i.Ref,
+			&i.Status,
+			&i.WebUrl,
+			&i.PipelineUpdatedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVCSGitLabPullRequestsByProjectHead = `-- name: ListVCSGitLabPullRequestsByProjectHead :many
+SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, has_conflicts, conflict_head_sha, source_project_id, source_project_path, status_sync_at, status_sync_error, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM vcs_pull_request
+WHERE workspace_id = $1
+  AND connection_id = $2
+  AND provider = 'gitlab'
+  AND repo_owner = $3
+  AND repo_name = $4
+  AND head_sha = $5
+  AND head_sha <> ''
+ORDER BY id ASC
+`
+
+type ListVCSGitLabPullRequestsByProjectHeadParams struct {
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ConnectionID pgtype.UUID `json:"connection_id"`
+	RepoOwner    string      `json:"repo_owner"`
+	RepoName     string      `json:"repo_name"`
+	HeadSha      string      `json:"head_sha"`
+}
+
+func (q *Queries) ListVCSGitLabPullRequestsByProjectHead(ctx context.Context, arg ListVCSGitLabPullRequestsByProjectHeadParams) ([]VcsPullRequest, error) {
+	rows, err := q.db.Query(ctx, listVCSGitLabPullRequestsByProjectHead,
+		arg.WorkspaceID,
+		arg.ConnectionID,
+		arg.RepoOwner,
+		arg.RepoName,
+		arg.HeadSha,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []VcsPullRequest{}
+	for rows.Next() {
+		var i VcsPullRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ConnectionID,
+			&i.Provider,
+			&i.RepoOwner,
+			&i.RepoName,
+			&i.PrNumber,
+			&i.Title,
+			&i.State,
+			&i.HtmlUrl,
+			&i.Branch,
+			&i.HeadSha,
+			&i.AuthorLogin,
+			&i.AuthorAvatarUrl,
+			&i.MergedAt,
+			&i.ClosedAt,
+			&i.PrCreatedAt,
+			&i.PrUpdatedAt,
+			&i.Additions,
+			&i.Deletions,
+			&i.ChangedFiles,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.HasConflicts,
+			&i.ConflictHeadSha,
+			&i.SourceProjectID,
+			&i.SourceProjectPath,
+			&i.StatusSyncAt,
+			&i.StatusSyncError,
+			&i.PipelineSyncAt,
+			&i.PipelineSyncError,
+			&i.WakeupSyncGeneration,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVCSGitLabPullRequestsBySourceProjectHead = `-- name: ListVCSGitLabPullRequestsBySourceProjectHead :many
+SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, has_conflicts, conflict_head_sha, source_project_id, source_project_path, status_sync_at, status_sync_error, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM vcs_pull_request
+WHERE workspace_id = $1
+  AND connection_id = $2
+  AND provider = 'gitlab'
+  AND source_project_id = $3
+  AND head_sha = $4
+  AND head_sha <> ''
+ORDER BY id ASC
+`
+
+type ListVCSGitLabPullRequestsBySourceProjectHeadParams struct {
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	ConnectionID    pgtype.UUID `json:"connection_id"`
+	SourceProjectID pgtype.Int8 `json:"source_project_id"`
+	HeadSha         string      `json:"head_sha"`
+}
+
+func (q *Queries) ListVCSGitLabPullRequestsBySourceProjectHead(ctx context.Context, arg ListVCSGitLabPullRequestsBySourceProjectHeadParams) ([]VcsPullRequest, error) {
+	rows, err := q.db.Query(ctx, listVCSGitLabPullRequestsBySourceProjectHead,
+		arg.WorkspaceID,
+		arg.ConnectionID,
+		arg.SourceProjectID,
+		arg.HeadSha,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []VcsPullRequest{}
+	for rows.Next() {
+		var i VcsPullRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ConnectionID,
+			&i.Provider,
+			&i.RepoOwner,
+			&i.RepoName,
+			&i.PrNumber,
+			&i.Title,
+			&i.State,
+			&i.HtmlUrl,
+			&i.Branch,
+			&i.HeadSha,
+			&i.AuthorLogin,
+			&i.AuthorAvatarUrl,
+			&i.MergedAt,
+			&i.ClosedAt,
+			&i.PrCreatedAt,
+			&i.PrUpdatedAt,
+			&i.Additions,
+			&i.Deletions,
+			&i.ChangedFiles,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.HasConflicts,
+			&i.ConflictHeadSha,
+			&i.SourceProjectID,
+			&i.SourceProjectPath,
+			&i.StatusSyncAt,
+			&i.StatusSyncError,
+			&i.PipelineSyncAt,
+			&i.PipelineSyncError,
+			&i.WakeupSyncGeneration,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVCSPullRequestsByIssue = `-- name: ListVCSPullRequestsByIssue :many
 WITH checks AS (
     SELECT
@@ -402,7 +735,7 @@ WITH checks AS (
     GROUP BY pr.id
 )
 SELECT
-    pr.id, pr.workspace_id, pr.connection_id, pr.provider, pr.repo_owner, pr.repo_name, pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.head_sha, pr.author_login, pr.author_avatar_url, pr.merged_at, pr.closed_at, pr.pr_created_at, pr.pr_updated_at, pr.additions, pr.deletions, pr.changed_files, pr.created_at, pr.updated_at,
+    pr.id, pr.workspace_id, pr.connection_id, pr.provider, pr.repo_owner, pr.repo_name, pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.head_sha, pr.author_login, pr.author_avatar_url, pr.merged_at, pr.closed_at, pr.pr_created_at, pr.pr_updated_at, pr.additions, pr.deletions, pr.changed_files, pr.created_at, pr.updated_at, pr.has_conflicts, pr.conflict_head_sha, pr.source_project_id, pr.source_project_path, pr.status_sync_at, pr.status_sync_error, pr.pipeline_sync_at, pr.pipeline_sync_error, pr.wakeup_sync_generation,
     COALESCE(ipr.linked_by_type, 'system')::text AS linked_by_type,
     COALESCE(c.total, 0)::bigint   AS checks_total,
     COALESCE(c.passed, 0)::bigint  AS checks_passed,
@@ -416,34 +749,43 @@ ORDER BY pr.pr_created_at DESC
 `
 
 type ListVCSPullRequestsByIssueRow struct {
-	ID              pgtype.UUID        `json:"id"`
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	ConnectionID    pgtype.UUID        `json:"connection_id"`
-	Provider        string             `json:"provider"`
-	RepoOwner       string             `json:"repo_owner"`
-	RepoName        string             `json:"repo_name"`
-	PrNumber        int32              `json:"pr_number"`
-	Title           string             `json:"title"`
-	State           string             `json:"state"`
-	HtmlUrl         string             `json:"html_url"`
-	Branch          pgtype.Text        `json:"branch"`
-	HeadSha         string             `json:"head_sha"`
-	AuthorLogin     pgtype.Text        `json:"author_login"`
-	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
-	MergedAt        pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt        pgtype.Timestamptz `json:"closed_at"`
-	PrCreatedAt     pgtype.Timestamptz `json:"pr_created_at"`
-	PrUpdatedAt     pgtype.Timestamptz `json:"pr_updated_at"`
-	Additions       int32              `json:"additions"`
-	Deletions       int32              `json:"deletions"`
-	ChangedFiles    int32              `json:"changed_files"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
-	LinkedByType    string             `json:"linked_by_type"`
-	ChecksTotal     int64              `json:"checks_total"`
-	ChecksPassed    int64              `json:"checks_passed"`
-	ChecksFailed    int64              `json:"checks_failed"`
-	ChecksPending   int64              `json:"checks_pending"`
+	ID                   pgtype.UUID        `json:"id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	ConnectionID         pgtype.UUID        `json:"connection_id"`
+	Provider             string             `json:"provider"`
+	RepoOwner            string             `json:"repo_owner"`
+	RepoName             string             `json:"repo_name"`
+	PrNumber             int32              `json:"pr_number"`
+	Title                string             `json:"title"`
+	State                string             `json:"state"`
+	HtmlUrl              string             `json:"html_url"`
+	Branch               pgtype.Text        `json:"branch"`
+	HeadSha              string             `json:"head_sha"`
+	AuthorLogin          pgtype.Text        `json:"author_login"`
+	AuthorAvatarUrl      pgtype.Text        `json:"author_avatar_url"`
+	MergedAt             pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
+	PrCreatedAt          pgtype.Timestamptz `json:"pr_created_at"`
+	PrUpdatedAt          pgtype.Timestamptz `json:"pr_updated_at"`
+	Additions            int32              `json:"additions"`
+	Deletions            int32              `json:"deletions"`
+	ChangedFiles         int32              `json:"changed_files"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	HasConflicts         pgtype.Bool        `json:"has_conflicts"`
+	ConflictHeadSha      string             `json:"conflict_head_sha"`
+	SourceProjectID      pgtype.Int8        `json:"source_project_id"`
+	SourceProjectPath    pgtype.Text        `json:"source_project_path"`
+	StatusSyncAt         pgtype.Timestamptz `json:"status_sync_at"`
+	StatusSyncError      pgtype.Text        `json:"status_sync_error"`
+	PipelineSyncAt       pgtype.Timestamptz `json:"pipeline_sync_at"`
+	PipelineSyncError    pgtype.Text        `json:"pipeline_sync_error"`
+	WakeupSyncGeneration int64              `json:"wakeup_sync_generation"`
+	LinkedByType         string             `json:"linked_by_type"`
+	ChecksTotal          int64              `json:"checks_total"`
+	ChecksPassed         int64              `json:"checks_passed"`
+	ChecksFailed         int64              `json:"checks_failed"`
+	ChecksPending        int64              `json:"checks_pending"`
 }
 
 // Aggregates each PR's commit statuses for its CURRENT head sha into
@@ -484,6 +826,15 @@ func (q *Queries) ListVCSPullRequestsByIssue(ctx context.Context, issueID pgtype
 			&i.ChangedFiles,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.HasConflicts,
+			&i.ConflictHeadSha,
+			&i.SourceProjectID,
+			&i.SourceProjectPath,
+			&i.StatusSyncAt,
+			&i.StatusSyncError,
+			&i.PipelineSyncAt,
+			&i.PipelineSyncError,
+			&i.WakeupSyncGeneration,
 			&i.LinkedByType,
 			&i.ChecksTotal,
 			&i.ChecksPassed,
@@ -498,6 +849,129 @@ func (q *Queries) ListVCSPullRequestsByIssue(ctx context.Context, issueID pgtype
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockGitLabVCSPullRequestWakeupSync = `-- name: LockGitLabVCSPullRequestWakeupSync :one
+SELECT id FROM vcs_pull_request
+WHERE id = $1
+  AND workspace_id = $2
+  AND provider = 'gitlab'
+  AND wakeup_sync_generation = $3
+  AND head_sha = $4
+  AND pr_updated_at = $5
+FOR UPDATE
+`
+
+type LockGitLabVCSPullRequestWakeupSyncParams struct {
+	ID                   pgtype.UUID        `json:"id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	WakeupSyncGeneration int64              `json:"wakeup_sync_generation"`
+	HeadSha              string             `json:"head_sha"`
+	PrUpdatedAt          pgtype.Timestamptz `json:"pr_updated_at"`
+}
+
+func (q *Queries) LockGitLabVCSPullRequestWakeupSync(ctx context.Context, arg LockGitLabVCSPullRequestWakeupSyncParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockGitLabVCSPullRequestWakeupSync,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.WakeupSyncGeneration,
+		arg.HeadSha,
+		arg.PrUpdatedAt,
+	)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const markGitLabVCSPullRequestPipelineSync = `-- name: MarkGitLabVCSPullRequestPipelineSync :execrows
+UPDATE vcs_pull_request
+SET pipeline_sync_at = now(),
+    pipeline_sync_error = $3,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND provider = 'gitlab'
+  AND wakeup_sync_generation = $4
+  AND head_sha = $5
+`
+
+type MarkGitLabVCSPullRequestPipelineSyncParams struct {
+	ID                   pgtype.UUID `json:"id"`
+	WorkspaceID          pgtype.UUID `json:"workspace_id"`
+	PipelineSyncError    pgtype.Text `json:"pipeline_sync_error"`
+	WakeupSyncGeneration int64       `json:"wakeup_sync_generation"`
+	HeadSha              string      `json:"head_sha"`
+}
+
+func (q *Queries) MarkGitLabVCSPullRequestPipelineSync(ctx context.Context, arg MarkGitLabVCSPullRequestPipelineSyncParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markGitLabVCSPullRequestPipelineSync,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.PipelineSyncError,
+		arg.WakeupSyncGeneration,
+		arg.HeadSha,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markGitLabVCSPullRequestPipelineSyncSuccess = `-- name: MarkGitLabVCSPullRequestPipelineSyncSuccess :execrows
+UPDATE vcs_pull_request
+SET pipeline_sync_at = now(),
+    pipeline_sync_error = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND provider = 'gitlab'
+  AND wakeup_sync_generation = $3
+  AND head_sha = $4
+`
+
+type MarkGitLabVCSPullRequestPipelineSyncSuccessParams struct {
+	ID                   pgtype.UUID `json:"id"`
+	WorkspaceID          pgtype.UUID `json:"workspace_id"`
+	WakeupSyncGeneration int64       `json:"wakeup_sync_generation"`
+	HeadSha              string      `json:"head_sha"`
+}
+
+func (q *Queries) MarkGitLabVCSPullRequestPipelineSyncSuccess(ctx context.Context, arg MarkGitLabVCSPullRequestPipelineSyncSuccessParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markGitLabVCSPullRequestPipelineSyncSuccess,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.WakeupSyncGeneration,
+		arg.HeadSha,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markGitLabVCSPullRequestWakeupSyncError = `-- name: MarkGitLabVCSPullRequestWakeupSyncError :execrows
+UPDATE vcs_pull_request
+SET status_sync_at = now(),
+    status_sync_error = $3,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND provider = 'gitlab'
+  AND wakeup_sync_generation = $4
+`
+
+type MarkGitLabVCSPullRequestWakeupSyncErrorParams struct {
+	ID                   pgtype.UUID `json:"id"`
+	WorkspaceID          pgtype.UUID `json:"workspace_id"`
+	StatusSyncError      pgtype.Text `json:"status_sync_error"`
+	WakeupSyncGeneration int64       `json:"wakeup_sync_generation"`
+}
+
+func (q *Queries) MarkGitLabVCSPullRequestWakeupSyncError(ctx context.Context, arg MarkGitLabVCSPullRequestWakeupSyncErrorParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markGitLabVCSPullRequestWakeupSyncError,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.StatusSyncError,
+		arg.WakeupSyncGeneration,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const rotateVCSConnectionWebhookSecret = `-- name: RotateVCSConnectionWebhookSecret :one
@@ -544,6 +1018,71 @@ type UnlinkIssueFromVCSPullRequestParams struct {
 
 func (q *Queries) UnlinkIssueFromVCSPullRequest(ctx context.Context, arg UnlinkIssueFromVCSPullRequestParams) (int64, error) {
 	result, err := q.db.Exec(ctx, unlinkIssueFromVCSPullRequest, arg.IssueID, arg.PullRequestID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateGitLabVCSPullRequestWakeupState = `-- name: UpdateGitLabVCSPullRequestWakeupState :execrows
+UPDATE vcs_pull_request
+SET state = $3,
+    head_sha = $4,
+    has_conflicts = $8,
+    conflict_head_sha = $5,
+    source_project_id = $9,
+    source_project_path = $10,
+    merged_at = $11,
+    closed_at = $12,
+    pr_updated_at = $6,
+    status_sync_at = now(),
+    status_sync_error = NULL,
+    pipeline_sync_at = now(),
+    pipeline_sync_error = 'pipeline refresh pending',
+    updated_at = now()
+WHERE id = $1
+  AND workspace_id = $2
+  AND provider = 'gitlab'
+  AND pr_updated_at <= $6
+  AND head_sha = $13
+  AND pr_updated_at = $14
+  AND wakeup_sync_generation = $7
+`
+
+type UpdateGitLabVCSPullRequestWakeupStateParams struct {
+	ID                   pgtype.UUID        `json:"id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	State                string             `json:"state"`
+	HeadSha              string             `json:"head_sha"`
+	ConflictHeadSha      string             `json:"conflict_head_sha"`
+	PrUpdatedAt          pgtype.Timestamptz `json:"pr_updated_at"`
+	WakeupSyncGeneration int64              `json:"wakeup_sync_generation"`
+	HasConflicts         pgtype.Bool        `json:"has_conflicts"`
+	SourceProjectID      pgtype.Int8        `json:"source_project_id"`
+	SourceProjectPath    pgtype.Text        `json:"source_project_path"`
+	MergedAt             pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
+	ExpectedHeadSha      string             `json:"expected_head_sha"`
+	ExpectedPrUpdatedAt  pgtype.Timestamptz `json:"expected_pr_updated_at"`
+}
+
+func (q *Queries) UpdateGitLabVCSPullRequestWakeupState(ctx context.Context, arg UpdateGitLabVCSPullRequestWakeupStateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateGitLabVCSPullRequestWakeupState,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.State,
+		arg.HeadSha,
+		arg.ConflictHeadSha,
+		arg.PrUpdatedAt,
+		arg.WakeupSyncGeneration,
+		arg.HasConflicts,
+		arg.SourceProjectID,
+		arg.SourceProjectPath,
+		arg.MergedAt,
+		arg.ClosedAt,
+		arg.ExpectedHeadSha,
+		arg.ExpectedPrUpdatedAt,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -649,18 +1188,71 @@ func (q *Queries) UpsertVCSConnection(ctx context.Context, arg UpsertVCSConnecti
 	return i, err
 }
 
+const upsertVCSGitLabPipeline = `-- name: UpsertVCSGitLabPipeline :exec
+INSERT INTO vcs_gitlab_pipeline (
+    workspace_id, connection_id, pull_request_id, pipeline_id,
+    pipeline_project_id, pipeline_project_path, sha, ref, status, web_url,
+    pipeline_updated_at
+)
+SELECT pr.workspace_id, pr.connection_id, pr.id, $3,
+       $4, $5, $6, $7, $8, $10, $9
+FROM vcs_pull_request pr
+WHERE pr.id = $1 AND pr.workspace_id = $2 AND pr.provider = 'gitlab'
+ON CONFLICT (pull_request_id, pipeline_project_path, pipeline_id) DO UPDATE SET
+    pipeline_project_id = EXCLUDED.pipeline_project_id,
+    pipeline_project_path = EXCLUDED.pipeline_project_path,
+    sha = EXCLUDED.sha,
+    ref = EXCLUDED.ref,
+    status = EXCLUDED.status,
+    web_url = EXCLUDED.web_url,
+    pipeline_updated_at = EXCLUDED.pipeline_updated_at,
+    updated_at = now()
+WHERE EXCLUDED.pipeline_updated_at >= vcs_gitlab_pipeline.pipeline_updated_at
+`
+
+type UpsertVCSGitLabPipelineParams struct {
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	PipelineID          int64              `json:"pipeline_id"`
+	PipelineProjectID   int64              `json:"pipeline_project_id"`
+	PipelineProjectPath string             `json:"pipeline_project_path"`
+	Sha                 string             `json:"sha"`
+	Ref                 string             `json:"ref"`
+	Status              string             `json:"status"`
+	PipelineUpdatedAt   pgtype.Timestamptz `json:"pipeline_updated_at"`
+	WebUrl              pgtype.Text        `json:"web_url"`
+}
+
+func (q *Queries) UpsertVCSGitLabPipeline(ctx context.Context, arg UpsertVCSGitLabPipelineParams) error {
+	_, err := q.db.Exec(ctx, upsertVCSGitLabPipeline,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.PipelineID,
+		arg.PipelineProjectID,
+		arg.PipelineProjectPath,
+		arg.Sha,
+		arg.Ref,
+		arg.Status,
+		arg.PipelineUpdatedAt,
+		arg.WebUrl,
+	)
+	return err
+}
+
 const upsertVCSPullRequest = `-- name: UpsertVCSPullRequest :one
 
 INSERT INTO vcs_pull_request (
     workspace_id, connection_id, provider, repo_owner, repo_name, pr_number,
     title, state, html_url, branch, author_login, author_avatar_url,
     merged_at, closed_at, pr_created_at, pr_updated_at,
-    additions, deletions, changed_files, head_sha
+    additions, deletions, changed_files, head_sha, has_conflicts,
+    conflict_head_sha, source_project_id, source_project_path
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
-    $7, $8, $9, $16, $17, $18,
-    $19, $20, $10, $11,
-    $12, $13, $14, $15
+    $7, $8, $9, $17, $18, $19,
+    $20, $21, $10, $11,
+    $12, $13, $14, $15, $22, $16,
+    $23, $24
 )
 ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     workspace_id      = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.workspace_id      ELSE vcs_pull_request.workspace_id      END,
@@ -678,42 +1270,47 @@ ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     deletions         = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.deletions         ELSE vcs_pull_request.deletions         END,
     changed_files     = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.changed_files     ELSE vcs_pull_request.changed_files     END,
     head_sha          = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.head_sha          ELSE vcs_pull_request.head_sha          END,
+    has_conflicts     = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at AND EXCLUDED.provider = 'gitlab' THEN EXCLUDED.has_conflicts ELSE vcs_pull_request.has_conflicts END,
+    conflict_head_sha = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at AND EXCLUDED.provider = 'gitlab' THEN EXCLUDED.conflict_head_sha ELSE vcs_pull_request.conflict_head_sha END,
+    source_project_id = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.source_project_id ELSE vcs_pull_request.source_project_id END,
+    source_project_path = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.source_project_path ELSE vcs_pull_request.source_project_path END,
     updated_at        = now()
-RETURNING id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at
+RETURNING id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, has_conflicts, conflict_head_sha, source_project_id, source_project_path, status_sync_at, status_sync_error, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation
 `
 
 type UpsertVCSPullRequestParams struct {
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	ConnectionID    pgtype.UUID        `json:"connection_id"`
-	Provider        string             `json:"provider"`
-	RepoOwner       string             `json:"repo_owner"`
-	RepoName        string             `json:"repo_name"`
-	PrNumber        int32              `json:"pr_number"`
-	Title           string             `json:"title"`
-	State           string             `json:"state"`
-	HtmlUrl         string             `json:"html_url"`
-	PrCreatedAt     pgtype.Timestamptz `json:"pr_created_at"`
-	PrUpdatedAt     pgtype.Timestamptz `json:"pr_updated_at"`
-	Additions       int32              `json:"additions"`
-	Deletions       int32              `json:"deletions"`
-	ChangedFiles    int32              `json:"changed_files"`
-	HeadSha         string             `json:"head_sha"`
-	Branch          pgtype.Text        `json:"branch"`
-	AuthorLogin     pgtype.Text        `json:"author_login"`
-	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
-	MergedAt        pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt        pgtype.Timestamptz `json:"closed_at"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	ConnectionID      pgtype.UUID        `json:"connection_id"`
+	Provider          string             `json:"provider"`
+	RepoOwner         string             `json:"repo_owner"`
+	RepoName          string             `json:"repo_name"`
+	PrNumber          int32              `json:"pr_number"`
+	Title             string             `json:"title"`
+	State             string             `json:"state"`
+	HtmlUrl           string             `json:"html_url"`
+	PrCreatedAt       pgtype.Timestamptz `json:"pr_created_at"`
+	PrUpdatedAt       pgtype.Timestamptz `json:"pr_updated_at"`
+	Additions         int32              `json:"additions"`
+	Deletions         int32              `json:"deletions"`
+	ChangedFiles      int32              `json:"changed_files"`
+	HeadSha           string             `json:"head_sha"`
+	ConflictHeadSha   string             `json:"conflict_head_sha"`
+	Branch            pgtype.Text        `json:"branch"`
+	AuthorLogin       pgtype.Text        `json:"author_login"`
+	AuthorAvatarUrl   pgtype.Text        `json:"author_avatar_url"`
+	MergedAt          pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt          pgtype.Timestamptz `json:"closed_at"`
+	HasConflicts      pgtype.Bool        `json:"has_conflicts"`
+	SourceProjectID   pgtype.Int8        `json:"source_project_id"`
+	SourceProjectPath pgtype.Text        `json:"source_project_path"`
 }
 
 // =====================
 // VCS Pull Request
 // =====================
 // pr_updated_at guards against an out-of-order webhook redelivery regressing
-// the PR state, mirroring the updated_at guard on UpsertVCSCommitStatus. Each
-// mutable column is applied only when the incoming event is at least as new as
-// the stored row; a stale event keeps the existing values. The row is still
-// touched (and thus RETURNED) either way, so callers always get the current PR
-// — the webhook needs pr.id to link the issue even on a stale redelivery.
+// the PR state. Conflict data is head-versioned; a missing value never turns a
+// previously known result into a result for a new head.
 func (q *Queries) UpsertVCSPullRequest(ctx context.Context, arg UpsertVCSPullRequestParams) (VcsPullRequest, error) {
 	row := q.db.QueryRow(ctx, upsertVCSPullRequest,
 		arg.WorkspaceID,
@@ -731,11 +1328,15 @@ func (q *Queries) UpsertVCSPullRequest(ctx context.Context, arg UpsertVCSPullReq
 		arg.Deletions,
 		arg.ChangedFiles,
 		arg.HeadSha,
+		arg.ConflictHeadSha,
 		arg.Branch,
 		arg.AuthorLogin,
 		arg.AuthorAvatarUrl,
 		arg.MergedAt,
 		arg.ClosedAt,
+		arg.HasConflicts,
+		arg.SourceProjectID,
+		arg.SourceProjectPath,
 	)
 	var i VcsPullRequest
 	err := row.Scan(
@@ -762,6 +1363,15 @@ func (q *Queries) UpsertVCSPullRequest(ctx context.Context, arg UpsertVCSPullReq
 		&i.ChangedFiles,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.HasConflicts,
+		&i.ConflictHeadSha,
+		&i.SourceProjectID,
+		&i.SourceProjectPath,
+		&i.StatusSyncAt,
+		&i.StatusSyncError,
+		&i.PipelineSyncAt,
+		&i.PipelineSyncError,
+		&i.WakeupSyncGeneration,
 	)
 	return i, err
 }

@@ -342,6 +342,158 @@ func TestGitlabParseTimestamps(t *testing.T) {
 	}
 }
 
+func TestGitLabSystemHookWakeupPayloads(t *testing.T) {
+	provider, _ := For(string(KindGitLab))
+	for _, tc := range []struct {
+		objectKind string
+		want       EventKind
+	}{
+		{"merge_request", EventPullRequest},
+		{"pipeline", EventCIStatus},
+	} {
+		header := http.Header{"X-Gitlab-Event": []string{"System Hook"}}
+		body := []byte(`{"object_kind":"` + tc.objectKind + `"}`)
+		if got := provider.EventKind(header, body); got != tc.want {
+			t.Errorf("System Hook %q kind = %v, want %v", tc.objectKind, got, tc.want)
+		}
+	}
+
+	mr, err := provider.ParsePullRequest([]byte(`{
+		"object_kind":"merge_request",
+		"project":{"path_with_namespace":"group/sub/repo"},
+		"object_attributes":{
+			"iid":17,"state":"opened","action":"open","source_branch":"feature/fix",
+			"source":{"id":55,"path_with_namespace":"fork/user/repo"},
+			"last_commit":{"id":"head-current"},
+			"has_conflicts":true,"detailed_merge_status":"checking"
+		}}`))
+	if err != nil {
+		t.Fatalf("ParsePullRequest: %v", err)
+	}
+	if mr.SourceProjectID != 55 || mr.SourceProjectPath != "fork/user/repo" {
+		t.Errorf("source project = %d/%q, want 55/fork/user/repo", mr.SourceProjectID, mr.SourceProjectPath)
+	}
+	if mr.HeadSHA != "head-current" {
+		t.Errorf("head SHA = %q, want current commit", mr.HeadSHA)
+	}
+	if mr.HasConflicts != nil {
+		t.Errorf("conflicts during asynchronous checking = %v, want unknown", *mr.HasConflicts)
+	}
+
+	status, err := provider.ParseCIStatus([]byte(`{
+		"object_kind":"pipeline",
+		"project":{"id":55,"path_with_namespace":"fork/user/repo"},
+		"object_attributes":{"id":91,"sha":"head","ref":"feature/fix","status":"skipped"}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseCIStatus: %v", err)
+	}
+	if status.PipelineID != 91 || status.ProjectID != 55 || status.Ref != "feature/fix" || status.SHA != "head" || status.State != "passed" {
+		t.Errorf("pipeline identity/status = %+v", status)
+	}
+}
+
+func TestGitLabConflictStateRequiresAuthoritativeStatus(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		hasConflicts *bool
+		detailed     string
+		want         *bool
+	}{
+		{&yes, "checking", nil},
+		{&no, "preparing", nil},
+		{&no, "cannot_be_merged", nil},
+		{&yes, "cannot_be_merged", &yes},
+		{&no, "can_be_merged", &no},
+	} {
+		got := gitLabConflictState(tc.hasConflicts, tc.detailed)
+		if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+			t.Errorf("gitLabConflictState(%v, %q) = %v, want %v", tc.hasConflicts, tc.detailed, got, tc.want)
+		}
+	}
+}
+
+func TestGitLabWakeupSnapshotUsesCurrentHeadAndForkProject(t *testing.T) {
+	var targetDetails, sourceDetails bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/api/v4/projects/group%2Fsub%2Frepo":
+			_, _ = w.Write([]byte(`{"id":10,"path_with_namespace":"group/sub/repo"}`))
+		case "/api/v4/projects/10/merge_requests/17":
+			_, _ = w.Write([]byte(`{"iid":17,"state":"opened","sha":"head-current","source_branch":"feature/fix","source_project_id":20,"source_project":{"id":20,"path_with_namespace":"fork/user/repo"},"has_conflicts":false,"detailed_merge_status":"checking","updated_at":"2025-01-02T03:04:05Z"}`))
+		case "/api/v4/projects/10/merge_requests/17/pipelines":
+			_, _ = w.Write([]byte(`[{"id":101,"sha":"head-current","ref":"refs/merge-requests/17/head","status":"success"}]`))
+		case "/api/v4/projects/10/pipelines/101":
+			targetDetails = true
+			_, _ = w.Write([]byte(`{"id":101,"project_id":10,"sha":"head-current","ref":"refs/merge-requests/17/head","status":"success","updated_at":"2025-01-02T03:05:00Z"}`))
+		case "/api/v4/projects/20/pipelines":
+			if r.URL.Query().Get("sha") != "head-current" || r.URL.Query().Get("ref") != "feature/fix" {
+				t.Errorf("source pipeline filters = %v", r.URL.Query())
+			}
+			_, _ = w.Write([]byte(`[
+				{"id":202,"sha":"head-current","ref":"feature/fix","status":"failed"},
+				{"id":203,"sha":"old-head","ref":"feature/fix","status":"success"},
+				{"id":204,"sha":"head-current","ref":"old-branch","status":"success"}
+			]`))
+		case "/api/v4/projects/20/pipelines/202":
+			sourceDetails = true
+			_, _ = w.Write([]byte(`{"id":202,"project_id":20,"sha":"head-current","ref":"feature/fix","status":"failed","updated_at":"2025-01-02T03:06:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	reader := &gitlabProvider{}
+	mrSnapshot, err := reader.ReadGitLabWakeupMergeRequest(context.Background(), srv.URL, "group/sub/repo", "tok", 17)
+	if err != nil {
+		t.Fatalf("ReadGitLabWakeupMergeRequest: %v", err)
+	}
+	pipelineSnapshot := reader.ReadGitLabWakeupPipelines(context.Background(), srv.URL, "tok", 17, mrSnapshot)
+	if mrSnapshot.MergeRequest.HasConflicts != nil {
+		t.Errorf("asynchronous conflict state = %v, want unknown", *mrSnapshot.MergeRequest.HasConflicts)
+	}
+	if !targetDetails || !sourceDetails {
+		t.Errorf("pipeline details fetched: target=%v source=%v", targetDetails, sourceDetails)
+	}
+	if len(pipelineSnapshot.Pipelines) != 2 {
+		t.Fatalf("pipelines = %d, want current target MR and fork branch pipelines", len(pipelineSnapshot.Pipelines))
+	}
+	if pipelineSnapshot.Pipelines[0].ID != 101 || pipelineSnapshot.Pipelines[0].ProjectID != 10 || pipelineSnapshot.Pipelines[0].Status != "passed" {
+		t.Errorf("target MR pipeline = %+v", pipelineSnapshot.Pipelines[0])
+	}
+	if pipelineSnapshot.Pipelines[1].ID != 202 || pipelineSnapshot.Pipelines[1].ProjectID != 20 || pipelineSnapshot.Pipelines[1].ProjectPath != "fork/user/repo" || pipelineSnapshot.Pipelines[1].Status != "failed" {
+		t.Errorf("fork branch pipeline = %+v", pipelineSnapshot.Pipelines[1])
+	}
+}
+
+func TestGitLabWakeupSnapshotFailsWhenForkProjectIsUnreadable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/api/v4/projects/group%2Frepo":
+			_, _ = w.Write([]byte(`{"id":10,"path_with_namespace":"group/repo"}`))
+		case "/api/v4/projects/10/merge_requests/17":
+			_, _ = w.Write([]byte(`{"iid":17,"state":"opened","sha":"head","source_branch":"feature","source_project_id":20,"source_project":{"id":20,"path_with_namespace":"fork/repo"},"updated_at":"2025-01-02T03:04:05Z"}`))
+		case "/api/v4/projects/10/merge_requests/17/pipelines":
+			_, _ = w.Write([]byte(`[]`))
+		case "/api/v4/projects/20/pipelines":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	reader := &gitlabProvider{}
+	mrSnapshot, err := reader.ReadGitLabWakeupMergeRequest(context.Background(), srv.URL, "group/repo", "tok", 17)
+	if err != nil {
+		t.Fatalf("ReadGitLabWakeupMergeRequest: %v", err)
+	}
+	pipelineSnapshot := reader.ReadGitLabWakeupPipelines(context.Background(), srv.URL, "tok", 17, mrSnapshot)
+	if mrSnapshot.MergeRequest.HeadSHA != "head" || pipelineSnapshot.PipelineError == nil {
+		t.Fatalf("MR = %+v, pipelines = %+v; want current MR state and a Pipeline access error", mrSnapshot.MergeRequest, pipelineSnapshot)
+	}
+}
+
 func TestForgejoStatusTimestamp(t *testing.T) {
 	p, _ := For("forgejo")
 	// Forgejo/Gitea status payloads carry RFC3339 created_at/updated_at.

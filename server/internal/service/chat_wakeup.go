@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -267,6 +268,14 @@ func (s *ChatWakeupService) Create(ctx context.Context, task db.AgentTaskQueue, 
 
 	requester := chatTurnRequester(task, session)
 
+	var preparation *chatGitLabPreparation
+	if plan.kind == "condition" {
+		preparation, err = s.prepareGitLabChatCondition(ctx, session.WorkspaceID, plan.condition)
+		if err != nil {
+			return db.ChatWakeup{}, err
+		}
+	}
+
 	var created db.ChatWakeup
 	err = s.inTx(ctx, func(tx pgx.Tx, qtx *db.Queries) error {
 		// Serializes with DeleteChatSession, which removes the session's
@@ -296,7 +305,7 @@ func (s *ChatWakeupService) Create(ctx context.Context, task db.AgentTaskQueue, 
 			if err != nil {
 				return err
 			}
-			normalized, err := s.validateChatCondition(ctx, tx, qtx, session.WorkspaceID, requester, agent.OwnerID, plan.condition, now)
+			normalized, err := s.validateChatCondition(ctx, tx, qtx, session.WorkspaceID, requester, agent.OwnerID, plan.condition, preparation, now)
 			if err != nil {
 				return err
 			}
@@ -322,7 +331,7 @@ func (s *ChatWakeupService) Create(ctx context.Context, task db.AgentTaskQueue, 
 		if err != nil {
 			return err
 		}
-		created, err = s.baseline(ctx, tx, qtx, created)
+		created, err = s.baseline(ctx, tx, qtx, created, preparation, now)
 		return err
 	})
 	if err != nil {
@@ -334,22 +343,55 @@ func (s *ChatWakeupService) Create(ctx context.Context, task db.AgentTaskQueue, 
 
 // baseline records a checks condition's current result, so the wakeup fires on
 // the next finished run instead of the one the agent is about to replace.
-func (s *ChatWakeupService) baseline(ctx context.Context, tx pgx.Tx, qtx *db.Queries, w db.ChatWakeup) (db.ChatWakeup, error) {
-	if w.Kind != "condition" || !chatConditionFiresOnChange(w.Condition) {
+func (s *ChatWakeupService) baseline(ctx context.Context, tx pgx.Tx, qtx *db.Queries, w db.ChatWakeup, preparation *chatGitLabPreparation, now time.Time) (db.ChatWakeup, error) {
+	if w.Kind != "condition" {
 		return w, nil
 	}
-	met, fingerprint, _, err := s.evaluateChatCondition(ctx, tx, qtx, w)
-	var pending errChatConditionPending
-	if err != nil && !errors.As(err, &pending) {
+	condition, err := decodeChatWakeupCondition(w.Condition)
+	if err != nil {
 		return w, err
 	}
-	if !met {
-		fingerprint = ""
+	state := w.ConditionState
+	shouldPersist := false
+	if condition.Provider == "gitlab" {
+		// The condition itself contains a pipeline baseline captured after a
+		// successful sync; no GitLab result should be seeded as an observation.
+		state = ""
+		shouldPersist = true
+	} else if chatConditionFiresOnChange(w.Condition) {
+		met, fingerprint, _, err := s.evaluateChatCondition(ctx, tx, qtx, w)
+		var pending errChatConditionPending
+		if err != nil && !errors.As(err, &pending) {
+			return w, err
+		}
+		if !met {
+			fingerprint = ""
+		}
+		state = fingerprint
+		shouldPersist = true
 	}
-	if err := qtx.SetChatWakeupEvaluation(ctx, db.SetChatWakeupEvaluationParams{ID: w.ID, ConditionState: fingerprint, NextEvalAt: w.NextEvalAt}); err != nil {
+	lastError := pgtype.Text{}
+	nextEvalAt := w.NextEvalAt
+	if preparation != nil && preparation.syncError != nil {
+		lastError = pgtype.Text{String: preparation.syncError.Error(), Valid: true}
+		next := now.Add(chatWakeupPollInterval)
+		if next.After(w.ExpiresAt.Time) {
+			next = w.ExpiresAt.Time
+		}
+		nextEvalAt = pgtype.Timestamptz{Time: next, Valid: true}
+		shouldPersist = true
+	}
+	if !shouldPersist {
+		return w, nil
+	}
+	if err := qtx.SetChatWakeupEvaluation(ctx, db.SetChatWakeupEvaluationParams{
+		ID: w.ID, ConditionState: state, NextEvalAt: nextEvalAt, LastError: lastError,
+	}); err != nil {
 		return w, err
 	}
-	w.ConditionState = fingerprint
+	w.ConditionState = state
+	w.NextEvalAt = nextEvalAt
+	w.LastError = lastError
 	return w, nil
 }
 
@@ -368,6 +410,14 @@ func (s *ChatWakeupService) Update(ctx context.Context, task db.AgentTaskQueue, 
 	plan, err := in.plan(now)
 	if err != nil {
 		return db.ChatWakeup{}, err
+	}
+
+	var preparation *chatGitLabPreparation
+	if plan.kind == "condition" {
+		preparation, err = s.prepareGitLabChatCondition(ctx, session.WorkspaceID, plan.condition)
+		if err != nil {
+			return db.ChatWakeup{}, err
+		}
 	}
 	var updated db.ChatWakeup
 	err = s.inTx(ctx, func(tx pgx.Tx, qtx *db.Queries) error {
@@ -389,7 +439,7 @@ func (s *ChatWakeupService) Update(ctx context.Context, task db.AgentTaskQueue, 
 			if err != nil {
 				return err
 			}
-			if plan.condition, err = s.validateChatCondition(ctx, tx, qtx, session.WorkspaceID, current.RequesterID, agent.OwnerID, plan.condition, now); err != nil {
+			if plan.condition, err = s.validateChatCondition(ctx, tx, qtx, session.WorkspaceID, current.RequesterID, agent.OwnerID, plan.condition, preparation, now); err != nil {
 				return err
 			}
 		}
@@ -406,7 +456,7 @@ func (s *ChatWakeupService) Update(ctx context.Context, task db.AgentTaskQueue, 
 		if err != nil {
 			return err
 		}
-		updated, err = s.baseline(ctx, tx, qtx, updated)
+		updated, err = s.baseline(ctx, tx, qtx, updated, preparation, now)
 		return err
 	})
 	if err != nil {
@@ -540,9 +590,35 @@ var (
 
 // process decides whether a due wakeup starts a turn now and, if so, starts it.
 func (s *ChatWakeupService) process(ctx context.Context, id pgtype.UUID) error {
+	preflight, err := s.Tasks.Queries.GetChatWakeup(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var preparation *chatGitLabPreparation
+	preflightNow := s.clock()
+	if preflight.Status == "active" && preflight.Kind == "condition" &&
+		(!preflight.NextEvalAt.Valid || !preflight.NextEvalAt.Time.After(preflightNow)) {
+		condition, decodeErr := decodeChatWakeupCondition(preflight.Condition)
+		if decodeErr == nil && condition.Provider == "gitlab" {
+			preparation, err = s.prepareGitLabChatCondition(ctx, preflight.WorkspaceID, preflight.Condition)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+				preparation = &chatGitLabPreparation{syncError: errChatConditionPending{msg: fmt.Sprintf(
+					"GitLab status for %s on connection %s could not be refreshed: %v",
+					chatGitLabTargetLabel(condition), condition.ConnectionID, err,
+				)}}
+			}
+		}
+	}
+
 	var decision *chatWakeupDecision
 	var locked db.ChatWakeup
-	err := s.inTx(ctx, func(tx pgx.Tx, qtx *db.Queries) error {
+	err = s.inTx(ctx, func(tx pgx.Tx, qtx *db.Queries) error {
 		w, err := qtx.LockChatWakeup(ctx, id)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -555,7 +631,18 @@ func (s *ChatWakeupService) process(ctx context.Context, id pgtype.UUID) error {
 		if w.Status != "active" || w.NextEvalAt.Time.After(now) {
 			return nil
 		}
-		decision, err = s.decide(ctx, tx, qtx, w, now)
+		if preparation != nil && !bytes.Equal(preflight.Condition, w.Condition) {
+			return nil
+		}
+		if w.Kind == "condition" {
+			var condition ChatWakeupCondition
+			if json.Unmarshal(w.Condition, &condition) == nil && condition.Provider == "gitlab" && preparation == nil {
+				// The wakeup became due after preflight, or its condition changed.
+				// Let the next tick sync before consulting the mirrored state.
+				return nil
+			}
+		}
+		decision, err = s.decide(ctx, tx, qtx, w, preparation, now)
 		if err != nil || decision == nil {
 			return err
 		}
@@ -574,7 +661,7 @@ func (s *ChatWakeupService) process(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
-func (s *ChatWakeupService) decide(ctx context.Context, tx pgx.Tx, qtx *db.Queries, w db.ChatWakeup, now time.Time) (*chatWakeupDecision, error) {
+func (s *ChatWakeupService) decide(ctx context.Context, tx pgx.Tx, qtx *db.Queries, w db.ChatWakeup, preparation *chatGitLabPreparation, now time.Time) (*chatWakeupDecision, error) {
 	if w.Kind == "condition" {
 		agent, err := qtx.GetAgent(ctx, w.AgentID)
 		if err != nil {
@@ -608,7 +695,22 @@ func (s *ChatWakeupService) decide(ctx context.Context, tx pgx.Tx, qtx *db.Queri
 	if w.Kind == "check" {
 		return &chatWakeupDecision{reason: ChatWakeupReasonCheck, snapshot: w}, nil
 	}
-	met, fingerprint, observed, err := s.evaluateChatCondition(ctx, tx, qtx, w)
+	var condition ChatWakeupCondition
+	_ = json.Unmarshal(w.Condition, &condition)
+	met, fingerprint, observed := false, "", map[string]any(nil)
+	var err error
+	if condition.Provider == "gitlab" {
+		switch {
+		case preparation == nil:
+			err = errChatConditionPending{msg: "GitLab status synchronization is pending; retrying before evaluating this merge request"}
+		case preparation.syncError != nil:
+			err = preparation.syncError
+		default:
+			met, fingerprint, observed, err = s.evaluateChatCondition(ctx, tx, qtx, w)
+		}
+	} else {
+		met, fingerprint, observed, err = s.evaluateChatCondition(ctx, tx, qtx, w)
+	}
 	var pending errChatConditionPending
 	lastError := pgtype.Text{}
 	switch {
@@ -622,13 +724,15 @@ func (s *ChatWakeupService) decide(ctx context.Context, tx pgx.Tx, qtx *db.Queri
 		next = w.ExpiresAt.Time
 	}
 	fires := met && fingerprint != w.ConditionState
-	// A firing condition keeps its old state: firing ends the wakeup, and if
-	// the enqueue fails the next tick must still see the change.
+	// A pending source is not evidence that the watched result disappeared:
+	// retain its prior baseline while it recovers.
 	state := w.ConditionState
-	if !met {
-		state = ""
-	} else if !fires {
-		state = fingerprint
+	if !errors.As(err, &pending) {
+		if !met {
+			state = ""
+		} else if !fires {
+			state = fingerprint
+		}
 	}
 	if err := qtx.SetChatWakeupEvaluation(ctx, db.SetChatWakeupEvaluationParams{
 		ID: w.ID, ConditionState: state, NextEvalAt: pgtype.Timestamptz{Time: next, Valid: true}, LastError: lastError,

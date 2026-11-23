@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/multica-ai/multica/server/internal/cli"
+	"github.com/multica-ai/multica/server/internal/util"
 )
 
 func init() { chatCmd.AddCommand(newChatWakeupCommand()) }
@@ -35,6 +37,10 @@ Every wakeup ends. Conditions and checks run until --expires-in/--expires-at
 more to tell the user where things stand. Tell the user what you are waiting
 for and until when. A conversation holds at most 10 active wakeups.
 
+For GitHub, use owner/repo#N[:merged|closed|checks]. For GitLab, use the full
+group/subgroup/project#N path and pass --gitlab-connection. Run
+'multica chat wakeup connections' to list IDs for both GitLab integrations.
+
 Recurring work (every morning, every Friday) is not a chat wakeup: suggest an
 Autopilot instead.`
 
@@ -55,8 +61,9 @@ func newChatWakeupCommand() *cobra.Command {
 		f.String("status", "", "With --until-issue: one exact status key instead of --state")
 		f.String("until-children-done", "", "Condition: every sub-issue of ISSUE is closed (or those up to --stage)")
 		f.Int32("stage", 0, "With --until-children-done: this stage and earlier ones")
-		f.String("until-pr", "", "Condition: owner/repo#N[:merged|closed|checks] (GitHub; default merged)")
-		f.String("until-run", "", "Condition: run TASK_ID completes, fails or is cancelled")
+		f.String("until-pr", "", "Condition: owner/repo#N[:merged|closed|checks] (GitHub) or full/group/project#N with --gitlab-connection (GitLab)")
+		f.String("gitlab-connection", "", "GitLab connection UUID from multica chat wakeup connections (selects GitLab for --until-pr)")
+		f.String("until-run", "", "Condition: this agent run finishes (task/run ID)")
 		f.String("until-reply", "", "Condition: a member comments on issue ISSUE")
 		f.String("from", "", "With --until-reply: only this member (user id)")
 		f.String("at", "", "Reminder at this RFC3339 time")
@@ -116,10 +123,18 @@ func newChatWakeupCommand() *cobra.Command {
 			return nil
 		}}
 	checkin.Flags().String("note", "", "What the check saw, e.g. \"CI still running\" (up to 500 characters)")
+	connections := &cobra.Command{
+		Use:   "connections",
+		Args:  cobra.NoArgs,
+		Short: "List GitLab connection IDs for --gitlab-connection",
+		Long:  "List GitLab connection IDs and hosts from this workspace.",
+		RunE:  runChatWakeupConnections,
+	}
+	connections.Flags().String("output", "table", "Output format (json or table)")
 	for _, c := range []*cobra.Command{list, get, cancelCmd, finish, checkin} {
 		c.Flags().String("output", "json", "Output format (json or table)")
 	}
-	wake.AddCommand(create, list, get, update, cancelCmd, finish, checkin)
+	wake.AddCommand(create, list, get, update, cancelCmd, finish, checkin, connections)
 	return wake
 }
 
@@ -246,12 +261,15 @@ func chatWakeupConditionFromFlags(ctx context.Context, cmd *cobra.Command, clien
 	} else if stage != 0 {
 		return nil, fmt.Errorf("--stage requires --until-children-done")
 	}
+	gitlabConnection, _ := cmd.Flags().GetString("gitlab-connection")
 	if v, _ := cmd.Flags().GetString("until-pr"); v != "" {
-		c, err := parseChatWakeupPR(v)
+		c, err := parseChatWakeupPR(v, gitlabConnection)
 		if err != nil {
 			return nil, err
 		}
 		conditions = append(conditions, c)
+	} else if gitlabConnection != "" {
+		return nil, fmt.Errorf("--gitlab-connection requires --until-pr")
 	}
 	if v, _ := cmd.Flags().GetString("until-run"); v != "" {
 		conditions = append(conditions, map[string]any{"type": "run", "task_id": v})
@@ -280,20 +298,37 @@ func chatWakeupConditionFromFlags(ctx context.Context, cmd *cobra.Command, clien
 	}
 }
 
-// parseChatWakeupPR reads owner/repo#N[:merged|closed|checks].
-func parseChatWakeupPR(v string) (map[string]any, error) {
+// parseChatWakeupPR reads owner/repo#N[:merged|closed|checks], or a full
+// GitLab namespace/project path when a connection UUID is supplied.
+func parseChatWakeupPR(v, gitlabConnection string) (map[string]any, error) {
 	ref, event, _ := strings.Cut(v, ":")
 	repo, num, ok := strings.Cut(ref, "#")
 	n, err := strconv.Atoi(num)
-	if !ok || err != nil || n <= 0 || strings.Count(repo, "/") != 1 {
-		return nil, fmt.Errorf("--until-pr takes owner/repo#N[:merged|closed|checks]")
+	parts := strings.Split(repo, "/")
+	if !ok || err != nil || n <= 0 || (gitlabConnection == "" && len(parts) != 2) || (gitlabConnection != "" && len(parts) < 2) {
+		return nil, fmt.Errorf("--until-pr takes owner/repo#N[:merged|closed|checks] for GitHub, or full/group/path#N[:merged|closed|checks] with --gitlab-connection")
+	}
+	for _, part := range parts {
+		if strings.TrimSpace(part) != part || part == "" {
+			return nil, fmt.Errorf("--until-pr requires a non-empty repository path without surrounding whitespace")
+		}
 	}
 	events := map[string]string{"": "merged", "merged": "merged", "closed": "closed", "checks": "checks_finished"}
 	e, ok := events[event]
 	if !ok {
 		return nil, fmt.Errorf("--until-pr event must be merged, closed or checks")
 	}
-	return map[string]any{"type": "pull_request", "repo": repo, "number": n, "event": e}, nil
+	condition := map[string]any{"type": "pull_request", "repo": repo, "number": n, "event": e}
+	if gitlabConnection == "" {
+		return condition, nil
+	}
+	id, err := util.ParseUUID(gitlabConnection)
+	if err != nil {
+		return nil, fmt.Errorf("--gitlab-connection must be a connection UUID")
+	}
+	condition["provider"] = "gitlab"
+	condition["connection_id"] = util.UUIDToString(id)
+	return condition, nil
 }
 
 func printChatWakeups(cmd *cobra.Command, result any) error {
@@ -314,8 +349,104 @@ func printChatWakeups(cmd *cobra.Command, result any) error {
 		if strVal(r, "status") != "active" {
 			next = ""
 		}
-		cells = append(cells, []string{strVal(r, "id"), strVal(r, "kind"), strVal(r, "status"), strVal(r, "title"), next, strVal(r, "expires_at")})
+		cells = append(cells, []string{strVal(r, "id"), strVal(r, "kind"), strVal(r, "status"), strVal(r, "title"), chatWakeupTarget(r), next, strVal(r, "expires_at")})
 	}
-	cli.PrintTable(os.Stdout, []string{"ID", "KIND", "STATUS", "TITLE", "NEXT", "EXPIRES"}, cells)
+	cli.PrintTable(os.Stdout, []string{"ID", "KIND", "STATUS", "TITLE", "TARGET", "NEXT", "EXPIRES"}, cells)
+	return nil
+}
+func chatWakeupTarget(row map[string]any) string {
+	condition, ok := row["condition"].(map[string]any)
+	if !ok || strVal(condition, "type") != "pull_request" {
+		return ""
+	}
+	repo, number := strVal(condition, "repo"), fmt.Sprint(condition["number"])
+	if repo == "" || number == "<nil>" {
+		return ""
+	}
+	event := strVal(condition, "event")
+	if strVal(condition, "provider") == "gitlab" {
+		return fmt.Sprintf("GitLab %s#%s (%s, connection %s)", repo, number, event, strVal(condition, "connection_id"))
+	}
+	return fmt.Sprintf("GitHub %s#%s (%s)", repo, number, event)
+}
+
+func runChatWakeupConnections(cmd *cobra.Command, _ []string) error {
+	client, ctx, cancel, err := chatWakeupClient(cmd)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	rows, err := listChatWakeupGitLabConnections(ctx, client)
+	if err != nil {
+		return err
+	}
+	return printChatWakeupConnections(cmd, rows)
+}
+
+func listChatWakeupGitLabConnections(ctx context.Context, client *cli.APIClient) ([]map[string]any, error) {
+	if strings.TrimSpace(client.WorkspaceID) == "" {
+		return nil, fmt.Errorf("select a workspace before listing GitLab connections")
+	}
+	path := "/api/workspaces/" + url.PathEscape(client.WorkspaceID)
+	var legacy struct {
+		Connections []struct {
+			ID          string `json:"id"`
+			WorkspaceID string `json:"workspace_id"`
+			BaseURL     string `json:"base_url"`
+			Host        string `json:"host"`
+		} `json:"connections"`
+	}
+	if err := client.GetJSON(ctx, path+"/gitlab/config", &legacy); err != nil {
+		return nil, fmt.Errorf("list legacy GitLab connections: %w", err)
+	}
+	rows := make([]map[string]any, 0, len(legacy.Connections))
+	for _, connection := range legacy.Connections {
+		if connection.ID == "" || connection.WorkspaceID != client.WorkspaceID {
+			continue
+		}
+		rows = append(rows, map[string]any{
+			"id": connection.ID, "provider": "gitlab", "source": "gitlab_connection",
+			"instance_url": connection.BaseURL, "host": connection.Host,
+		})
+	}
+	var vcs struct {
+		Connections []struct {
+			ID          string `json:"id"`
+			WorkspaceID string `json:"workspace_id"`
+			Provider    string `json:"provider"`
+			InstanceURL string `json:"instance_url"`
+		} `json:"connections"`
+	}
+	if err := client.GetJSON(ctx, path+"/vcs/connections", &vcs); err != nil {
+		return nil, fmt.Errorf("list VCS connections: %w", err)
+	}
+	for _, connection := range vcs.Connections {
+		if connection.Provider != "gitlab" || connection.ID == "" || connection.WorkspaceID != client.WorkspaceID {
+			continue
+		}
+		rows = append(rows, map[string]any{
+			"id": connection.ID, "provider": "gitlab", "source": "vcs_connection",
+			"instance_url": connection.InstanceURL,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if sourceI, sourceJ := strVal(rows[i], "source"), strVal(rows[j], "source"); sourceI != sourceJ {
+			return sourceI < sourceJ
+		}
+		return strVal(rows[i], "id") < strVal(rows[j], "id")
+	})
+	return rows, nil
+}
+
+func printChatWakeupConnections(cmd *cobra.Command, rows []map[string]any) error {
+	output, _ := cmd.Flags().GetString("output")
+	if output != "table" {
+		return cli.PrintJSON(os.Stdout, rows)
+	}
+	cells := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		cells = append(cells, []string{strVal(row, "id"), strVal(row, "source"), strVal(row, "instance_url")})
+	}
+	cli.PrintTable(os.Stdout, []string{"ID", "SOURCE", "INSTANCE"}, cells)
 	return nil
 }

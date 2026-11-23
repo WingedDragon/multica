@@ -35,8 +35,13 @@ func (gitlabProvider) EventKind(h http.Header, body []byte) EventKind {
 		var event struct {
 			ObjectKind string `json:"object_kind"`
 		}
-		if json.Unmarshal(body, &event) == nil && event.ObjectKind == "merge_request" {
-			return EventPullRequest
+		if json.Unmarshal(body, &event) == nil {
+			switch event.ObjectKind {
+			case "merge_request":
+				return EventPullRequest
+			case "pipeline":
+				return EventCIStatus
+			}
 		}
 	}
 	return EventOther
@@ -63,15 +68,22 @@ type glMergeRequestPayload struct {
 		PathWithNamespace string `json:"path_with_namespace"`
 	} `json:"project"`
 	ObjectAttributes struct {
-		IID            int32  `json:"iid"`
-		Title          string `json:"title"`
-		Description    string `json:"description"`
-		State          string `json:"state"` // opened|closed|merged|locked
-		Action         string `json:"action"`
-		SourceBranch   string `json:"source_branch"`
+		IID               int32  `json:"iid"`
+		Title             string `json:"title"`
+		Description       string `json:"description"`
+		State             string `json:"state"` // opened|closed|merged|locked
+		Action            string `json:"action"`
+		SourceBranch      string `json:"source_branch"`
+		SourceProjectID   int64  `json:"source_project_id"`
+		SourceProject     struct {
+			ID                int64  `json:"id"`
+			PathWithNamespace string `json:"path_with_namespace"`
+		} `json:"source"`
 		URL            string `json:"url"`
 		Draft          bool   `json:"draft"`
 		WorkInProgress bool   `json:"work_in_progress"`
+		HasConflicts   *bool  `json:"has_conflicts"`
+		DetailedMergeStatus string `json:"detailed_merge_status"`
 		CreatedAt      string `json:"created_at"`
 		UpdatedAt      string `json:"updated_at"`
 		LastCommit     struct {
@@ -88,21 +100,29 @@ func (gitlabProvider) ParsePullRequest(body []byte) (PullRequestEvent, error) {
 	owner, name := splitNamespace(d.Project.PathWithNamespace)
 	draft := d.ObjectAttributes.Draft || d.ObjectAttributes.WorkInProgress ||
 		strings.HasPrefix(strings.ToLower(d.ObjectAttributes.Title), "draft:")
+	sourcePath := d.ObjectAttributes.SourceProject.PathWithNamespace
+	sourceProjectID := d.ObjectAttributes.SourceProjectID
+	if sourceProjectID == 0 {
+		sourceProjectID = d.ObjectAttributes.SourceProject.ID
+	}
 	return PullRequestEvent{
-		Action:          d.ObjectAttributes.Action,
-		RepoOwner:       owner,
-		RepoName:        name,
-		Number:          d.ObjectAttributes.IID,
-		Title:           d.ObjectAttributes.Title,
-		Body:            d.ObjectAttributes.Description,
-		State:           normalizeGitLabMRState(d.ObjectAttributes.State, draft),
-		HTMLURL:         d.ObjectAttributes.URL,
-		Branch:          d.ObjectAttributes.SourceBranch,
-		HeadSHA:         d.ObjectAttributes.LastCommit.ID,
-		AuthorLogin:     d.User.Username,
-		AuthorAvatarURL: d.User.AvatarURL,
-		CreatedAt:       normalizeGitLabTime(d.ObjectAttributes.CreatedAt),
-		UpdatedAt:       normalizeGitLabTime(d.ObjectAttributes.UpdatedAt),
+		Action:            d.ObjectAttributes.Action,
+		RepoOwner:         owner,
+		RepoName:          name,
+		Number:            d.ObjectAttributes.IID,
+		Title:             d.ObjectAttributes.Title,
+		Body:              d.ObjectAttributes.Description,
+		State:             normalizeGitLabMRState(d.ObjectAttributes.State, draft),
+		HTMLURL:           d.ObjectAttributes.URL,
+		Branch:            d.ObjectAttributes.SourceBranch,
+		HeadSHA:           d.ObjectAttributes.LastCommit.ID,
+		HasConflicts:      gitLabConflictState(d.ObjectAttributes.HasConflicts, d.ObjectAttributes.DetailedMergeStatus),
+		SourceProjectID:   sourceProjectID,
+		SourceProjectPath: sourcePath,
+		AuthorLogin:       d.User.Username,
+		AuthorAvatarURL:   d.User.AvatarURL,
+		CreatedAt:         normalizeGitLabTime(d.ObjectAttributes.CreatedAt),
+		UpdatedAt:         normalizeGitLabTime(d.ObjectAttributes.UpdatedAt),
 	}, nil
 }
 
@@ -153,13 +173,33 @@ func normalizeGitLabMRState(state string, draft bool) string {
 	}
 }
 
+func gitLabConflictState(hasConflicts *bool, detailedStatus string) *bool {
+	switch strings.ToLower(strings.TrimSpace(detailedStatus)) {
+	case "can_be_merged", "mergeable":
+		noConflicts := false
+		return &noConflicts
+	case "cannot_be_merged", "not_mergeable", "conflict", "rebase_conflict":
+		if hasConflicts != nil && *hasConflicts {
+			return hasConflicts
+		}
+	}
+	return nil
+}
+
 type glPipelinePayload struct {
-	ObjectKind       string `json:"object_kind"`
+	ObjectKind string `json:"object_kind"`
+	Project    struct {
+		ID                int64  `json:"id"`
+		PathWithNamespace string `json:"path_with_namespace"`
+	} `json:"project"`
 	ObjectAttributes struct {
+		ID         int64  `json:"id"`
 		SHA        string `json:"sha"`
+		Ref        string `json:"ref"`
 		Status     string `json:"status"`
 		URL        string `json:"url"`
 		CreatedAt  string `json:"created_at"`
+		UpdatedAt  string `json:"updated_at"`
 		FinishedAt string `json:"finished_at"`
 	} `json:"object_attributes"`
 }
@@ -169,29 +209,26 @@ func (gitlabProvider) ParseCIStatus(body []byte) (CIStatusEvent, error) {
 	if err := json.Unmarshal(body, &d); err != nil {
 		return CIStatusEvent{}, err
 	}
-	// Prefer the pipeline's finished_at (the state transition we're recording);
-	// fall back to created_at. Normalized to RFC3339 so the commit-status
-	// monotonic guard has a real, comparable timestamp instead of ingestion time.
-	updatedAt := d.ObjectAttributes.FinishedAt
+	updatedAt := d.ObjectAttributes.UpdatedAt
+	if updatedAt == "" {
+		updatedAt = d.ObjectAttributes.FinishedAt
+	}
 	if updatedAt == "" {
 		updatedAt = d.ObjectAttributes.CreatedAt
 	}
+	owner, name := splitNamespace(d.Project.PathWithNamespace)
 	return CIStatusEvent{
-		SHA: d.ObjectAttributes.SHA,
-		// GitLab pipelines are modelled as one status per commit, not per named
-		// check, so a stable synthetic context keys the single status row.
-		// Known limitations of this simplification (acceptable for the default
-		// branch-pipeline config; revisit if needed):
-		//   - Merge-train / merged-results pipelines run on a synthetic merge
-		//     commit whose SHA differs from the MR head (last_commit.id), so the
-		//     head_sha join won't match and the card shows no checks.
-		//   - Multiple pipelines on one commit (e.g. a scheduled pipeline plus an
-		//     MR pipeline) collapse into this single context, so the last one to
-		//     fire wins per commit.
-		Context:   "gitlab/pipeline",
-		State:     normalizeGitLabPipelineState(d.ObjectAttributes.Status),
-		TargetURL: d.ObjectAttributes.URL,
-		UpdatedAt: normalizeGitLabTime(updatedAt),
+		SHA:         d.ObjectAttributes.SHA,
+		Context:     "gitlab/pipeline",
+		State:       normalizeGitLabPipelineState(d.ObjectAttributes.Status),
+		TargetURL:   d.ObjectAttributes.URL,
+		UpdatedAt:   normalizeGitLabTime(updatedAt),
+		PipelineID:  d.ObjectAttributes.ID,
+		ProjectID:   d.Project.ID,
+		ProjectPath: d.Project.PathWithNamespace,
+		Ref:         d.ObjectAttributes.Ref,
+		RepoOwner:   owner,
+		RepoName:    name,
 	}, nil
 }
 

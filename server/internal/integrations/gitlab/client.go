@@ -137,6 +137,12 @@ func (c *Client) ListProjectPipelines(ctx context.Context, projectID int64, filt
 	return out, err
 }
 
+func (c *Client) ListMergeRequestPipelines(ctx context.Context, projectID int64, iid int32) ([]Pipeline, error) {
+	var out []Pipeline
+	err := c.doPaginatedJSON(ctx, fmt.Sprintf("/api/v4/projects/%d/merge_requests/%d/pipelines", projectID, iid), nil, &out)
+	return out, err
+}
+
 func (c *Client) GetPipeline(ctx context.Context, projectID, pipelineID int64) (Pipeline, error) {
 	var out Pipeline
 	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/api/v4/projects/%d/pipelines/%d", projectID, pipelineID), nil, &out)

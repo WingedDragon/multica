@@ -1047,37 +1047,43 @@ type GitlabConnection struct {
 }
 
 type GitlabMergeRequest struct {
-	ID                  pgtype.UUID        `json:"id"`
-	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
-	ProjectBindingID    pgtype.UUID        `json:"project_binding_id"`
-	GitlabProjectID     int64              `json:"gitlab_project_id"`
-	MrIid               int32              `json:"mr_iid"`
-	Title               string             `json:"title"`
-	Description         pgtype.Text        `json:"description"`
-	State               string             `json:"state"`
-	WebUrl              string             `json:"web_url"`
-	SourceBranch        pgtype.Text        `json:"source_branch"`
-	TargetBranch        pgtype.Text        `json:"target_branch"`
-	AuthorUsername      pgtype.Text        `json:"author_username"`
-	AuthorAvatarUrl     pgtype.Text        `json:"author_avatar_url"`
-	Sha                 string             `json:"sha"`
-	MergeCommitSha      pgtype.Text        `json:"merge_commit_sha"`
-	DetailedMergeStatus pgtype.Text        `json:"detailed_merge_status"`
-	HasConflicts        pgtype.Bool        `json:"has_conflicts"`
-	Additions           int32              `json:"additions"`
-	Deletions           int32              `json:"deletions"`
-	ChangedFiles        int32              `json:"changed_files"`
-	MrCreatedAt         pgtype.Timestamptz `json:"mr_created_at"`
-	MrUpdatedAt         pgtype.Timestamptz `json:"mr_updated_at"`
-	MergedAt            pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt            pgtype.Timestamptz `json:"closed_at"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
-	Reviewers           []byte             `json:"reviewers"`
-	Assignees           []byte             `json:"assignees"`
-	Labels              []byte             `json:"labels"`
-	LastRefreshedAt     pgtype.Timestamptz `json:"last_refreshed_at"`
-	LastRefreshError    pgtype.Text        `json:"last_refresh_error"`
+	ID                   pgtype.UUID        `json:"id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	ProjectBindingID     pgtype.UUID        `json:"project_binding_id"`
+	GitlabProjectID      int64              `json:"gitlab_project_id"`
+	MrIid                int32              `json:"mr_iid"`
+	Title                string             `json:"title"`
+	Description          pgtype.Text        `json:"description"`
+	State                string             `json:"state"`
+	WebUrl               string             `json:"web_url"`
+	SourceBranch         pgtype.Text        `json:"source_branch"`
+	TargetBranch         pgtype.Text        `json:"target_branch"`
+	AuthorUsername       pgtype.Text        `json:"author_username"`
+	AuthorAvatarUrl      pgtype.Text        `json:"author_avatar_url"`
+	Sha                  string             `json:"sha"`
+	MergeCommitSha       pgtype.Text        `json:"merge_commit_sha"`
+	DetailedMergeStatus  pgtype.Text        `json:"detailed_merge_status"`
+	HasConflicts         pgtype.Bool        `json:"has_conflicts"`
+	Additions            int32              `json:"additions"`
+	Deletions            int32              `json:"deletions"`
+	ChangedFiles         int32              `json:"changed_files"`
+	MrCreatedAt          pgtype.Timestamptz `json:"mr_created_at"`
+	MrUpdatedAt          pgtype.Timestamptz `json:"mr_updated_at"`
+	MergedAt             pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	Reviewers            []byte             `json:"reviewers"`
+	Assignees            []byte             `json:"assignees"`
+	Labels               []byte             `json:"labels"`
+	LastRefreshedAt      pgtype.Timestamptz `json:"last_refreshed_at"`
+	LastRefreshError     pgtype.Text        `json:"last_refresh_error"`
+	ConflictSha          string             `json:"conflict_sha"`
+	SourceProjectID      pgtype.Int8        `json:"source_project_id"`
+	SourceProjectPath    pgtype.Text        `json:"source_project_path"`
+	PipelineSyncAt       pgtype.Timestamptz `json:"pipeline_sync_at"`
+	PipelineSyncError    pgtype.Text        `json:"pipeline_sync_error"`
+	WakeupSyncGeneration int64              `json:"wakeup_sync_generation"`
 }
 
 type GitlabMrApprovalState struct {
@@ -1135,6 +1141,7 @@ type GitlabMrPipeline struct {
 	PipelineUpdatedAt pgtype.Timestamptz `json:"pipeline_updated_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	PipelineProjectID int64              `json:"pipeline_project_id"`
 }
 
 type GitlabPipelineJob struct {
@@ -1328,6 +1335,7 @@ type IssueEnvironmentConfig struct {
 	Environments []byte             `json:"environments"`
 	ReportedAt   pgtype.Timestamptz `json:"reported_at"`
 }
+
 type IssueGitlabMergeRequest struct {
 	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
 	IssueID        pgtype.UUID        `json:"issue_id"`
@@ -2244,30 +2252,55 @@ type VcsConnection struct {
 	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
 }
 
+type VcsGitlabPipeline struct {
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	ConnectionID        pgtype.UUID        `json:"connection_id"`
+	PullRequestID       pgtype.UUID        `json:"pull_request_id"`
+	PipelineID          int64              `json:"pipeline_id"`
+	PipelineProjectID   int64              `json:"pipeline_project_id"`
+	PipelineProjectPath string             `json:"pipeline_project_path"`
+	Sha                 string             `json:"sha"`
+	Ref                 string             `json:"ref"`
+	Status              string             `json:"status"`
+	WebUrl              pgtype.Text        `json:"web_url"`
+	PipelineUpdatedAt   pgtype.Timestamptz `json:"pipeline_updated_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+}
+
 type VcsPullRequest struct {
-	ID              pgtype.UUID        `json:"id"`
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	ConnectionID    pgtype.UUID        `json:"connection_id"`
-	Provider        string             `json:"provider"`
-	RepoOwner       string             `json:"repo_owner"`
-	RepoName        string             `json:"repo_name"`
-	PrNumber        int32              `json:"pr_number"`
-	Title           string             `json:"title"`
-	State           string             `json:"state"`
-	HtmlUrl         string             `json:"html_url"`
-	Branch          pgtype.Text        `json:"branch"`
-	HeadSha         string             `json:"head_sha"`
-	AuthorLogin     pgtype.Text        `json:"author_login"`
-	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
-	MergedAt        pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt        pgtype.Timestamptz `json:"closed_at"`
-	PrCreatedAt     pgtype.Timestamptz `json:"pr_created_at"`
-	PrUpdatedAt     pgtype.Timestamptz `json:"pr_updated_at"`
-	Additions       int32              `json:"additions"`
-	Deletions       int32              `json:"deletions"`
-	ChangedFiles    int32              `json:"changed_files"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                   pgtype.UUID        `json:"id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	ConnectionID         pgtype.UUID        `json:"connection_id"`
+	Provider             string             `json:"provider"`
+	RepoOwner            string             `json:"repo_owner"`
+	RepoName             string             `json:"repo_name"`
+	PrNumber             int32              `json:"pr_number"`
+	Title                string             `json:"title"`
+	State                string             `json:"state"`
+	HtmlUrl              string             `json:"html_url"`
+	Branch               pgtype.Text        `json:"branch"`
+	HeadSha              string             `json:"head_sha"`
+	AuthorLogin          pgtype.Text        `json:"author_login"`
+	AuthorAvatarUrl      pgtype.Text        `json:"author_avatar_url"`
+	MergedAt             pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
+	PrCreatedAt          pgtype.Timestamptz `json:"pr_created_at"`
+	PrUpdatedAt          pgtype.Timestamptz `json:"pr_updated_at"`
+	Additions            int32              `json:"additions"`
+	Deletions            int32              `json:"deletions"`
+	ChangedFiles         int32              `json:"changed_files"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	HasConflicts         pgtype.Bool        `json:"has_conflicts"`
+	ConflictHeadSha      string             `json:"conflict_head_sha"`
+	SourceProjectID      pgtype.Int8        `json:"source_project_id"`
+	SourceProjectPath    pgtype.Text        `json:"source_project_path"`
+	StatusSyncAt         pgtype.Timestamptz `json:"status_sync_at"`
+	StatusSyncError      pgtype.Text        `json:"status_sync_error"`
+	PipelineSyncAt       pgtype.Timestamptz `json:"pipeline_sync_at"`
+	PipelineSyncError    pgtype.Text        `json:"pipeline_sync_error"`
+	WakeupSyncGeneration int64              `json:"wakeup_sync_generation"`
 }
 
 type VerificationCode struct {

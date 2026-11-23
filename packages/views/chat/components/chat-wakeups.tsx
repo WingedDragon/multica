@@ -118,6 +118,24 @@ function useWakeupText() {
       w.kind === "check" && w.status === "active"
         ? t(($) => $.wakeup.next_check, { relative: relativeTime(locale, w.next_eval_at, now) })
         : "",
+    gitLabTarget: (w: ChatWakeup) => {
+      const condition = w.condition;
+      if (
+        condition?.type !== "pull_request" ||
+        condition.provider !== "gitlab" ||
+        !condition.connection_id ||
+        !condition.repo ||
+        typeof condition.number !== "number"
+      ) {
+        return "";
+      }
+      return t(($) => $.wakeup.gitlab_target, {
+        repo: condition.repo,
+        number: condition.number,
+        event: condition.event ?? "",
+        connectionId: condition.connection_id,
+      });
+    },
   };
 }
 
@@ -169,6 +187,8 @@ function WakeupRow({ wakeup, sessionId, now }: { wakeup: ChatWakeup; sessionId: 
   const report = wakeupReportState(wakeup);
   const failure = text.failure(wakeup);
   const details = [text.kind(wakeup), text.timing(wakeup, now), text.nextCheck(wakeup, now)].filter(Boolean);
+  const target = text.gitLabTarget(wakeup);
+  const diagnostic = active ? wakeup.last_error : null;
   return (
     <div data-slot="chat-wakeup-row" className="flex min-w-0 items-start gap-2 rounded-md px-2 py-1.5">
       <AlarmClock
@@ -186,6 +206,12 @@ function WakeupRow({ wakeup, sessionId, now }: { wakeup: ChatWakeup; sessionId: 
         >
           {active ? details.join(" · ") : text.status(wakeup)}
         </div>
+        {target && (
+          <div className="truncate text-caption text-muted-foreground" title={target}>
+            {target}
+          </div>
+        )}
+        {diagnostic && <div className="truncate text-caption text-warning" title={diagnostic}>{diagnostic}</div>}
         {wakeup.last_check_note && active && (
           <div className="truncate text-caption text-muted-foreground">
             {text.t(($) => $.wakeup.last_check, { note: wakeup.last_check_note })}

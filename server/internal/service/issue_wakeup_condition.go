@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -23,8 +27,10 @@ import (
 // stay satisfied before its rule notices. Same-issue field conditions also
 // subscribe to the matching event, so they usually react on the next tick.
 const (
-	conditionPollInterval     = 30 * time.Second
-	conditionDiagnosticPrefix = "Condition pending: "
+	conditionPollInterval         = 30 * time.Second
+	conditionDiagnosticPrefix     = "Condition pending: "
+	gitLabConditionBaselinePrefix = "gitlab-baseline@"
+	gitLabPipelineConditionPrefix = "gitlab-pipeline:"
 )
 
 // WakeupCondition is a structured predicate the platform evaluates itself, so
@@ -64,11 +70,20 @@ var (
 	errPRSnapshotsUnavailable = errors.New("PR checks cannot be evaluated: GitHub snapshot refresh is unavailable on this server; ask the server administrator to configure the GitHub App snapshot client")
 	errPRNotLinked            = errors.New("No pull request is linked to this issue; link the PR to this issue (a parent issue's PR is not included), or wait for the linking webhook")
 	errPRSnapshotPending      = errors.New("PR check snapshot is not available yet; inspect this issue's pull-requests snapshot_available field and ask the server administrator to check snapshot refresh if it persists")
-	errPRConflictsUnsupported = errors.New("Merge conflicts can only be detected on GitHub pull requests; this issue links only self-hosted (Forgejo/Gitea/GitLab) pull requests")
+	errPRConflictsUnsupported = errors.New("Merge conflicts can only be detected for GitHub or GitLab pull requests; this issue links only unsupported self-hosted providers")
+	errGitLabStatusPending    = errors.New("GitLab merge request status is not confirmed; check the connection and wait for synchronization")
+	errGitLabPipelinePending  = errors.New("GitLab has no terminal pipeline result for this merge request's current head yet")
+	errGitLabSyncUnavailable  = errors.New("GitLab merge request synchronization is unavailable on this server")
 )
 
 func conditionDiagnostic(err error) bool {
-	return errors.Is(err, errPRSnapshotsUnavailable) || errors.Is(err, errPRNotLinked) || errors.Is(err, errPRSnapshotPending) || errors.Is(err, errPRConflictsUnsupported)
+	return errors.Is(err, errPRSnapshotsUnavailable) ||
+		errors.Is(err, errPRNotLinked) ||
+		errors.Is(err, errPRSnapshotPending) ||
+		errors.Is(err, errPRConflictsUnsupported) ||
+		errors.Is(err, errGitLabStatusPending) ||
+		errors.Is(err, errGitLabPipelinePending) ||
+		errors.Is(err, errGitLabSyncUnavailable)
 }
 
 func badCondition(msg string) error {
@@ -218,6 +233,589 @@ func validateCondition(ctx context.Context, tx pgx.Tx, issue db.Issue, raw json.
 	return normalized, events, nil
 }
 
+type gitLabWakeupSyncFailuresKey struct{}
+
+type gitLabWakeupSyncFailures map[string]error
+
+type gitLabWakeupSyncCandidate struct {
+	target vcs.GitLabWakeupTarget
+}
+
+func gitLabWakeupSyncTargetKey(source vcs.GitLabWakeupSource, connectionID, mergeRequestID string) string {
+	return string(source) + ":" + connectionID + ":" + mergeRequestID
+}
+
+func gitLabWakeupSyncFailure(ctx context.Context, source vcs.GitLabWakeupSource, connectionID, mergeRequestID string) error {
+	failures, _ := ctx.Value(gitLabWakeupSyncFailuresKey{}).(gitLabWakeupSyncFailures)
+	if err := failures[gitLabWakeupSyncTargetKey(source, connectionID, mergeRequestID)]; err != nil {
+		return err
+	}
+	return failures["*"]
+}
+
+func withGitLabWakeupSyncFailures(ctx context.Context, failures gitLabWakeupSyncFailures) context.Context {
+	if len(failures) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, gitLabWakeupSyncFailuresKey{}, failures)
+}
+
+func isGitLabPullRequestCondition(raw []byte) bool {
+	var c WakeupCondition
+	return json.Unmarshal(raw, &c) == nil && c.Type == "pull_request" &&
+		(c.Event == "checks_finished" || c.Event == "merged" || c.Event == "conflicts")
+}
+
+// syncGitLabConditionTargets reads only the issue's directly linked GitLab MRs,
+// closes that read transaction, and then performs bounded external refreshes.
+// The dispatch path rechecks the rule after loading targets and before I/O.
+func (s *IssueWakeupService) syncGitLabConditionTargets(ctx context.Context, candidate db.IssueWakeup) (gitLabWakeupSyncFailures, error) {
+	if s.Tasks == nil || s.Tasks.Queries == nil || s.Tasks.TxStarter == nil ||
+		!candidate.Enabled || candidate.SystemRule.Valid || !isGitLabPullRequestCondition(candidate.Condition) {
+		return nil, nil
+	}
+	current, err := s.Tasks.Queries.LocklessWakeup(ctx, candidate.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if current.Revision != candidate.Revision || !current.Enabled || current.SystemRule.Valid ||
+		!bytes.Equal(current.Condition, candidate.Condition) {
+		return nil, nil
+	}
+
+	tx, err := s.Tasks.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT source,connection_id,merge_request_id,repository,number
+		FROM (
+			SELECT 'gitlab_connection'::text AS source,gc.id::text AS connection_id,mr.id::text AS merge_request_id,
+				pb.path_with_namespace AS repository,mr.mr_iid AS number
+			FROM issue_gitlab_merge_request imr
+			JOIN gitlab_merge_request mr ON mr.id=imr.merge_request_id AND mr.workspace_id=imr.workspace_id
+			JOIN gitlab_project_binding pb ON pb.id=mr.project_binding_id AND pb.workspace_id=mr.workspace_id
+				AND pb.gitlab_project_id=mr.gitlab_project_id
+			JOIN gitlab_connection gc ON gc.id=pb.connection_id AND gc.workspace_id=pb.workspace_id
+			WHERE imr.workspace_id=$1 AND imr.issue_id=$2
+			UNION ALL
+			SELECT 'vcs_connection'::text,vc.id::text,pr.id::text,pr.repo_owner||'/'||pr.repo_name,pr.pr_number
+			FROM issue_vcs_pull_request ivpr
+			JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id
+			JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
+			WHERE pr.workspace_id=$1 AND pr.provider='gitlab' AND ivpr.issue_id=$2
+		) targets
+		ORDER BY source,connection_id,merge_request_id`, candidate.WorkspaceID, candidate.IssueID)
+	if err != nil {
+		return nil, err
+	}
+	var targets []gitLabWakeupSyncCandidate
+	for rows.Next() {
+		var source, connectionID, mergeRequestID, repository string
+		var number int32
+		if err = rows.Scan(&source, &connectionID, &mergeRequestID, &repository, &number); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		targets = append(targets, gitLabWakeupSyncCandidate{
+			target: vcs.GitLabWakeupTarget{
+				Source: vcs.GitLabWakeupSource(source), WorkspaceID: util.UUIDToString(candidate.WorkspaceID),
+				ConnectionID: connectionID, MergeRequestID: mergeRequestID, Repository: repository, Number: number,
+			},
+		})
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	current, err = s.Tasks.Queries.LocklessWakeup(ctx, candidate.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if current.Revision != candidate.Revision || !current.Enabled || current.SystemRule.Valid ||
+		!bytes.Equal(current.Condition, candidate.Condition) {
+		return nil, nil
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+
+	type syncResult struct {
+		key string
+		err error
+	}
+	results := make([]syncResult, len(targets))
+	jobs := make(chan int, len(targets))
+	for i, target := range targets {
+		results[i].key = gitLabWakeupSyncTargetKey(target.target.Source, target.target.ConnectionID, target.target.MergeRequestID)
+		jobs <- i
+	}
+	close(jobs)
+	workers := len(targets)
+	if workers > 8 {
+		workers = 8
+	}
+	syncer := s.Tasks.GitLabWakeupSyncer
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				target := targets[index].target
+				if syncer == nil {
+					results[index].err = fmt.Errorf("%w: %s!%d", errGitLabSyncUnavailable, target.Repository, target.Number)
+					continue
+				}
+				syncCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				syncErr := syncer.SyncGitLabWakeupTarget(syncCtx, target)
+				cancel()
+				if syncErr != nil {
+					results[index].err = fmt.Errorf("%w: GitLab MR %s!%d synchronization failed", errGitLabStatusPending, target.Repository, target.Number)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	failures := make(gitLabWakeupSyncFailures)
+	for _, result := range results {
+		if result.err != nil {
+			failures[result.key] = result.err
+		}
+	}
+	return failures, nil
+}
+
+func gitLabSyncErrorForRows(ctx context.Context, source vcs.GitLabWakeupSource, connectionID, mergeRequestID, repository string, number int32) error {
+	if err := gitLabWakeupSyncFailure(ctx, source, connectionID, mergeRequestID); err != nil {
+		return fmt.Errorf("%w: GitLab MR %s!%d synchronization failed", errGitLabStatusPending, repository, number)
+	}
+	return nil
+}
+
+func gitLabInstanceIdentity(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Host) + strings.TrimRight(parsed.EscapedPath(), "/")
+	}
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(raw), "/"))
+}
+
+func gitLabMergeRequestIdentity(instance, repository string, number int32) string {
+	return fmt.Sprintf("%s/%s!%d", gitLabInstanceIdentity(instance), strings.ToLower(strings.Trim(repository, "/")), number)
+}
+
+func preservePendingGitLabConditionFacts(previous, event, identity string, preserved map[string]struct{}) {
+	var exact, prefix string
+	switch event {
+	case "merged":
+		exact = "gitlab-merged:" + identity
+	case "conflicts":
+		prefix = "gitlab-conflict:" + identity + "@"
+	case "checks_finished":
+		prefix = gitLabPipelineConditionPrefix + identity + ":"
+	default:
+		return
+	}
+	for key := range prConditionKeys(previous) {
+		if key == exact || (prefix != "" && strings.HasPrefix(key, prefix)) {
+			preserved[key] = struct{}{}
+		}
+	}
+}
+
+func gitLabBaselineKey(at time.Time) string {
+	return gitLabConditionBaselinePrefix + fmt.Sprint(at.UTC().UnixNano())
+}
+
+func gitLabBaselineTime(fingerprint string) (time.Time, bool) {
+	var earliest time.Time
+	found := false
+	for key := range prConditionKeys(fingerprint) {
+		if !strings.HasPrefix(key, gitLabConditionBaselinePrefix) {
+			continue
+		}
+		raw := strings.TrimPrefix(key, gitLabConditionBaselinePrefix)
+		nanos, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			continue
+		}
+		at := time.Unix(0, nanos).UTC()
+		if !found || at.Before(earliest) {
+			earliest, found = at, true
+		}
+	}
+	return earliest, found
+}
+
+func baselineGitLabConditionFingerprint(fingerprint string, at time.Time) string {
+	keys := prConditionKeys(fingerprint)
+	for key := range keys {
+		if strings.HasPrefix(key, gitLabConditionBaselinePrefix) {
+			delete(keys, key)
+			continue
+		}
+		if version, ok := gitLabPipelineVersionAt(key); ok && version.After(at) {
+			delete(keys, key)
+		}
+	}
+	return gitLabConditionFingerprintWithBaselineKeys(keys, at)
+}
+
+// Add the activation marker to an evaluated fingerprint without filtering
+// newer pipeline versions. conditionNewlyMet ignores only versions at or
+// before this marker, so post-activation reruns and recovered results remain
+// visible.
+func gitLabConditionFingerprintWithBaseline(fingerprint string, at time.Time) string {
+	keys := prConditionKeys(fingerprint)
+	for key := range keys {
+		if strings.HasPrefix(key, gitLabConditionBaselinePrefix) {
+			delete(keys, key)
+		}
+	}
+	return gitLabConditionFingerprintWithBaselineKeys(keys, at)
+}
+
+func gitLabConditionFingerprintWithBaselineKeys(keys map[string]int, at time.Time) string {
+	keys[gitLabBaselineKey(at)] = 1
+	var all []string
+	for key, n := range keys {
+		for range n {
+			all = append(all, key)
+		}
+	}
+	sort.Strings(all)
+	return "pr:" + strings.Join(all, ",")
+}
+
+func preserveConditionBaseline(fingerprint string) string {
+	var keys []string
+	for key := range prConditionKeys(fingerprint) {
+		if strings.HasPrefix(key, gitLabConditionBaselinePrefix) {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return "pr:" + strings.Join(keys, ",")
+}
+
+type gitLabConditionMR struct {
+	source            vcs.GitLabWakeupSource
+	connectionID      string
+	mergeRequestID    string
+	repository        string
+	instance          string
+	identity          string
+	state             string
+	head              string
+	conflictHead      string
+	syncError         string
+	pipelineSyncError string
+	number            int32
+	hasConflicts      pgtype.Bool
+	syncAt            pgtype.Timestamptz
+	pipelineSyncAt    pgtype.Timestamptz
+}
+
+func gitLabStateIsOpen(state string) bool {
+	return state == "open" || state == "opened" || state == "draft"
+}
+
+func gitLabStateIsKnown(state string) bool {
+	return gitLabStateIsOpen(state) || state == "closed" || state == "merged"
+}
+
+func gitLabPipelineCheckResult(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "success", "skipped", "passed":
+		return "success", true
+	case "failed", "canceled", "cancelled":
+		return "failure", true
+	default:
+		return "", false
+	}
+}
+
+func gitLabPipelineKey(identity string, projectID int64, projectPath string, pipelineID int64, sha, status string, updatedAt time.Time) string {
+	return fmt.Sprintf("%s%s:%d:%s:%d:%d:%s:%s", gitLabPipelineConditionPrefix, identity, projectID, strings.ToLower(strings.Trim(projectPath, "/")), pipelineID, updatedAt.UTC().UnixNano(), sha, status)
+}
+
+func gitLabPipelineVersionAt(key string) (time.Time, bool) {
+	if !strings.HasPrefix(key, gitLabPipelineConditionPrefix) {
+		return time.Time{}, false
+	}
+	end := strings.LastIndexByte(key, ':') // normalized status
+	if end < 0 {
+		return time.Time{}, false
+	}
+	end = strings.LastIndexByte(key[:end], ':') // SHA
+	if end < 0 {
+		return time.Time{}, false
+	}
+	start := strings.LastIndexByte(key[:end], ':') // update timestamp
+	if start < 0 {
+		return time.Time{}, false
+	}
+	nanos, err := strconv.ParseInt(key[start+1:end], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(0, nanos).UTC(), true
+}
+
+func (s *IssueWakeupService) evaluateGitLabPullRequests(ctx context.Context, tx pgx.Tx, w db.IssueWakeup, event string) (map[string]map[string]any, map[string]struct{}, int, int, error, error) {
+	mrs := map[string]gitLabConditionMR{}
+	facts := map[string]map[string]any{}
+	preservedFacts := make(map[string]struct{})
+	linked, vcsLinked := 0, 0
+	var pending error
+	rows, err := tx.Query(ctx, `SELECT source,connection_id,merge_request_id,repository,instance_url,number,state,head_sha,
+			COALESCE(conflict_head_sha,''),has_conflicts,mr_sync_at,mr_sync_error,pipeline_sync_at,pipeline_sync_error
+		FROM (
+			SELECT 'gitlab_connection'::text AS source,gc.id::text AS connection_id,mr.id::text AS merge_request_id,
+				pb.path_with_namespace AS repository,gc.base_url AS instance_url,mr.mr_iid AS number,mr.state,
+				COALESCE(mr.sha,'') AS head_sha,COALESCE(mr.conflict_sha,'') AS conflict_head_sha,
+				mr.has_conflicts,mr.last_refreshed_at AS mr_sync_at,COALESCE(mr.last_refresh_error,'') AS mr_sync_error,
+				mr.pipeline_sync_at,COALESCE(mr.pipeline_sync_error,'') AS pipeline_sync_error
+			FROM issue_gitlab_merge_request imr
+			JOIN gitlab_merge_request mr ON mr.id=imr.merge_request_id AND mr.workspace_id=imr.workspace_id
+			JOIN gitlab_project_binding pb ON pb.id=mr.project_binding_id AND pb.workspace_id=mr.workspace_id
+				AND pb.gitlab_project_id=mr.gitlab_project_id
+			JOIN gitlab_connection gc ON gc.id=pb.connection_id AND gc.workspace_id=pb.workspace_id
+			WHERE imr.workspace_id=$1 AND imr.issue_id=$2
+			UNION ALL
+			SELECT 'vcs_connection'::text,vc.id::text,pr.id::text,pr.repo_owner||'/'||pr.repo_name,
+				vc.instance_url,pr.pr_number,pr.state,COALESCE(pr.head_sha,''),
+				COALESCE(pr.conflict_head_sha,''),pr.has_conflicts,pr.status_sync_at,COALESCE(pr.status_sync_error,''),
+				pr.pipeline_sync_at,COALESCE(pr.pipeline_sync_error,'')
+			FROM issue_vcs_pull_request ivpr
+			JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id
+			JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
+			WHERE pr.workspace_id=$1 AND pr.provider='gitlab' AND ivpr.issue_id=$2
+		) targets
+		ORDER BY source,connection_id,merge_request_id`, w.WorkspaceID, w.IssueID)
+	if err != nil {
+		return nil, nil, 0, 0, nil, err
+	}
+	for rows.Next() {
+		var source, connectionID, mergeRequestID, repository, instance, state, head, conflictHead, syncError, pipelineSyncError string
+		var number int32
+		var hasConflicts pgtype.Bool
+		var syncAt, pipelineSyncAt pgtype.Timestamptz
+		if err = rows.Scan(&source, &connectionID, &mergeRequestID, &repository, &instance, &number, &state, &head,
+			&conflictHead, &hasConflicts, &syncAt, &syncError, &pipelineSyncAt, &pipelineSyncError); err != nil {
+			rows.Close()
+			return nil, nil, 0, 0, nil, err
+		}
+		mr := gitLabConditionMR{
+			source: vcs.GitLabWakeupSource(source), connectionID: connectionID, mergeRequestID: mergeRequestID,
+			repository: repository, instance: instance, state: state, head: head, conflictHead: conflictHead,
+			hasConflicts: hasConflicts, syncAt: syncAt, syncError: syncError, pipelineSyncAt: pipelineSyncAt,
+			pipelineSyncError: pipelineSyncError, number: number,
+		}
+		linked++
+		targetKey := gitLabWakeupSyncTargetKey(mr.source, mr.connectionID, mr.mergeRequestID)
+		if mr.source == vcs.GitLabWakeupSourceVCSConnection {
+			vcsLinked++
+		}
+		instanceIdentity := gitLabInstanceIdentity(mr.instance)
+		if instanceIdentity == "" {
+			instanceIdentity = "connection:" + mr.connectionID
+		}
+		mr.identity = gitLabMergeRequestIdentity(instanceIdentity, repository, number)
+		if syncErr := gitLabSyncErrorForRows(ctx, mr.source, mr.connectionID, mr.mergeRequestID, repository, number); syncErr != nil {
+			if pending == nil {
+				pending = syncErr
+			}
+			preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+			continue
+		}
+		if !mr.syncAt.Valid || mr.syncError != "" {
+			if pending == nil {
+				reason := "no current refresh"
+				if mr.syncError != "" {
+					reason = "the last refresh failed"
+				}
+				pending = fmt.Errorf("%w: GitLab MR %s!%d: %s", errGitLabStatusPending, repository, number, reason)
+			}
+			preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+			continue
+		}
+		switch event {
+		case "merged":
+			if mr.state == "merged" {
+				key := "gitlab-merged:" + mr.identity
+				facts[key] = map[string]any{"number": number, "provider": "gitlab", "repository": repository, "state": "merged"}
+			} else if !gitLabStateIsKnown(mr.state) {
+				if pending == nil {
+					pending = fmt.Errorf("%w: GitLab MR %s!%d state is unknown", errGitLabStatusPending, repository, number)
+				}
+				preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+			}
+		case "conflicts":
+			if mr.state == "merged" || mr.state == "closed" {
+				continue
+			}
+			if !gitLabStateIsOpen(mr.state) {
+				if pending == nil {
+					pending = fmt.Errorf("%w: GitLab MR %s!%d state is unknown", errGitLabStatusPending, repository, number)
+				}
+				preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+				continue
+			}
+			if mr.head == "" || !mr.hasConflicts.Valid || mr.conflictHead != mr.head {
+				if pending == nil {
+					pending = fmt.Errorf("%w: GitLab MR %s!%d conflict verdict is not for its current head", errGitLabStatusPending, repository, number)
+				}
+				preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+				continue
+			}
+			if mr.hasConflicts.Bool {
+				key := "gitlab-conflict:" + mr.identity + "@" + mr.head
+				facts[key] = map[string]any{"number": number, "provider": "gitlab", "repository": repository, "head_sha": mr.head, "mergeable": "conflicting"}
+			}
+		case "checks_finished":
+			if mr.head == "" {
+				if pending == nil {
+					pending = fmt.Errorf("%w: GitLab MR %s!%d has no current head", errGitLabStatusPending, repository, number)
+				}
+				preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+				continue
+			}
+			if !mr.pipelineSyncAt.Valid || mr.pipelineSyncError != "" {
+				if pending == nil {
+					reason := "no current pipeline refresh"
+					if mr.pipelineSyncError != "" {
+						reason = "the last pipeline refresh failed"
+					}
+					pending = fmt.Errorf("%w: GitLab MR %s!%d: %s", errGitLabPipelinePending, repository, number, reason)
+				}
+				preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+				continue
+			}
+			mrs[targetKey] = mr
+		}
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, nil, 0, 0, nil, err
+	}
+	if event != "checks_finished" || len(mrs) == 0 {
+		return facts, preservedFacts, linked, vcsLinked, pending, nil
+	}
+
+	pipelineRows, err := tx.Query(ctx, `SELECT source,connection_id,merge_request_id,pipeline_id,pipeline_project_id,pipeline_project_path,
+			sha,lower(status),pipeline_updated_at
+		FROM (
+			SELECT 'gitlab_connection'::text AS source,gc.id::text AS connection_id,mr.id::text AS merge_request_id,
+				p.pipeline_id,p.pipeline_project_id,
+				CASE WHEN p.pipeline_project_id=mr.gitlab_project_id THEN pb.path_with_namespace
+					WHEN p.pipeline_project_id=mr.source_project_id AND p.ref=mr.source_branch THEN COALESCE(mr.source_project_path,'')
+					ELSE '' END AS pipeline_project_path,
+				p.sha,p.status,p.pipeline_updated_at
+			FROM issue_gitlab_merge_request imr
+			JOIN gitlab_merge_request mr ON mr.id=imr.merge_request_id AND mr.workspace_id=imr.workspace_id
+			JOIN gitlab_project_binding pb ON pb.id=mr.project_binding_id AND pb.workspace_id=mr.workspace_id
+				AND pb.gitlab_project_id=mr.gitlab_project_id
+			JOIN gitlab_connection gc ON gc.id=pb.connection_id AND gc.workspace_id=pb.workspace_id
+			JOIN gitlab_mr_pipeline p ON p.merge_request_id=mr.id AND p.sha=mr.sha AND mr.sha<>''
+				AND (p.pipeline_project_id=mr.gitlab_project_id OR
+					(p.pipeline_project_id=mr.source_project_id AND COALESCE(mr.source_branch,'')<>'' AND p.ref=mr.source_branch))
+			WHERE imr.workspace_id=$1 AND imr.issue_id=$2
+			UNION ALL
+			SELECT 'vcs_connection'::text,vc.id::text,pr.id::text,p.pipeline_id,p.pipeline_project_id,
+				COALESCE(p.pipeline_project_path,''),p.sha,p.status,p.pipeline_updated_at
+			FROM issue_vcs_pull_request ivpr
+			JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id
+			JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
+			JOIN vcs_gitlab_pipeline p ON p.pull_request_id=pr.id AND p.workspace_id=pr.workspace_id
+				AND p.connection_id=vc.id AND p.sha=pr.head_sha AND pr.head_sha<>''
+				AND (lower(p.pipeline_project_path)=lower(pr.repo_owner||'/'||pr.repo_name)
+					OR (p.pipeline_project_id=pr.source_project_id
+						AND lower(p.pipeline_project_path)=lower(COALESCE(pr.source_project_path,''))
+						AND COALESCE(pr.branch,'')<>'' AND p.ref=pr.branch))
+			WHERE pr.workspace_id=$1 AND pr.provider='gitlab' AND ivpr.issue_id=$2
+		) pipelines
+		ORDER BY source,connection_id,merge_request_id,pipeline_id`, w.WorkspaceID, w.IssueID)
+	if err != nil {
+		return nil, nil, 0, 0, nil, err
+	}
+	terminal := make(map[string]bool, len(mrs))
+	for pipelineRows.Next() {
+		var source, connectionID, mergeRequestID, projectPath, sha, rawStatus string
+		var pipelineID int64
+		var projectID pgtype.Int8
+		var updatedAt pgtype.Timestamptz
+		if err = pipelineRows.Scan(&source, &connectionID, &mergeRequestID, &pipelineID, &projectID, &projectPath, &sha, &rawStatus, &updatedAt); err != nil {
+			pipelineRows.Close()
+			return nil, nil, 0, 0, nil, err
+		}
+		targetKey := gitLabWakeupSyncTargetKey(vcs.GitLabWakeupSource(source), connectionID, mergeRequestID)
+		mr, ok := mrs[targetKey]
+		if !ok || sha != mr.head {
+			continue
+		}
+		if syncErr := gitLabSyncErrorForRows(ctx, mr.source, mr.connectionID, mr.mergeRequestID, mr.repository, mr.number); syncErr != nil {
+			if pending == nil {
+				pending = syncErr
+			}
+			preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+			continue
+		}
+		status, isTerminal := gitLabPipelineCheckResult(rawStatus)
+		if !isTerminal {
+			continue
+		}
+		if !updatedAt.Valid || !projectID.Valid || pipelineID <= 0 {
+			if pending == nil {
+				pending = fmt.Errorf("%w: GitLab MR %s!%d has an incomplete pipeline identity", errGitLabPipelinePending, mr.repository, mr.number)
+			}
+			preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+			continue
+		}
+		if strings.TrimSpace(projectPath) == "" {
+			if pending == nil {
+				pending = fmt.Errorf("%w: GitLab MR %s!%d pipeline project %d is unknown", errGitLabPipelinePending, mr.repository, mr.number, projectID.Int64)
+			}
+			preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+			continue
+		}
+		key := gitLabPipelineKey(mr.identity, projectID.Int64, projectPath, pipelineID, sha, status, updatedAt.Time)
+		facts[key] = map[string]any{
+			"number": mr.number, "provider": "gitlab", "repository": mr.repository, "head_sha": sha, "checks": status,
+			"pipeline_id": pipelineID, "pipeline_project_id": projectID.Int64, "pipeline_project_path": projectPath,
+			"pipeline_updated_at": updatedAt.Time.UTC(),
+		}
+		terminal[targetKey] = true
+	}
+	pipelineRows.Close()
+	if err = pipelineRows.Err(); err != nil {
+		return nil, nil, 0, 0, nil, err
+	}
+	for targetKey, mr := range mrs {
+		if !terminal[targetKey] {
+			if pending == nil {
+				pending = fmt.Errorf("%w: GitLab MR %s!%d has no terminal pipeline for head %s", errGitLabPipelinePending, mr.repository, mr.number, mr.head)
+			}
+			preservePendingGitLabConditionFacts(w.ConditionState, event, mr.identity, preservedFacts)
+		}
+	}
+	return facts, preservedFacts, linked, vcsLinked, pending, nil
+}
+
 // evaluateCondition reports whether the predicate holds, a fingerprint of the
 // satisfying facts (so a rule fires when they change, not on every tick) and a
 // small observation for the woken agent's trigger facts.
@@ -320,13 +918,9 @@ func (s *IssueWakeupService) evaluateCondition(ctx context.Context, tx pgx.Tx, q
 		if err = rows.Err(); err != nil {
 			return false, "", nil, err
 		}
-		// Self-hosted VCS pull requests (Forgejo/Gitea/GitLab) live in their own
-		// tables. Roll up each PR's commit statuses for its current head sha,
-		// grouped by PR id like ListVCSPullRequestsByIssue: any failed status =
-		// FAILURE, all passed (at least one) = SUCCESS, pending or none = not
-		// finished. PR numbers and shas can repeat across connections and
-		// repositories, so both the rollup and the fingerprint key on the PR id.
-		vcsLinked := 0
+		// The generic VCS rollup remains in place for Forgejo/Gitea; GitLab
+		// pipeline-level results are read separately from each synchronized ledger.
+		vcsLinked, vcsGitLabLinked := 0, 0
 		vcsRows, err := tx.Query(ctx, `SELECT pr.id,pr.pr_number,pr.provider,pr.state,pr.head_sha,
 				COALESCE(SUM(CASE WHEN cs.state='failed' THEN 1 ELSE 0 END),0),
 				COALESCE(SUM(CASE WHEN cs.state='pending' THEN 1 ELSE 0 END),0),
@@ -349,6 +943,10 @@ func (s *IssueWakeupService) evaluateCondition(ctx context.Context, tx pgx.Tx, q
 				return false, "", nil, err
 			}
 			vcsLinked++
+			if provider == "gitlab" {
+				vcsGitLabLinked++
+				continue
+			}
 			switch c.Event {
 			case "merged":
 				if state == "merged" {
@@ -373,13 +971,27 @@ func (s *IssueWakeupService) evaluateCondition(ctx context.Context, tx pgx.Tx, q
 		if err = vcsRows.Err(); err != nil {
 			return false, "", nil, err
 		}
+		gitLabFacts, preservedGitLabFacts, gitLabLinked, linkedVCSGitLab, gitLabPending, err := s.evaluateGitLabPullRequests(ctx, tx, w, c.Event)
+		if err != nil {
+			return false, "", nil, err
+		}
+		if linkedVCSGitLab < vcsGitLabLinked && gitLabPending == nil {
+			gitLabPending = errGitLabStatusPending
+		}
+		gitLabFactKeys := make([]string, 0, len(gitLabFacts))
+		for key := range gitLabFacts {
+			gitLabFactKeys = append(gitLabFactKeys, key)
+		}
+		sort.Strings(gitLabFactKeys)
+		for _, key := range gitLabFactKeys {
+			keys = append(keys, key)
+			prs = append(prs, gitLabFacts[key])
+		}
 		// Any matching PR satisfies the rule; diagnostics only explain a wait.
 		if len(keys) == 0 {
-			if linked == 0 && vcsLinked == 0 {
+			if linked == 0 && vcsLinked == 0 && gitLabLinked == 0 {
 				// Without the snapshot client a GitHub PR cannot finish a checks
-				// rule but a self-hosted VCS PR can, so blame the missing client
-				// only when the workspace has no VCS connection to link one from.
-				// Conflicts need snapshots whichever PR is linked.
+				// rule, but a self-hosted VCS/GitLab PR can.
 				if !githubChecks {
 					var hasVCS bool
 					if c.Event == "checks_finished" {
@@ -393,20 +1005,42 @@ func (s *IssueWakeupService) evaluateCondition(ctx context.Context, tx pgx.Tx, q
 				}
 				return false, "", nil, errPRNotLinked
 			}
+			if c.Event == "conflicts" && linked == 0 && vcsLinked > 0 && vcsGitLabLinked == 0 {
+				return false, "", nil, errPRConflictsUnsupported
+			}
+			if gitLabPending != nil {
+				return false, "", nil, gitLabPending
+			}
 			// GitHub PRs cannot progress without the snapshot client; a rule
 			// that also has VCS PRs waits for their statuses.
 			if !githubChecks && linked > 0 {
 				return false, "", nil, errPRSnapshotsUnavailable
 			}
-			if c.Event == "conflicts" && linked == 0 {
-				return false, "", nil, errPRConflictsUnsupported
-			}
 			if c.Event != "merged" && missingSnapshot {
 				return false, "", nil, errPRSnapshotPending
 			}
 		}
+		// Keep only pending GitLab targets' previous facts. Other known targets
+		// still participate in the current fingerprint and can trigger now.
+		if len(keys) > 0 {
+			for key := range preservedGitLabFacts {
+				if _, currentlyKnown := gitLabFacts[key]; !currentlyKnown {
+					keys = append(keys, key)
+				}
+			}
+		}
 		sort.Strings(keys)
-		return len(keys) > 0, "pr:" + strings.Join(keys, ","), map[string]any{"pull_requests": prs}, nil
+		fingerprint := "pr:" + strings.Join(keys, ",")
+		if c.Event == "checks_finished" {
+			baseline, hasBaseline := gitLabBaselineTime(w.ConditionState)
+			if !hasBaseline && w.CreatedAt.Valid {
+				baseline, hasBaseline = w.CreatedAt.Time, true
+			}
+			if hasBaseline {
+				fingerprint = gitLabConditionFingerprintWithBaseline(fingerprint, baseline)
+			}
+		}
+		return len(keys) > 0, fingerprint, map[string]any{"pull_requests": prs}, nil
 	case "other_issue":
 		var status string
 		var number int32
@@ -506,12 +1140,18 @@ func (s *IssueWakeupService) pollCondition(ctx context.Context, tx pgx.Tx, q *db
 	if !hinted && w.NextFireAt.Valid && w.NextFireAt.Time.After(now) {
 		return w.NextFireAt, nil
 	}
-	met, fingerprint, observed, err := s.evaluateCondition(ctx, tx, q, w)
-	if err != nil && !conditionDiagnostic(err) {
+	met, fingerprint, observed, evaluationErr := s.evaluateCondition(ctx, tx, q, w)
+	if evaluationErr != nil && !conditionDiagnostic(evaluationErr) {
+		return w.NextFireAt, evaluationErr
+	}
+	if err = saveConditionDiagnostic(ctx, q, w, evaluationErr); err != nil {
 		return w.NextFireAt, err
 	}
-	if err = saveConditionDiagnostic(ctx, q, w, err); err != nil {
-		return w.NextFireAt, err
+	next := pgtype.Timestamptz{Time: now.Add(conditionPollInterval), Valid: true}
+	if errors.Is(evaluationErr, errGitLabStatusPending) || errors.Is(evaluationErr, errGitLabPipelinePending) || errors.Is(evaluationErr, errGitLabSyncUnavailable) {
+		// Unknown GitLab state is not a negative result. Keep the last baseline
+		// intact so a restored snapshot cannot replay the same fact.
+		return next, q.SetWakeupConditionState(ctx, db.SetWakeupConditionStateParams{ID: w.ID, ConditionState: w.ConditionState, NextFireAt: next})
 	}
 	// condition_state dedups a satisfied predicate; each new satisfaction
 	// gets its own receipt key.
@@ -524,15 +1164,14 @@ func (s *IssueWakeupService) pollCondition(ctx context.Context, tx pgx.Tx, q *db
 		}
 		state = fingerprint
 	} else {
-		state = ""
+		state = preserveConditionBaseline(fingerprint)
 	}
-	next := pgtype.Timestamptz{Time: now.Add(conditionPollInterval), Valid: true}
 	return next, q.SetWakeupConditionState(ctx, db.SetWakeupConditionStateParams{ID: w.ID, ConditionState: state, NextFireAt: next})
 }
 
-// prConditionKeys counts the per-PR keys of a linked-PR fingerprint. Checks
-// and merged keys carry only the PR number, so two satisfying PRs from
-// different repositories can share a key; the count keeps both.
+// prConditionKeys counts stable keys in a linked-PR fingerprint. A single
+// physical GitLab MR mirrored through both integrations intentionally has one
+// key; independent GitHub/other-provider PR identities retain multiplicity.
 func prConditionKeys(fingerprint string) map[string]int {
 	keys := map[string]int{}
 	if rest, ok := strings.CutPrefix(fingerprint, "pr:"); ok && rest != "" {
@@ -544,15 +1183,26 @@ func prConditionKeys(fingerprint string) map[string]int {
 }
 
 // conditionNewlyMet reports whether a satisfied predicate is news to the rule.
-// A linked-PR fingerprint holds one key per satisfying PR, and only a key that
-// occurs more often than the rule has seen is news: one PR leaving the set
-// (resolved, closed, unlinked) must not wake the agent again for the others.
+// A linked-PR fingerprint holds one key per satisfying fact, and only a key
+// that occurs more often than the rule has seen is news.
 func conditionNewlyMet(previous, current string) bool {
 	if !strings.HasPrefix(current, "pr:") {
 		return current != previous
 	}
 	seen := prConditionKeys(previous)
+	baseline, hasBaseline := gitLabBaselineTime(previous)
+	if !hasBaseline {
+		baseline, hasBaseline = gitLabBaselineTime(current)
+	}
 	for key, n := range prConditionKeys(current) {
+		if strings.HasPrefix(key, gitLabConditionBaselinePrefix) {
+			continue
+		}
+		if hasBaseline {
+			if version, ok := gitLabPipelineVersionAt(key); ok && !version.After(baseline) {
+				continue
+			}
+		}
 		if n > seen[key] {
 			return true
 		}
@@ -570,6 +1220,10 @@ func conditionFiresOnChange(raw []byte) bool {
 	return c.Type == "pull_request" && c.Event == "checks_finished"
 }
 
+func isGitLabChecksFinishedCondition(raw []byte) bool {
+	return conditionFiresOnChange(raw)
+}
+
 // baselineCondition records which facts already satisfy a new or re-enabled
 // rule, so it wakes the agent when they change rather than immediately.
 func (s *IssueWakeupService) baselineCondition(ctx context.Context, tx pgx.Tx, q *db.Queries, w db.IssueWakeup, now time.Time) error {
@@ -582,6 +1236,9 @@ func (s *IssueWakeupService) baselineCondition(ctx context.Context, tx pgx.Tx, q
 	}
 	if !met {
 		fingerprint = ""
+	}
+	if isGitLabChecksFinishedCondition(w.Condition) {
+		fingerprint = baselineGitLabConditionFingerprint(fingerprint, now)
 	}
 	return q.SetWakeupConditionState(ctx, db.SetWakeupConditionStateParams{ID: w.ID, ConditionState: fingerprint, NextFireAt: pgtype.Timestamptz{Time: now.Add(conditionPollInterval), Valid: true}})
 }

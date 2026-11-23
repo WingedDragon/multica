@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,8 +17,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util/secretbox"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -67,9 +70,44 @@ func seedVCSConnection(t *testing.T, ctx context.Context, box *secretbox.Box, pr
 	return uuidToString(conn.ID)
 }
 
+type failingGitLabPipelineTxStarter struct {
+	err error
+}
+
+func (s failingGitLabPipelineTxStarter) Begin(context.Context) (pgx.Tx, error) {
+	return nil, s.err
+}
+
+func gitlabWakeupTestServer(t *testing.T, includePipeline bool) *httptest.Server {
+	t.Helper()
+	pipelineList := `[]`
+	if includePipeline {
+		pipelineList = `[{"id":300,"project_id":10,"sha":"2222222222222222222222222222222222222222","ref":"refs/merge-requests/10/head","status":"success","updated_at":"2026-11-01T09:15:57.652Z","web_url":"https://gitlab.test/acme/widget/-/pipelines/300"}]`
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/api/v4/projects/acme%2Fwidget":
+			_, _ = w.Write([]byte(`{"id":10,"path_with_namespace":"acme/widget"}`))
+		case "/api/v4/projects/10/merge_requests/10":
+			_, _ = w.Write([]byte(`{"iid":10,"state":"merged","sha":"2222222222222222222222222222222222222222","source_branch":"feature/example-change","source_project_id":10,"source_project":{"id":10,"path_with_namespace":"acme/widget"},"has_conflicts":false,"detailed_merge_status":"not_open","updated_at":"2026-11-01T09:15:57.549Z","merged_at":"2026-11-01T09:15:57.652Z"}`))
+		case "/api/v4/projects/10/merge_requests/42":
+			_, _ = w.Write([]byte(`{"iid":42,"state":"merged","sha":"deadbeef","source_branch":"feat","source_project_id":10,"source_project":{"id":10,"path_with_namespace":"acme/widget"},"has_conflicts":false,"detailed_merge_status":"not_open","updated_at":"2026-11-01T09:15:57.549Z","merged_at":"2026-11-01T09:15:57.652Z"}`))
+		case "/api/v4/projects/10/merge_requests/10/pipelines":
+			_, _ = w.Write([]byte(pipelineList))
+		case "/api/v4/projects/10/merge_requests/42/pipelines", "/api/v4/projects/10/pipelines":
+			_, _ = w.Write([]byte(`[]`))
+		case "/api/v4/projects/10/pipelines/300":
+			_, _ = w.Write([]byte(`{"id":300,"project_id":10,"sha":"2222222222222222222222222222222222222222","ref":"refs/merge-requests/10/head","status":"success","updated_at":"2026-11-01T09:15:57.652Z","web_url":"https://gitlab.test/acme/widget/-/pipelines/300"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
 func cleanupVCS(ctx context.Context, issueID string) {
 	testPool.Exec(ctx, `DELETE FROM issue_vcs_pull_request WHERE issue_id = $1`, issueID)
 	testPool.Exec(ctx, `DELETE FROM vcs_commit_status cs USING vcs_connection c WHERE cs.connection_id = c.id AND c.workspace_id = $1`, testWorkspaceID)
+	testPool.Exec(ctx, `DELETE FROM vcs_gitlab_pipeline WHERE workspace_id = $1`, testWorkspaceID)
 	testPool.Exec(ctx, `DELETE FROM vcs_pull_request WHERE workspace_id = $1`, testWorkspaceID)
 	testPool.Exec(ctx, `DELETE FROM vcs_connection WHERE workspace_id = $1`, testWorkspaceID)
 	if issueID != "" {
@@ -594,9 +632,7 @@ func TestVCSWebhook_ProjectAndSystemHookDuplicateDelivery(t *testing.T) {
 			t.Run(order[0]+"/"+target, func(t *testing.T) {
 				ctx := context.Background()
 				box := withVCSBox(t)
-				gitlab := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					_, _ = w.Write([]byte(`{"path_with_namespace":"acme/widget"}`))
-				}))
+				gitlab := gitlabWakeupTestServer(t, false)
 				defer gitlab.Close()
 				connID := seedVCSConnection(t, ctx, box, "gitlab", gitlab.URL)
 				issueID := dbfx.Issue(t, "Duplicate hook delivery", testutil.Cols{"status": "in_progress"})
@@ -651,13 +687,7 @@ func TestVCSWebhook_ProjectAndSystemHookDuplicateDelivery(t *testing.T) {
 func TestVCSWebhook_SystemHookOnlyMirrorsConfiguredRepos(t *testing.T) {
 	ctx := context.Background()
 	box := withVCSBox(t)
-	gitlab := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/api/v4/projects/acme%2Fwidget" || r.Header.Get("PRIVATE-TOKEN") != "tok" {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		_, _ = w.Write([]byte(`{"path_with_namespace":"acme/widget"}`))
-	}))
+	gitlab := gitlabWakeupTestServer(t, false)
 	defer gitlab.Close()
 	connID := seedVCSConnection(t, ctx, box, "gitlab", gitlab.URL)
 	issue := newVCSIssue(t, "System hook test")
@@ -695,7 +725,9 @@ func TestVCSWebhook_SystemHookOnlyMirrorsConfiguredRepos(t *testing.T) {
 func TestVCSWebhook_GitlabMergeRequest(t *testing.T) {
 	ctx := context.Background()
 	box := withVCSBox(t)
-	connID := seedVCSConnection(t, ctx, box, "gitlab", "https://gitlab.test")
+	gitlab := gitlabWakeupTestServer(t, false)
+	defer gitlab.Close()
+	connID := seedVCSConnection(t, ctx, box, "gitlab", gitlab.URL)
 	issue := newVCSIssue(t, "GitLab MR test")
 	t.Cleanup(func() { cleanupVCS(ctx, issue.ID) })
 
@@ -705,9 +737,11 @@ func TestVCSWebhook_GitlabMergeRequest(t *testing.T) {
 		"project":     map[string]any{"path_with_namespace": "acme/widget"},
 		"object_attributes": map[string]any{
 			"iid": 42, "title": "Add " + issue.Identifier, "description": "Closes " + issue.Identifier,
-			"state": "merged", "action": "merge", "source_branch": "feat",
-			"url":         "https://gitlab.test/acme/widget/-/merge_requests/42",
-			"last_commit": map[string]any{"id": "deadbeef"},
+			"state": "merged", "action": "merge",
+			"created_at": "2026-11-01T08:26:40.226Z", "updated_at": "2026-11-01T09:15:57.549Z",
+			"source_branch": "feat",
+			"url":           "https://gitlab.test/acme/widget/-/merge_requests/42",
+			"last_commit":   map[string]any{"id": "deadbeef"},
 		},
 	})
 	// GitLab authenticates by plaintext X-Gitlab-Token, not HMAC.
@@ -735,38 +769,310 @@ func TestVCSWebhook_GitlabMergeRequest(t *testing.T) {
 	}
 }
 
+func TestVCSWebhook_GitLabMRPersistsAndClosesIssueWhenPipelineAPIStalls(t *testing.T) {
+	box := withVCSBox(t)
+	pipelineStarted := make(chan struct{})
+	pipelineCanceled := make(chan struct{})
+	gitlab := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/api/v4/projects/acme%2Fwidget":
+			_, _ = w.Write([]byte(`{"id":10,"path_with_namespace":"acme/widget"}`))
+		case "/api/v4/projects/10/merge_requests/42":
+			_, _ = w.Write([]byte(`{"iid":42,"state":"merged","sha":"deadbeef","source_branch":"feature/ci-timeout","source_project_id":10,"source_project":{"id":10,"path_with_namespace":"acme/widget"},"updated_at":"2026-11-01T09:15:57.549Z","merged_at":"2026-11-01T09:15:57.652Z"}`))
+		case "/api/v4/projects/10/merge_requests/42/pipelines":
+			close(pipelineStarted)
+			<-r.Context().Done()
+			close(pipelineCanceled)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gitlab.Close()
+	connID := seedVCSConnection(t, context.Background(), box, "gitlab", gitlab.URL)
+	issue := newVCSIssue(t, "GitLab MR CI timeout")
+	t.Cleanup(func() { cleanupVCS(context.Background(), issue.ID) })
+
+	raw, err := json.Marshal(map[string]any{
+		"object_kind": "merge_request",
+		"user":        map[string]any{"username": "alice"},
+		"project":     map[string]any{"path_with_namespace": "acme/widget"},
+		"object_attributes": map[string]any{
+			"iid": 42, "title": "Fix " + issue.Identifier, "description": "Closes " + issue.Identifier,
+			"state": "merged", "action": "merge",
+			"created_at": "2026-11-01T08:26:40.226Z", "updated_at": "2026-11-01T09:15:57.549Z",
+			"source_branch": "feature/ci-timeout",
+			"url":           "https://gitlab.test/acme/widget/-/merge_requests/42",
+			"last_commit":   map[string]any{"id": "deadbeef"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal merge request webhook: %v", err)
+	}
+	req := vcsWebhookReq(connID, map[string]string{
+		"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": vcsTestSecret,
+	}, raw)
+	ctx, cancel := context.WithTimeout(req.Context(), 3*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	testHandler.HandleVCSWebhook(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("timed-out Pipeline sync must fail its response after persisting and processing the MR: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test parent context did not reach its deadline")
+	}
+	select {
+	case <-pipelineStarted:
+	default:
+		t.Fatal("pipeline API was not reached")
+	}
+	select {
+	case <-pipelineCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("stalled pipeline request did not stop when its parent context expired")
+	}
+
+	pr, err := testHandler.Queries.GetVCSGitLabPullRequestByWakeupIdentity(context.Background(), db.GetVCSGitLabPullRequestByWakeupIdentityParams{
+		WorkspaceID:  parseUUID(testWorkspaceID),
+		ConnectionID: parseUUID(connID),
+		RepoOwner:    "acme",
+		RepoName:     "widget",
+		PrNumber:     42,
+	})
+	if err != nil {
+		t.Fatalf("GetVCSGitLabPullRequestByWakeupIdentity: %v", err)
+	}
+	if pr.State != "merged" || pr.HeadSha != "deadbeef" {
+		t.Fatalf("MR after stalled CI = %+v", pr)
+	}
+	updated, err := testHandler.Queries.GetIssue(context.Background(), parseUUID(issue.ID))
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if updated.Status != "done" {
+		t.Fatalf("merged MR with close intent should complete its issue despite stalled CI, got %q", updated.Status)
+	}
+}
+
 func TestVCSWebhook_GitlabPipelineWithSystemHook(t *testing.T) {
 	ctx := context.Background()
 	box := withVCSBox(t)
-	connID := seedVCSConnection(t, ctx, box, "gitlab", "https://gitlab.test")
+	gitlab := gitlabWakeupTestServer(t, true)
+	defer gitlab.Close()
+	connID := seedVCSConnection(t, ctx, box, "gitlab", gitlab.URL)
 	issueID := dbfx.Issue(t, "GitLab pipeline coexistence")
 	t.Cleanup(func() { cleanupVCS(ctx, "") })
 	issue, err := testHandler.Queries.GetIssue(ctx, parseUUID(issueID))
 	if err != nil {
 		t.Fatal(err)
 	}
+	configureGitlabSystemHook(t, gitlab.URL, "done")
 	identifier := issueToResponse(issue, testHandler.getIssuePrefix(ctx, issue.WorkspaceID)).Identifier
 	raw := gitlabSystemHookPayload(t, "Fix "+identifier, "acme/widget")
 	testutil.Call(t, testHandler.HandleVCSWebhook, vcsWebhookReq(connID, map[string]string{
 		"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": vcsTestSecret,
 	}, raw)).Want(http.StatusAccepted)
 
-	pipeline := []byte(`{"object_kind":"pipeline","object_attributes":{"sha":"2222222222222222222222222222222222222222","status":"success","finished_at":"2026-11-01T09:16:00Z"}}`)
+	pipeline := []byte(`{"object_kind":"pipeline","project":{"id":10,"path_with_namespace":"acme/widget"},"object_attributes":{"id":300,"sha":"2222222222222222222222222222222222222222","ref":"refs/merge-requests/10/head","status":"success","finished_at":"2026-11-01T09:16:00Z"}}`)
 	for _, event := range []string{"System Hook", "Pipeline Hook"} {
 		testutil.Call(t, testHandler.HandleVCSWebhook, vcsWebhookReq(connID, map[string]string{
 			"X-Gitlab-Event": event, "X-Gitlab-Token": vcsTestSecret,
 		}, pipeline)).Want(http.StatusAccepted)
-		rows, err := testHandler.Queries.ListVCSPullRequestsByIssue(ctx, parseUUID(issueID))
+		var count int64
+		var status string
+		if err := testPool.QueryRow(ctx, `SELECT count(*), COALESCE(min(status), '') FROM vcs_gitlab_pipeline WHERE connection_id = $1`, connID).Scan(&count, &status); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 || status != "passed" {
+			t.Fatalf("%s: got %d mirrored pipelines with status %q; want one passed pipeline", event, count, status)
+		}
+	}
+}
+
+func TestVCSWebhook_GitLabPipelineRefreshFailureRetries(t *testing.T) {
+	ctx := context.Background()
+	box := withVCSBox(t)
+	gitlab := gitlabWakeupTestServer(t, false)
+	defer gitlab.Close()
+	connID := seedVCSConnection(t, ctx, box, "gitlab", gitlab.URL)
+	issueID := dbfx.Issue(t, "GitLab Pipeline refresh retry")
+	t.Cleanup(func() { cleanupVCS(ctx, "") })
+	issue, err := testHandler.Queries.GetIssue(ctx, parseUUID(issueID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := gitlabSystemHookPayload(t, "Fix "+issueToResponse(issue, testHandler.getIssuePrefix(ctx, issue.WorkspaceID)).Identifier, "acme/widget")
+	newRequest := func() *http.Request {
+		return vcsWebhookReq(connID, map[string]string{
+			"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": vcsTestSecret,
+		}, raw)
+	}
+
+	failingHandler := *testHandler
+	failingHandler.TxStarter = failingGitLabPipelineTxStarter{err: errors.New("injected Pipeline ledger write failure")}
+	failed := httptest.NewRecorder()
+	failingHandler.HandleVCSWebhook(failed, newRequest())
+	if failed.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed Pipeline persistence returned %d (%s), want 503", failed.Code, failed.Body.String())
+	}
+	params := db.GetVCSGitLabPullRequestByWakeupIdentityParams{
+		WorkspaceID:  parseUUID(testWorkspaceID),
+		ConnectionID: parseUUID(connID),
+		RepoOwner:    "acme",
+		RepoName:     "widget",
+		PrNumber:     10,
+	}
+	pr, err := testHandler.Queries.GetVCSGitLabPullRequestByWakeupIdentity(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.State != "merged" || pr.StatusSyncError.Valid || !pr.PipelineSyncError.Valid {
+		t.Fatalf("failed Pipeline refresh should preserve MR state and expose only the Pipeline error: %+v", pr)
+	}
+	var pipelineCount int64
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM vcs_gitlab_pipeline WHERE pull_request_id = $1`, pr.ID).Scan(&pipelineCount); err != nil {
+		t.Fatal(err)
+	}
+	if pipelineCount != 0 {
+		t.Fatalf("failed refresh partially wrote %d Pipeline rows", pipelineCount)
+	}
+
+	retried := httptest.NewRecorder()
+	testHandler.HandleVCSWebhook(retried, newRequest())
+	if retried.Code != http.StatusAccepted {
+		t.Fatalf("recovery sync returned %d (%s), want 202", retried.Code, retried.Body.String())
+	}
+	pr, err = testHandler.Queries.GetVCSGitLabPullRequestByWakeupIdentity(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.PipelineSyncError.Valid || !pr.PipelineSyncAt.Valid {
+		t.Fatalf("successful retry did not clear Pipeline error and mark sync complete: %+v", pr)
+	}
+}
+
+func TestGitLabConcurrentWakeupSyncCannotOverwriteNewerPipeline(t *testing.T) {
+	ctx := context.Background()
+	box := withVCSBox(t)
+	gitlab := gitlabWakeupTestServer(t, false)
+	defer gitlab.Close()
+	connID := seedVCSConnection(t, ctx, box, "gitlab", gitlab.URL)
+	issueID := dbfx.Issue(t, "GitLab concurrent sync")
+	t.Cleanup(func() { cleanupVCS(ctx, "") })
+	issue, err := testHandler.Queries.GetIssue(ctx, parseUUID(issueID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := gitlabSystemHookPayload(t, "Fix "+issueToResponse(issue, testHandler.getIssuePrefix(ctx, issue.WorkspaceID)).Identifier, "acme/widget")
+	response := httptest.NewRecorder()
+	testHandler.HandleVCSWebhook(response, vcsWebhookReq(connID, map[string]string{
+		"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": vcsTestSecret,
+	}, raw))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("seed MR webhook returned %d (%s)", response.Code, response.Body.String())
+	}
+	identity := db.GetVCSGitLabPullRequestByWakeupIdentityParams{
+		WorkspaceID:  parseUUID(testWorkspaceID),
+		ConnectionID: parseUUID(connID),
+		RepoOwner:    "acme",
+		RepoName:     "widget",
+		PrNumber:     10,
+	}
+	pr, err := testHandler.Queries.GetVCSGitLabPullRequestByWakeupIdentity(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateHead := func(current db.VcsPullRequest, generation int64, head, updatedAt string) {
+		t.Helper()
+		prUpdatedAt, err := parseGitLabWakeupTime(updatedAt)
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantChecks := int64(0)
-		if event == "Pipeline Hook" {
-			wantChecks = 1
+		rows, err := testHandler.Queries.UpdateGitLabVCSPullRequestWakeupState(ctx, db.UpdateGitLabVCSPullRequestWakeupStateParams{
+			ID:                   current.ID,
+			WorkspaceID:          current.WorkspaceID,
+			State:                current.State,
+			HeadSha:              head,
+			ConflictHeadSha:      head,
+			PrUpdatedAt:          prUpdatedAt,
+			WakeupSyncGeneration: generation,
+			HasConflicts:         pgtype.Bool{Bool: false, Valid: true},
+			SourceProjectID:      pgtype.Int8{Int64: 10, Valid: true},
+			SourceProjectPath:    strToText("acme/widget"),
+			ExpectedHeadSha:      current.HeadSha,
+			ExpectedPrUpdatedAt:  current.PrUpdatedAt,
+		})
+		if err != nil || rows != 1 {
+			t.Fatalf("update head %q: rows=%d err=%v", head, rows, err)
 		}
-		if len(rows) != 1 || rows[0].ChecksTotal != wantChecks || rows[0].ChecksPassed != wantChecks {
-			t.Fatalf("%s: want %d passed checks, got %+v", event, wantChecks, rows)
-		}
+	}
+
+	oldGeneration, err := testHandler.Queries.BeginGitLabVCSPullRequestWakeupSync(ctx, db.BeginGitLabVCSPullRequestWakeupSyncParams{
+		ID: pr.ID, WorkspaceID: pr.WorkspaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldUpdatedAt := "2026-11-01T10:00:00Z"
+	updateHead(pr, oldGeneration, "older-head", oldUpdatedAt)
+	current, err := testHandler.Queries.GetVCSGitLabPullRequestByWakeupIdentity(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newGeneration, err := testHandler.Queries.BeginGitLabVCSPullRequestWakeupSync(ctx, db.BeginGitLabVCSPullRequestWakeupSyncParams{
+		ID: pr.ID, WorkspaceID: pr.WorkspaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newUpdatedAt := "2026-11-01T11:00:00Z"
+	updateHead(current, newGeneration, "newer-head", newUpdatedAt)
+
+	newSnapshot := vcs.GitLabWakeupSnapshot{
+		MergeRequest: vcs.GitLabWakeupMergeRequest{HeadSHA: "newer-head", UpdatedAt: newUpdatedAt},
+		Pipelines: []vcs.GitLabWakeupPipeline{{
+			ID: 200, ProjectID: 10, ProjectPath: "acme/widget", SHA: "newer-head",
+			Ref: "refs/merge-requests/10/head", Status: "passed", UpdatedAt: newUpdatedAt,
+		}},
+	}
+	persisted, err := testHandler.persistVCSGitLabWakeupPipelines(ctx, pr, newSnapshot, newGeneration)
+	if err != nil || !persisted {
+		t.Fatalf("new Pipeline sync: persisted=%v err=%v", persisted, err)
+	}
+
+	lateErrorRows, err := testHandler.Queries.MarkGitLabVCSPullRequestPipelineSync(ctx, db.MarkGitLabVCSPullRequestPipelineSyncParams{
+		ID: pr.ID, WorkspaceID: pr.WorkspaceID, PipelineSyncError: strToText("late old error"),
+		WakeupSyncGeneration: oldGeneration, HeadSha: "older-head",
+	})
+	if err != nil || lateErrorRows != 0 {
+		t.Fatalf("late old Pipeline error affected %d rows: %v", lateErrorRows, err)
+	}
+	oldSnapshot := vcs.GitLabWakeupSnapshot{
+		MergeRequest: vcs.GitLabWakeupMergeRequest{HeadSHA: "older-head", UpdatedAt: oldUpdatedAt},
+		Pipelines: []vcs.GitLabWakeupPipeline{{
+			ID: 100, ProjectID: 10, ProjectPath: "acme/widget", SHA: "older-head",
+			Ref: "refs/merge-requests/10/head", Status: "failed", UpdatedAt: oldUpdatedAt,
+		}},
+	}
+	persisted, err = testHandler.persistVCSGitLabWakeupPipelines(ctx, pr, oldSnapshot, oldGeneration)
+	if err != nil || persisted {
+		t.Fatalf("late old Pipeline ledger: persisted=%v err=%v", persisted, err)
+	}
+	final, err := testHandler.Queries.GetVCSGitLabPullRequestByWakeupIdentity(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipelines, err := testHandler.Queries.ListVCSGitLabPipelinesByMR(ctx, db.ListVCSGitLabPipelinesByMRParams{
+		WorkspaceID: final.WorkspaceID, PullRequestID: final.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.HeadSha != "newer-head" || final.WakeupSyncGeneration != newGeneration ||
+		!final.PipelineSyncAt.Valid || final.PipelineSyncError.Valid ||
+		len(pipelines) != 1 || pipelines[0].PipelineID != 200 || pipelines[0].Sha != "newer-head" {
+		t.Fatalf("late synchronization overwrote current state: MR=%+v pipelines=%+v", final, pipelines)
 	}
 }
 

@@ -36,9 +36,9 @@ func (tx *prConditionTx) Query(_ context.Context, sql string, args ...any) (pgx.
 		return &sliceRows{}, nil
 	}
 	// The canned GitHub rows below describe an issue with no self-hosted VCS
-	// pull requests; the VCS aggregation finds nothing to add. The VCS path
-	// itself is covered against PostgreSQL by the condition test suite.
-	if strings.Contains(sql, "FROM vcs_pull_request") {
+	// pull requests. Both the VCS rollup and GitLab target union find nothing.
+	// The VCS path itself is covered against PostgreSQL by the condition test suite.
+	if strings.Contains(sql, "FROM vcs_pull_request") || strings.Contains(sql, "JOIN vcs_pull_request") {
 		return &sliceRows{}, nil
 	}
 	if !strings.Contains(sql, "WHERE ipr.issue_id=$1") || len(args) != 1 || args[0] != tx.issue {

@@ -284,6 +284,7 @@
     "reminder_at": "reminder {{relative}}",
     "next_check": "next check {{relative}}",
     "last_check": "Last check: {{note}}",
+    "gitlab_target": "GitLab {{repo}}!{{number}} ({{event}}, connection {{connectionId}})",
     "cancel": "Cancel wakeup",
     "cancel_failed": "Couldn't cancel the wakeup",
     "retry": "Retry",

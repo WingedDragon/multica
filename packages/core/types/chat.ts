@@ -332,6 +332,39 @@ export type ChatWakeupStatus =
   | "cancelled"
   | "failed";
 
+export interface ChatWakeupGitLabPipelineVersion {
+  pipeline_id: string;
+  pipeline_project_id: string;
+  pipeline_project_path: string;
+  ref: string;
+  sha: string;
+  status: "success" | "failure";
+  updated_at: string;
+}
+
+/** Server-owned connection identity and CI baseline for GitLab pull requests. */
+export interface ChatWakeupGitLabState {
+  source: "vcs_connection" | "gitlab_connection";
+  merge_request_id: string;
+  activated_at: string;
+  baseline_available: boolean;
+  baseline_head_sha: string;
+  baseline_pipelines: ChatWakeupGitLabPipelineVersion[];
+}
+
+/** A platform-evaluated chat condition. Unknown fields remain additive. */
+export interface ChatWakeupCondition extends Record<string, unknown> {
+  type?: string;
+  /** Omitted for GitHub, preserving its original condition input. */
+  provider?: string;
+  connection_id?: string;
+  repo?: string;
+  number?: number;
+  event?: string;
+  /** Server-owned state used to keep GitLab CI baselines stable across sync outages. */
+  gitlab?: ChatWakeupGitLabState | null;
+}
+
 /**
  * A promise an agent made in a chat to come back and report: when a condition
  * holds ("condition"), at a time ("at"), or on periodic checks ("check"). Every
@@ -347,7 +380,7 @@ export interface ChatWakeup {
   title: string;
   instruction: string;
   kind: ChatWakeupKind;
-  condition?: Record<string, unknown> | null;
+  condition?: ChatWakeupCondition | null;
   interval_seconds: number | null;
   fire_at: string | null;
   next_eval_at: string;

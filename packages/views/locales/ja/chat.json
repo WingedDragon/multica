@@ -279,6 +279,7 @@
     "reminder_at": "{{relative}}にリマインド",
     "next_check": "次の確認は{{relative}}",
     "last_check": "前回の確認：{{note}}",
+    "gitlab_target": "GitLab {{repo}}!{{number}}（{{event}}、接続 {{connectionId}}）",
     "cancel": "ウェイクアップをキャンセル",
     "cancel_failed": "ウェイクアップをキャンセルできませんでした",
     "retry": "再試行",

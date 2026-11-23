@@ -30,12 +30,9 @@ ON CONFLICT (workspace_id, instance_url) DO UPDATE SET
 RETURNING *;
 
 -- name: DeleteVCSConnection :exec
--- These tables carry no FKs, so the cascade that once removed the connection's
--- mirrored PRs, their issue links, and CI statuses is gone (migration 213). Do
--- that cleanup explicitly here, in one statement so it commits or rolls back
--- atomically with the connection row. The target CTE also scopes every child
--- delete to a connection that actually belongs to the workspace, so a wrong
--- workspace_id is a no-op rather than deleting another tenant's child rows.
+-- The VCS mirror tables intentionally have no foreign keys. Remove the
+-- connection's MR pipeline ledger, issue links, commit statuses, and MRs in
+-- the same statement as the connection, scoped to the owning workspace.
 WITH target AS (
     SELECT vcs_connection.id FROM vcs_connection WHERE vcs_connection.id = $1 AND vcs_connection.workspace_id = $2
 ),
@@ -48,6 +45,9 @@ cleared_links AS (
 ),
 cleared_statuses AS (
     DELETE FROM vcs_commit_status WHERE connection_id IN (SELECT target.id FROM target)
+),
+cleared_pipelines AS (
+    DELETE FROM vcs_gitlab_pipeline WHERE connection_id IN (SELECT target.id FROM target)
 ),
 cleared_prs AS (
     DELETE FROM vcs_pull_request WHERE connection_id IN (SELECT target.id FROM target)
@@ -67,21 +67,20 @@ RETURNING *;
 
 -- name: UpsertVCSPullRequest :one
 -- pr_updated_at guards against an out-of-order webhook redelivery regressing
--- the PR state, mirroring the updated_at guard on UpsertVCSCommitStatus. Each
--- mutable column is applied only when the incoming event is at least as new as
--- the stored row; a stale event keeps the existing values. The row is still
--- touched (and thus RETURNED) either way, so callers always get the current PR
--- — the webhook needs pr.id to link the issue even on a stale redelivery.
+-- the PR state. Conflict data is head-versioned; a missing value never turns a
+-- previously known result into a result for a new head.
 INSERT INTO vcs_pull_request (
     workspace_id, connection_id, provider, repo_owner, repo_name, pr_number,
     title, state, html_url, branch, author_login, author_avatar_url,
     merged_at, closed_at, pr_created_at, pr_updated_at,
-    additions, deletions, changed_files, head_sha
+    additions, deletions, changed_files, head_sha, has_conflicts,
+    conflict_head_sha, source_project_id, source_project_path
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
     $7, $8, $9, sqlc.narg('branch'), sqlc.narg('author_login'), sqlc.narg('author_avatar_url'),
     sqlc.narg('merged_at'), sqlc.narg('closed_at'), $10, $11,
-    $12, $13, $14, $15
+    $12, $13, $14, $15, sqlc.narg('has_conflicts'), $16,
+    sqlc.narg('source_project_id'), sqlc.narg('source_project_path')
 )
 ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     workspace_id      = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.workspace_id      ELSE vcs_pull_request.workspace_id      END,
@@ -99,6 +98,10 @@ ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     deletions         = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.deletions         ELSE vcs_pull_request.deletions         END,
     changed_files     = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.changed_files     ELSE vcs_pull_request.changed_files     END,
     head_sha          = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.head_sha          ELSE vcs_pull_request.head_sha          END,
+    has_conflicts     = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at AND EXCLUDED.provider = 'gitlab' THEN EXCLUDED.has_conflicts ELSE vcs_pull_request.has_conflicts END,
+    conflict_head_sha = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at AND EXCLUDED.provider = 'gitlab' THEN EXCLUDED.conflict_head_sha ELSE vcs_pull_request.conflict_head_sha END,
+    source_project_id = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.source_project_id ELSE vcs_pull_request.source_project_id END,
+    source_project_path = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.source_project_path ELSE vcs_pull_request.source_project_path END,
     updated_at        = now()
 RETURNING *;
 
@@ -211,6 +214,137 @@ WHERE connection_id = $1 AND repo_owner = $2 AND repo_name = $3 AND pr_number = 
 -- name: GetVCSPullRequestInWorkspace :one
 SELECT * FROM vcs_pull_request
 WHERE id = $1 AND workspace_id = $2;
+-- name: GetVCSGitLabPullRequestByWakeupIdentity :one
+SELECT * FROM vcs_pull_request
+WHERE workspace_id = $1
+  AND connection_id = $2
+  AND provider = 'gitlab'
+  AND repo_owner = $3
+  AND repo_name = $4
+  AND pr_number = $5;
+
+-- name: BeginGitLabVCSPullRequestWakeupSync :one
+UPDATE vcs_pull_request
+SET wakeup_sync_generation = wakeup_sync_generation + 1,
+    status_sync_at = now(),
+    status_sync_error = 'MR refresh pending',
+    pipeline_sync_at = now(),
+    pipeline_sync_error = 'Pipeline refresh pending',
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND provider = 'gitlab'
+RETURNING wakeup_sync_generation;
+
+-- name: ListVCSGitLabPullRequestsByProjectHead :many
+SELECT * FROM vcs_pull_request
+WHERE workspace_id = $1
+  AND connection_id = $2
+  AND provider = 'gitlab'
+  AND repo_owner = $3
+  AND repo_name = $4
+  AND head_sha = $5
+  AND head_sha <> ''
+ORDER BY id ASC;
+-- name: ListVCSGitLabPullRequestsBySourceProjectHead :many
+SELECT * FROM vcs_pull_request
+WHERE workspace_id = $1
+  AND connection_id = $2
+  AND provider = 'gitlab'
+  AND source_project_id = $3
+  AND head_sha = $4
+  AND head_sha <> ''
+ORDER BY id ASC;
+
+
+-- name: UpdateGitLabVCSPullRequestWakeupState :execrows
+UPDATE vcs_pull_request
+SET state = $3,
+    head_sha = $4,
+    has_conflicts = sqlc.narg('has_conflicts'),
+    conflict_head_sha = $5,
+    source_project_id = sqlc.narg('source_project_id'),
+    source_project_path = sqlc.narg('source_project_path'),
+    merged_at = sqlc.narg('merged_at'),
+    closed_at = sqlc.narg('closed_at'),
+    pr_updated_at = $6,
+    status_sync_at = now(),
+    status_sync_error = NULL,
+    pipeline_sync_at = now(),
+    pipeline_sync_error = 'pipeline refresh pending',
+    updated_at = now()
+WHERE id = $1
+  AND workspace_id = $2
+  AND provider = 'gitlab'
+  AND pr_updated_at <= $6
+  AND head_sha = sqlc.arg(expected_head_sha)
+  AND pr_updated_at = sqlc.arg(expected_pr_updated_at)
+  AND wakeup_sync_generation = $7;
+
+-- name: MarkGitLabVCSPullRequestWakeupSyncError :execrows
+UPDATE vcs_pull_request
+SET status_sync_at = now(),
+    status_sync_error = $3,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND provider = 'gitlab'
+  AND wakeup_sync_generation = $4;
+
+-- name: MarkGitLabVCSPullRequestPipelineSync :execrows
+UPDATE vcs_pull_request
+SET pipeline_sync_at = now(),
+    pipeline_sync_error = $3,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND provider = 'gitlab'
+  AND wakeup_sync_generation = $4
+  AND head_sha = $5;
+
+-- name: MarkGitLabVCSPullRequestPipelineSyncSuccess :execrows
+UPDATE vcs_pull_request
+SET pipeline_sync_at = now(),
+    pipeline_sync_error = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND provider = 'gitlab'
+  AND wakeup_sync_generation = $3
+  AND head_sha = $4;
+
+-- name: LockGitLabVCSPullRequestWakeupSync :one
+SELECT id FROM vcs_pull_request
+WHERE id = $1
+  AND workspace_id = $2
+  AND provider = 'gitlab'
+  AND wakeup_sync_generation = $3
+  AND head_sha = $4
+  AND pr_updated_at = $5
+FOR UPDATE;
+
+
+-- name: UpsertVCSGitLabPipeline :exec
+INSERT INTO vcs_gitlab_pipeline (
+    workspace_id, connection_id, pull_request_id, pipeline_id,
+    pipeline_project_id, pipeline_project_path, sha, ref, status, web_url,
+    pipeline_updated_at
+)
+SELECT pr.workspace_id, pr.connection_id, pr.id, $3,
+       $4, $5, $6, $7, $8, sqlc.narg('web_url'), $9
+FROM vcs_pull_request pr
+WHERE pr.id = $1 AND pr.workspace_id = $2 AND pr.provider = 'gitlab'
+ON CONFLICT (pull_request_id, pipeline_project_path, pipeline_id) DO UPDATE SET
+    pipeline_project_id = EXCLUDED.pipeline_project_id,
+    pipeline_project_path = EXCLUDED.pipeline_project_path,
+    sha = EXCLUDED.sha,
+    ref = EXCLUDED.ref,
+    status = EXCLUDED.status,
+    web_url = EXCLUDED.web_url,
+    pipeline_updated_at = EXCLUDED.pipeline_updated_at,
+    updated_at = now()
+WHERE EXCLUDED.pipeline_updated_at >= vcs_gitlab_pipeline.pipeline_updated_at;
+
+-- name: ListVCSGitLabPipelinesByMR :many
+SELECT * FROM vcs_gitlab_pipeline
+WHERE workspace_id = $1 AND pull_request_id = $2
+ORDER BY pipeline_updated_at DESC, pipeline_id DESC;
+
+-- name: DeleteVCSGitLabPipelinesByMR :execrows
+DELETE FROM vcs_gitlab_pipeline
+WHERE workspace_id = $1 AND pull_request_id = $2;
 
 -- name: FindVCSPullRequestByURL :one
 SELECT * FROM vcs_pull_request

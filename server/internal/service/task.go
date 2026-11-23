@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/featureflags"
 	"github.com/multica-ai/multica/server/internal/inbox"
+	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -51,6 +52,9 @@ type TaskService struct {
 	Wakeup    TaskWakeupNotifier
 	// PRSnapshotsEnabled reports whether the server can refresh GitHub check snapshots.
 	PRSnapshotsEnabled bool
+	// GitLabWakeupSyncer refreshes a single GitLab MR before wakeup conditions
+	// read its mirror. The refresher is injected once at server startup.
+	GitLabWakeupSyncer vcs.GitLabWakeupSyncer
 	// SourceContextStorage is used only by the bounded 30-day cleanup pass for
 	// terminal quick-create captures. Nil disables it where storage is absent.
 	SourceContextStorage SourceContextObjectStore

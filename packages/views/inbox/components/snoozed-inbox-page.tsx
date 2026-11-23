@@ -1,14 +1,15 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlarmClock, Undo2 } from "@multica/ui/icons";
 import { Button } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { useWorkspacePaths } from "@multica/core/paths";
+import { issueRouteRef, useWorkspacePaths } from "@multica/core/paths";
 import { snoozedInboxOptions } from "@multica/core/inbox/queries";
 import { issueDetailOptions } from "@multica/core/issues/queries";
+import { cachedIssueRouteRef } from "@multica/core/issues/canonical-id";
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import type { SnoozedInboxIssue } from "@multica/core/types";
 import { CollectionPageHeader, CollectionPageState } from "../../layout/collection-page";
@@ -24,6 +25,7 @@ import { useBuiltinViewLabel } from "../../issue-views/builtin-views";
 import { useLocale, useT } from "../../i18n";
 import { InboxSnoozeMenu } from "./inbox-snooze-menu";
 import { formatSnoozeTime } from "./inbox-snooze-time";
+import { inboxListLoad } from "./use-filtered-inbox-rows";
 import { useInboxSnooze } from "./use-inbox-snooze";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -55,9 +57,12 @@ export function SnoozedInboxPage() {
   const { t } = useT("inbox");
   const wsId = useWorkspaceId();
   const p = useWorkspacePaths();
+  const qc = useQueryClient();
   const locale = useLocale();
   const title = useBuiltinViewLabel()("snoozed");
-  const { data: snoozed, isLoading } = useQuery(snoozedInboxOptions(wsId));
+  const snoozedQuery = useQuery(snoozedInboxOptions(wsId));
+  const snoozed = snoozedQuery.data;
+  const load = inboxListLoad(snoozedQuery);
   const { snooze, unsnooze } = useInboxSnooze();
 
   const groups = useMemo<CollectionGroup<SnoozedInboxIssue>[]>(() => {
@@ -124,7 +129,19 @@ export function SnoozedInboxPage() {
   return (
     <div className="flex flex-1 min-h-0 flex-col">
       <CollectionPageHeader icon={AlarmClock} title={title} />
-      {isLoading ? (
+      {load === "failed" ? (
+        <CollectionPageState
+          icon={AlarmClock}
+          tone="warning"
+          role="alert"
+          title={t(($) => $.errors.load_failed)}
+          actions={
+            <Button variant="outline" disabled={snoozedQuery.isFetching} onClick={() => void snoozedQuery.refetch()}>
+              {t(($) => $.list.retry)}
+            </Button>
+          }
+        />
+      ) : load === "loading" ? (
         <div className="space-y-2 p-4">
           {Array.from({ length: 4 }).map((_, i) => (
             <Skeleton key={i} className="h-8 w-full" />
@@ -136,7 +153,15 @@ export function SnoozedInboxPage() {
           columns={columns}
           groups={groups}
           getRowId={(row) => row.issue_id}
-          getRowHref={(row) => p.issueDetail(row.issue_id)}
+          // Older servers send no identifier. The cache supplies it when the
+          // issue was loaded before this list last rendered; else the UUID.
+          getRowHref={(row) =>
+            p.issueDetail(
+              row.issue_identifier
+                ? issueRouteRef({ id: row.issue_id, identifier: row.issue_identifier })
+                : cachedIssueRouteRef(qc, wsId, row.issue_id),
+            )
+          }
           empty={
             <CollectionPageState
               icon={AlarmClock}

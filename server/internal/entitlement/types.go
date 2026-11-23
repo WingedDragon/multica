@@ -19,11 +19,18 @@ const (
 	// GateStorageBytes caps the attachment bytes a workspace holds. Like
 	// members it has no period: the limit is what the workspace may hold now.
 	GateStorageBytes GateName = "storage_bytes"
+	// GateDashboardHistoryDays caps how many calendar days back the workspace
+	// dashboard can read. Limit is a day count with no period.
+	GateDashboardHistoryDays GateName = "dashboard_history_days"
 )
+
+// MaxDashboardHistoryDays is the largest dashboard_history_days limit Cloud
+// may send. A larger value is a malformed gate.
+const MaxDashboardHistoryDays = 365
 
 func (n GateName) valid() bool {
 	switch n {
-	case GateAutopilotRuns, GateMembers, GateStorageBytes:
+	case GateAutopilotRuns, GateMembers, GateStorageBytes, GateDashboardHistoryDays:
 		return true
 	default:
 		return false
@@ -39,7 +46,13 @@ const (
 	ActionObserve Action = "observe"
 	ActionEnforce Action = "enforce"
 
+	// NotificationFirstRejectionPerPeriod notifies on the first rejection of
+	// a period only.
 	NotificationFirstRejectionPerPeriod = "first_rejection_per_period"
+	// NotificationFirstRejectionPerLimit notifies on the first rejection for
+	// each limit within a period, so a limit raised by an add-on purchase
+	// re-arms the notice (policy revision 6).
+	NotificationFirstRejectionPerLimit = "first_rejection_per_limit"
 )
 
 type Reason string
@@ -83,8 +96,12 @@ type NotificationPolicy struct {
 // Decision carries enough source information for consumers to audit why a gate
 // was enforced, observed, or disabled without exposing Cloud's private inputs.
 type Decision struct {
-	Gate                Gate
-	Reason              Reason
+	Gate   Gate
+	Reason Reason
+	// Downgraded is set when Cloud sent enforce but the cached policy has gone
+	// stale, so Gate.Action was lowered to observe. It tells a configured
+	// observe apart from a Cloud outage, as FeatureDecision.Downgraded does.
+	Downgraded          bool
 	PolicyRevision      int64
 	SubscriptionVersion int64
 	CloudValidUntil     time.Time
@@ -108,6 +125,15 @@ type Provider interface {
 // A Provider without it rejects on the cached decision.
 type Refresher interface {
 	RefreshGate(ctx context.Context, workspaceID uuid.UUID, name GateName) Decision
+}
+
+// FreshRefresher re-reads one gate from Cloud now, skipping the short reuse
+// window RefreshGate applies; concurrent callers for a workspace share one
+// fetch. The autopilot quota calls it right before rejecting a run, so a limit
+// Cloud raised moments ago (a paid add-on confirmed by Stripe's webhook) is
+// never refused on a policy any instance cached before it.
+type FreshRefresher interface {
+	RefreshGateNow(ctx context.Context, workspaceID uuid.UUID, name GateName) Decision
 }
 
 // FeatureName is a stable paid-feature key. Unlike a GateName it meters

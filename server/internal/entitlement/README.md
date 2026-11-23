@@ -17,7 +17,7 @@ The client reads:
 
 - `schema_version`: only version 1 is accepted.
 - `policy_revision`: the effective-instruction generation, currently fixed at
-  `7` by Cloud and not deployment configuration. Cloud advances it when the
+  `9` by Cloud and not deployment configuration. Cloud advances it when the
   meaning or set of actionable instructions changes, including additive
   instructions; `schema_version` changes only for incompatible wire parsing.
 - `subscription_version`: the workspace's monotonic subscription revision. A
@@ -35,10 +35,13 @@ The client reads:
   limit and period parameters as `enforce`. Multica also downgrades an expired
   cached `enforce` instruction to `observe` locally (see below).
 - `gates.*.notifications`: an optional, additive delivery policy. The autopilot
-  quota consumer recognizes `first_rejection_per_period` and delivers one
-  workspace notice for the first rejected execution in the Cloud-defined quota
-  period. A malformed notification policy is ignored without invalidating an
-  otherwise valid enforcement gate.
+  quota consumer recognizes two values. `first_rejection_per_period` delivers
+  one notice for the first rejected execution in the Cloud-defined quota
+  period. `first_rejection_per_limit` (revision 6) delivers one notice for the
+  first rejection at each limit within the period, so a limit raised by an
+  add-on purchase re-arms the notice. Any other value, or a malformed
+  notification policy, disables notices without invalidating an otherwise
+  valid enforcement gate.
 - `features`: paid-feature restrictions, one `{"action": ...}` per feature
   (revision 4). See [Paid features](#paid-features). Each feature is parsed on
   its own, after the rest of the policy: a missing, unknown, or malformed
@@ -70,6 +73,11 @@ Revision 7 adds the `agent_invocation_members`, `runtime_member_sharing` and
 `team_app_accounts` features. It is safe in either order: an older consumer
 ignores features it does not know, and this consumer reads a policy without
 one as that feature `off` with reason `feature_missing`.
+
+`gates.dashboard_history_days` (revision 9) is optional like `members`: a
+missing or malformed gate, including a `limit` outside 1–365 or one carrying a
+period, is `off` with reason `gate_missing` or `gate_invalid` for that gate
+alone. See [Dashboard history limit](#dashboard-history-limit).
 
 Responses tolerate unknown JSON fields and gates for additive compatibility.
 Unknown schema/action, malformed fields, a missing `autopilot_runs` gate, HTTP
@@ -143,6 +151,14 @@ upgraded is not refused on a policy cached before the upgrade, and repeated
 refusals cost at most one Cloud request per workspace per five seconds. A
 failed fetch answers exactly like `Gate`. The Cloud client implements it;
 `entitlementtest.Stub` does too (`SetRefreshed`).
+
+`FreshRefresher.RefreshGateNow` fetches without the reuse window; concurrent
+callers for a workspace share one fetch. The autopilot quota calls it right
+before rejecting a run: the admission transaction sees the quota is full on
+the cached policy, leaves the transaction, fetches the current policy and runs
+the admission once more on it. A limit Cloud raised moments ago, such as an
+add-on Stripe's webhook confirmed before the payer returned to the app, admits
+the next run on every instance. Each rejection costs one Cloud request.
 
 ## Member limit
 
@@ -262,3 +278,39 @@ Clients read `GET /api/workspaces/{id}/features`, which returns only
 `available` (off or observe) or `locked` (enforce) per feature, and render
 read-only and upgrade states from it. The server enforces on every write
 regardless.
+
+## Dashboard history limit
+
+`dashboard_history_days` caps how many calendar days back the workspace
+dashboard can read. Its `limit` is a day count (1–365) and it has no period.
+Cloud sends it for every known plan: Free, Pro and Business (trials included)
+each get their own configured day count.
+
+Only `enforce` limits anything (`server/internal/handler/dashboard_history.go`).
+The six `/api/dashboard/*` endpoints then cut their cutoff to the first of the
+most recent N calendar days in the viewing time zone, whatever `days` asked
+for, including the date series' extra day of headroom and the days a weekly
+chart fetches to fill its leftmost week, and send the limit in
+`X-Dashboard-History-Limit-Days`. `off`, `observe` (including a downgraded
+stale `enforce`, marked `Downgraded` on the `Decision`) and self-hosted
+deployments read up to the request maximum of 371 days with no header. The
+runtime usage endpoints keep their own 365-day maximum and no plan limit.
+The dashboard's `365d` range follows the frontend flag
+`dashboard_history_365d`: published on by default, and
+`FF_DASHBOARD_HISTORY_365D=off` hides the range should the year-long queries
+be too slow for a deployment.
+
+`GET /api/workspaces/{id}/features` reports `limits.dashboard_history_days`
+only under `enforce`, so an observed rollout is invisible to users.
+
+Reads of `GET /api/dashboard/usage/by-agent`, the one dashboard endpoint
+fetched once per page load or range change with the range the viewer picked,
+are aggregated per workspace, UTC day, requested days and returned days in
+`dashboard_range_view` while Cloud is connected: view count, reads past the
+limit admitted under a configured observe, admitted because of a downgrade,
+and cut short under enforce, with the latest limit, action and reason. The
+write runs off the request path with its own 500 ms timeout; a failure drops
+the row and never changes the response. It selects its workspace row under
+`FOR KEY SHARE`, so a write racing workspace deletion either waits for it and
+inserts nothing or is removed by it. Counts are read requests, including
+the dashboard's periodic refresh, so use distinct workspaces for reach.

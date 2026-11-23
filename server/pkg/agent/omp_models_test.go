@@ -203,8 +203,9 @@ func TestListModels_OMPIsolatedByExecutablePath(t *testing.T) {
 	resetCache()
 	modelCacheMu.Lock()
 	modelCache["pi"] = modelCacheEntry{
-		models:    []Model{{ID: "pi/sentinel"}},
-		expiresAt: time.Now().Add(modelCacheTTL),
+		models:      []Model{{ID: "pi/sentinel"}},
+		freshUntil:  time.Now().Add(modelCacheTTL),
+		staleUntil:  time.Now().Add(modelCacheStaleTTL),
 	}
 	modelCacheMu.Unlock()
 	t.Cleanup(resetCache)

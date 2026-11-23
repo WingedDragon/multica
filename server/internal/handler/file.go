@@ -953,11 +953,12 @@ func (h *Handler) loadAttachmentForDownload(w http.ResponseWriter, r *http.Reque
 		}
 		return att, true
 	}
-	if _, err := h.getWorkspaceMember(r.Context(), userID, workspaceID); err != nil {
+	member, err := h.getWorkspaceMember(r.Context(), userID, workspaceID)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "attachment not found")
 		return db.Attachment{}, false
 	}
-	h.MembershipCache.Set(r.Context(), userID, workspaceID)
+	h.cacheMembership(r.Context(), member)
 	if !h.requireAttachmentVisible(w, r, workspaceID, att) {
 		return db.Attachment{}, false
 	}
@@ -1646,7 +1647,7 @@ func (h *Handler) attachmentOwnerLockAttempt(ctx context.Context, att db.Attachm
 	if att.IssueID.Valid {
 		// A missing issue is not an error here: its cascade took the attachment
 		// with it, which the re-read below reports as pgx.ErrNoRows.
-		if _, err := qtx.LockIssueForAttachmentWrite(ctx, db.LockIssueForAttachmentWriteParams{
+		if _, err := qtx.LockIssueForWrite(ctx, db.LockIssueForWriteParams{
 			ID:          att.IssueID,
 			WorkspaceID: att.WorkspaceID,
 		}); err != nil && !errors.Is(err, pgx.ErrNoRows) {

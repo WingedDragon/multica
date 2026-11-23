@@ -52,8 +52,59 @@ func TestGitHubSetupRejectsUnverifiedInstallation(t *testing.T) {
 	if len(rows) != 0 {
 		t.Fatalf("unverified installation was persisted: %d bindings", len(rows))
 	}
-	if rec.Code != http.StatusFound || !strings.Contains(rec.Header().Get("Location"), "github_error=missing_authorization") {
-		t.Fatalf("callback = %d %s", rec.Code, rec.Header().Get("Location"))
+	location, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil || rec.Code != http.StatusFound || location.Host != "github.com" || location.Path != "/login/oauth/authorize" || location.Query().Get("client_id") != "test-client" || location.Query().Get("state") == "" {
+		t.Fatalf("callback did not start OAuth: %d %s", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+func TestGitHubSetupReauthorizesExistingInstallation(t *testing.T) {
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "ownership-test-secret")
+	installationID := time.Now().UnixNano()
+	stubGitHubOwnership(t, func(w http.ResponseWriter, r *http.Request) {
+		if !serveGitHubOwnership(t, w, r, installationID) {
+			writeJSON(w, http.StatusOK, map[string]any{"account": map[string]any{"login": "example", "type": "User"}})
+		}
+	})
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM github_installation WHERE installation_id = $1`, installationID)
+	})
+	state, err := signGitHubState(testWorkspaceID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := httptest.NewRecorder()
+	testHandler.GitHubSetupCallback(first, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/github/setup?installation_id=%d&state=%s", installationID, url.QueryEscape(state)), nil))
+	location, err := url.Parse(first.Header().Get("Location"))
+	if err != nil || first.Code != http.StatusFound || location.Path != "/login/oauth/authorize" {
+		t.Fatalf("authorization redirect: %d %s", first.Code, first.Header().Get("Location"))
+	}
+	oauthState := location.Query().Get("state")
+	rows, err := testHandler.Queries.ListGitHubInstallationsByInstallationID(context.Background(), installationID)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("installation was bound before authorization: %v %+v", err, rows)
+	}
+	forgedState := strings.Replace(oauthState, fmt.Sprintf(":%d:", installationID), fmt.Sprintf(":%d:", installationID+1), 1)
+	if forgedState == oauthState {
+		t.Fatal("OAuth state does not bind the installation ID")
+	}
+	forged := httptest.NewRecorder()
+	testHandler.GitHubSetupCallback(forged, httptest.NewRequest(http.MethodGet, "/api/github/setup?code=valid-code&state="+url.QueryEscape(forgedState), nil))
+	if !strings.Contains(forged.Header().Get("Location"), "github_error=invalid_state") {
+		t.Fatalf("tampered installation accepted: %d %s", forged.Code, forged.Header().Get("Location"))
+	}
+	rows, err = testHandler.Queries.ListGitHubInstallationsByInstallationID(context.Background(), installationID+1)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("tampered installation was bound: %v %+v", err, rows)
+	}
+	second := httptest.NewRecorder()
+	testHandler.GitHubSetupCallback(second, httptest.NewRequest(http.MethodGet, "/api/github/setup?code=valid-code&state="+url.QueryEscape(oauthState), nil))
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), "Return to Multica") {
+		t.Fatalf("authorized callback: %d %s", second.Code, second.Body.String())
+	}
+	rows, err = testHandler.Queries.ListGitHubInstallationsByInstallationID(context.Background(), installationID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("authorized installation not bound: %v %+v", err, rows)
 	}
 }
 

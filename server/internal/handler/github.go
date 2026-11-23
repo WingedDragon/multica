@@ -481,11 +481,32 @@ func (h *Handler) GitHubConnect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, GitHubConnectResponse{URL: installURL, Configured: true, ConnectionID: strings.Split(state, ".")[1]})
 }
 
-// GitHubSetupCallback (GET /api/github/setup) handles the redirect GitHub
-// sends after a user installs (or re-authorizes) the App. We expect
-// ?installation_id=<id>&code=<user authorization code>&state=<signed token>.
-// The state authorizes the workspace; user OAuth proves installation access
-// before a new binding is persisted.
+func signGitHubInstallationOAuthState(state string, installationID int64) string {
+	payload := state + ":" + strconv.FormatInt(installationID, 10)
+	mac := hmac.New(sha256.New, []byte(githubWebhookSecret()))
+	mac.Write([]byte(payload))
+	return payload + ":" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func verifyGitHubInstallationOAuthState(state string) (string, string, bool) {
+	parts := strings.Split(state, ":")
+	if len(parts) != 3 {
+		return "", "", false
+	}
+	id, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || id <= 0 {
+		return "", "", false
+	}
+	expected := signGitHubInstallationOAuthState(parts[0], id)
+	if !hmac.Equal([]byte(state), []byte(expected)) {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// GitHubSetupCallback handles the installation redirect and, when necessary,
+// the subsequent user OAuth callback. The signed state binds the workspace and
+// installation; user OAuth proves installation access before a new binding.
 func (h *Handler) GitHubSetupCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	installationIDStr := q.Get("installation_id")
@@ -499,6 +520,15 @@ func (h *Handler) GitHubSetupCallback(w http.ResponseWriter, r *http.Request) {
 	if state == "" {
 		http.Redirect(w, r, settingsURL+"&github_error=missing_params", http.StatusFound)
 		return
+	}
+	oauthCallback := strings.Contains(state, ":")
+	if oauthCallback {
+		var valid bool
+		state, installationIDStr, valid = verifyGitHubInstallationOAuthState(state)
+		if !valid || q.Get("installation_id") != "" {
+			http.Redirect(w, r, settingsURL+"&github_error=invalid_state", http.StatusFound)
+			return
+		}
 	}
 	workspaceID, connectionID, ok := verifyGitHubState(state)
 	if !ok {
@@ -541,6 +571,14 @@ func (h *Handler) GitHubSetupCallback(w http.ResponseWriter, r *http.Request) {
 	// Repository-selection updates may carry no OAuth code. Reuse only a
 	// binding this workspace already has, without recreating or changing it.
 	if !existing {
+		if q.Get("code") == "" && !oauthCallback && q.Get("error") == "" && githubAppClientID() != "" && githubAppClientSecret() != "" {
+			params := url.Values{
+				"client_id": {githubAppClientID()},
+				"state":     {signGitHubInstallationOAuthState(state, installationID)},
+			}
+			http.Redirect(w, r, strings.TrimRight(githubOAuthBase, "/")+"/login/oauth/authorize?"+params.Encode(), http.StatusFound)
+			return
+		}
 		if err := verifyGitHubInstallationOwnership(r.Context(), q.Get("code"), installationID); err != nil {
 			slog.Warn("github: refused unverified installation bind", "err", err,
 				"workspace_id", workspaceID, "installation_id", installationID)

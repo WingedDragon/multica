@@ -1455,24 +1455,24 @@ describe("IssueDetail (shared)", () => {
           deletions: 0,
           changed_files: 0,
         },
-      ],
-    });
-    mockApiObj.listIssueGitLabMergeRequests.mockResolvedValue({
-      merge_requests: [
         {
           id: "mr-1",
+          provider: "gitlab",
           workspace_id: "ws-1",
-          project_path: "group/repo",
-          gitlab_project_id: 101,
-          iid: 7,
+          repo_owner: "group",
+          repo_name: "repo",
+          number: 7,
           title: "GitLab-only MR",
           state: "open",
-          web_url: "https://gitlab.example.test/group/repo/-/merge_requests/7",
-          source_branch: "feat/gitlab",
-          target_branch: "main",
-          author_username: "alice",
+          html_url: "https://gitlab.example.test/group/repo/-/merge_requests/7",
+          branch: "feat/gitlab",
+          author_login: "alice",
           author_avatar_url: null,
-          sha: "abc123",
+          merged_at: null,
+          closed_at: null,
+          pr_created_at: "2026-01-02T00:00:00Z",
+          pr_updated_at: "2026-01-02T00:00:00Z",
+          target_branch: "main",
           detailed_merge_status: "mergeable",
           has_conflicts: false,
           pipeline_status: null,
@@ -1480,10 +1480,6 @@ describe("IssueDetail (shared)", () => {
           additions: 1,
           deletions: 0,
           changed_files: 1,
-          merged_at: null,
-          closed_at: null,
-          mr_created_at: "2026-01-02T00:00:00Z",
-          mr_updated_at: "2026-01-02T00:00:00Z",
         },
       ],
     });
@@ -1500,7 +1496,7 @@ describe("IssueDetail (shared)", () => {
 
     renderIssueDetail();
 
-    await screen.findByText("Details");
+    await screen.findByText("Properties");
     expect(screen.queryByText("Pull/Merge requests")).not.toBeInTheDocument();
   });
 
@@ -1723,6 +1719,22 @@ describe("IssueDetail (shared)", () => {
       await screen.findByRole("button", { name: enCommon.more_actions });
       expect(screen.queryByRole("button", { name: enIssues.detail.open_issue_page })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: enInbox.context_menu.archive })).not.toBeInTheDocument();
+    });
+
+    it("moves status and assignee into the page header while the properties sidebar is closed", async () => {
+      const { container } = renderIssueDetail();
+
+      const toggle = await screen.findByRole("button", { name: enIssues.detail.sidebar_tooltip });
+      expect(container.querySelector('[data-testid="issue-header-actions"]')).toBeNull();
+
+      fireEvent.click(toggle);
+      const headerActions = await waitFor(() => {
+        const el = container.querySelector<HTMLElement>('[data-testid="issue-header-actions"]');
+        expect(el).not.toBeNull();
+        return el!;
+      });
+      expect(headerActions.closest("header")).not.toBeNull();
+      expect(within(headerActions).getByText(enIssues.status.in_progress)).toBeInTheDocument();
     });
 
     it("floats the notification's actions above the composer, after the issue's own", async () => {

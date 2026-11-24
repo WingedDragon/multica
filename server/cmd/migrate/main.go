@@ -140,6 +140,7 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"787_agent_task_queue_doc_idx":                              "idx_agent_task_queue_doc",
 	"742_gitlab_connection_base_url_unique_index":               "gitlab_connection_workspace_base_url_uidx",
 	"736_vcs_gitlab_pipeline_identity_index":                    "vcs_gitlab_pipeline_identity_uidx",
 	"738_gitlab_mr_pipeline_identity_index":                     "gitlab_mr_pipeline_identity_uidx",

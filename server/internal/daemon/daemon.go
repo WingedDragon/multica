@@ -5714,6 +5714,9 @@ func (d *Daemon) runBatchPoller(pollerCtx, parentCtx context.Context, sem chan i
 			if taskTarget == "" && t.ChatSessionID != "" {
 				taskTarget = "chat:" + t.ChatSessionID
 			}
+			if taskTarget == "" && t.DocID != "" {
+				taskTarget = "doc:" + t.DocID
+			}
 			d.logger.Info("task received", "task", t.ID, "target", taskTarget)
 			taskWG.Add(1)
 			d.activeTasks.Add(1)
@@ -6927,6 +6930,9 @@ func gcMetaForTask(task Task) (execenv.GCMeta, bool) {
 	case task.AutopilotRunID != "":
 		meta.Kind = execenv.GCKindAutopilotRun
 		meta.AutopilotRunID = task.AutopilotRunID
+	case task.DocID != "":
+		meta.Kind = execenv.GCKindDoc
+		meta.DocID = task.DocID
 	case task.IssueID != "":
 		meta.Kind = execenv.GCKindIssue
 		meta.IssueID = task.IssueID
@@ -7444,7 +7450,7 @@ func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignmen
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "workdir" {
 		return "", false
 	}
-	if task.AgentID == "" || (task.IssueID == "" && task.ChatSessionID == "") {
+	if task.AgentID == "" || (task.IssueID == "" && task.ChatSessionID == "" && task.DocID == "") {
 		return "", false
 	}
 	// Managed-env provenance is written only for non-local resumable envs, so
@@ -7466,6 +7472,7 @@ func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignmen
 		AgentID       string `json:"agent_id"`
 		IssueID       string `json:"issue_id"`
 		ChatSessionID string `json:"chat_session_id"`
+		DocID         string `json:"doc_id"`
 	}
 	if json.Unmarshal(data, &marker) != nil {
 		return "", false
@@ -7475,6 +7482,12 @@ func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignmen
 	}
 	if task.IssueID != "" {
 		if prov.IssueID != task.IssueID || marker.IssueID != task.IssueID {
+			return "", false
+		}
+		return workdir, true
+	}
+	if task.DocID != "" {
+		if prov.DocID != task.DocID || marker.DocID != task.DocID {
 			return "", false
 		}
 		return workdir, true
@@ -8433,6 +8446,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		ProjectArchived:                  task.ProjectArchived,
 		ProjectResources:                 convertProjectResourcesForEnv(task.ProjectResources),
 		ChatSessionID:                    task.ChatSessionID,
+		DocID:                            task.DocID,
 		ChatChannelType:                  task.ChatChannelType,
 		ChatChannelDeliversFiles:         task.ChatChannelDeliversFiles,
 		DocsEnabled:                      task.DocsEnabled,
@@ -9093,6 +9107,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	supplementSupported := agent.SupportsTaskSupplement(provider, resolvedVersion) && (task.IssueID != "" || task.ChatSessionID != "")
 	if supplementSupported {
 		switch provider {
+		case "hermes":
+			// The version floor describes Hermes Agent. Other CLIs speaking
+			// the Hermes protocol family, such as jcode, have no `/steer`.
+			supplementSupported = !usesCustomProfileCommand
 		case "cursor":
 			supplementHookCommand, supplementSupported = cursorSupplementHookCommand(env)
 		case "antigravity":

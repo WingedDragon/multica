@@ -2959,6 +2959,12 @@ func claimResponseAgentIdentityMatches(resp AgentTaskResponse) bool {
 func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQueue, runtime db.AgentRuntime, runtimeID, runtimeWorkspaceID string) (resp AgentTaskResponse, deliveredCommentIDs []pgtype.UUID, issueSnapshot []byte, agentSkillCount, builtinSkillCount int, failure *claimBuildFailure) {
 	// Build response with fresh agent data (name + skills + custom_env + custom_args).
 	resp = taskToResponse(*task, runtimeWorkspaceID)
+	// Installed daemons treat a non-empty claim `squad_id` as a quick-create
+	// squad-leader signal (daemon/prompt.go:taskIsSquadLeader). Clear the row's
+	// attribution SquadID here so non-leader squad member runs are never promoted
+	// to leader role; the quick-create branch below re-populates resp.SquadID
+	// exclusively when qc.SquadID is present.
+	resp.SquadID = ""
 	if err := (&service.IssueWakeupService{Tasks: h.TaskService}).CheckClaim(r.Context(), *task); err != nil {
 		if !errors.Is(err, service.ErrWakeupForbidden) {
 			return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "wakeup", resp.WakeupID)
@@ -3338,10 +3344,14 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		// Resolved before the leader briefing, which words the owning
 		// leader's status moves by it (MUL-8145).
 		legacyRuntimeRules := !requestHasClientCapability(r, protocol.DaemonCapabilityWorkflowStatusRulesV1)
-		projectWorkflow := h.claimProjectWorkflow(r.Context(), issue, task, legacyRuntimeRules)
+		stepCommands := !requestHasClientCapability(r, protocol.DaemonCapabilityWorkflowStatusMapV1)
+		projectWorkflow := h.claimProjectWorkflow(r.Context(), issue, task, legacyRuntimeRules, stepCommands)
 		leaderWorkflow := leaderNoWorkflow
 		if projectWorkflow != nil {
 			leaderWorkflow = leaderWorkflowCurrentDaemon
+			if projectWorkflow.StatusMap {
+				leaderWorkflow = leaderWorkflowStatusMap
+			}
 			if projectWorkflow.stepMoved {
 				leaderWorkflow = leaderWorkflowStepMoved
 			} else if legacyRuntimeRules {

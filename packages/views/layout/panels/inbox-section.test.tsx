@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@multica/core/api";
+import { useAppearanceStore } from "@multica/core/appearance";
 import { createQueryClient } from "@multica/core/query-client";
 import {
   DEFAULT_SIDEBAR_INBOX_SETTINGS,
@@ -31,6 +32,7 @@ const state = vi.hoisted(() => ({
   archiveCompleted: vi.fn(),
   markRead: vi.fn(),
   markUnread: vi.fn(),
+  deleteInbox: vi.fn(() => Promise.resolve()),
   snooze: vi.fn(() => Promise.resolve()),
   unsnooze: vi.fn(() => Promise.resolve()),
 }));
@@ -67,6 +69,7 @@ vi.mock("@multica/core/inbox/mutations", () => ({
   useArchiveCompletedInbox: () => ({ mutateAsync: async () => (await state.archiveCompleted()) ?? { count: 1 } }),
   useMarkInboxRead: () => ({ mutate: state.markRead }),
   useMarkInboxUnread: () => ({ mutate: state.markUnread }),
+  useDeleteInbox: () => ({ mutateAsync: state.deleteInbox, isPending: false }),
   useUnsubscribeArchiveInbox: () => ({ mutate: state.unsubscribeArchive }),
   undoUnsubscribeArchiveInbox: vi.fn(),
   useSnoozeInbox: () => ({ mutateAsync: state.snooze }),
@@ -84,6 +87,17 @@ vi.mock("@multica/core/workspace/hooks", () => ({
   useActorName: () => ({ getActorName: () => "Leo Park", getActorInitials: () => "LP", getActorAvatarUrl: () => null }),
 }));
 vi.mock("../../common/actor-avatar", () => ({ ActorAvatar: () => null }));
+const contextMenuActionsSeen = vi.hoisted(() => [] as unknown[]);
+vi.mock("../../inbox/components/inbox-context-menu", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../inbox/components/inbox-context-menu")>();
+  return {
+    ...actual,
+    InboxContextMenuProvider: (props: React.ComponentProps<typeof actual.InboxContextMenuProvider>) => {
+      contextMenuActionsSeen.push(props.actions);
+      return actual.InboxContextMenuProvider(props);
+    },
+  };
+});
 vi.mock("../../agents/components/agent-avatar-stack", () => ({
   AgentAvatarStack: ({ agentIds }: { agentIds: string[] }) => <span data-testid="agents">{agentIds.join(",")}</span>,
 }));
@@ -181,7 +195,14 @@ beforeEach(() => {
   // Rows with the actor line; the compact default has tests of its own.
   useSidebarTreeStore.setState({ inboxCollapsed: false, inboxSettings: { ...DEFAULT_SIDEBAR_INBOX_SETTINGS, compact: false } });
   useInboxFilterStore.getState().clearFilters("ws-1");
-  useInboxSelectionStore.setState({ landing: null, heldRows: {}, leftRowKeyByWorkspace: {}, sectionTabByWorkspace: {} });
+  useInboxSelectionStore.setState({
+    landing: null,
+    heldRows: {},
+    leftRowKeyByWorkspace: {},
+    sectionTabByWorkspace: {},
+    sectionTabSyncedUrlByWorkspace: {},
+    transitionByWorkspace: {},
+  });
 });
 
 describe("InboxSection", () => {
@@ -274,7 +295,8 @@ describe("InboxSection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
 
     expect(rows()).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "Filter inbox" })).toBeInTheDocument();
+    // Unfiltered, the filter waits in the actions menu.
+    expect(screen.queryByRole("button", { name: "Filter inbox" })).toBeNull();
   });
 
   it("puts who did what under the title, or keeps one line when compact", () => {
@@ -331,7 +353,7 @@ describe("InboxSection", () => {
 
     expect(actions.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/acme/inbox?issue=issue-a");
     fireEvent.click(actions.getByRole("button", { name: "Mark as read" }));
-    expect(state.markRead).toHaveBeenCalledWith("n1");
+    expect(state.markRead).toHaveBeenCalledWith("n1", expect.any(Object));
     fireEvent.click(actions.getByRole("button", { name: "Archive" }));
     expect(state.archive).toHaveBeenCalledWith("n1");
   });
@@ -466,11 +488,11 @@ describe("InboxSection", () => {
     expect(header()).not.toHaveTextContent("3");
   });
 
-  it("collapses from the section label", () => {
+  it("collapses from the section label", async () => {
     renderSection([item({ id: "n1", issue_id: "issue-a" })]);
     fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
     expect(useSidebarTreeStore.getState().inboxCollapsed).toBe(true);
-    expect(rows()).toHaveLength(0);
+    await waitFor(() => expect(rows()).toHaveLength(0));
   });
 
   it("collapses from its open tab, and a closed tab opens the section on that list", () => {
@@ -489,8 +511,10 @@ describe("InboxSection", () => {
   it("names only the open tab on screen, and keeps focus on the tab the arrow keys move to", () => {
     renderSection([item({ id: "n1", issue_id: "issue-a" })]);
     const tablist = screen.getByRole("tablist");
-    expect(within(tablist).getByText("Inbox")).not.toHaveClass("sr-only");
-    expect(within(tablist).getByText("Snoozed")).toHaveClass("sr-only");
+    // A closed tab's name is folded away, still naming the tab for a screen reader.
+    const label = (name: string) => within(tablist).getByText(name).closest("[data-tab-label]");
+    expect(label("Inbox")).not.toHaveClass("opacity-0");
+    expect(label("Snoozed")).toHaveClass("w-0", "opacity-0");
 
     const inbox = screen.getByRole("tab", { name: /^Inbox/ });
     inbox.focus();
@@ -498,15 +522,28 @@ describe("InboxSection", () => {
     const snoozed = screen.getByRole("tab", { name: /^Snoozed/ });
     expect(snoozed).toHaveAttribute("aria-selected", "true");
     expect(snoozed).toHaveFocus();
-    expect(within(tablist).getByText("Snoozed")).not.toHaveClass("sr-only");
+    expect(label("Snoozed")).not.toHaveClass("opacity-0");
+    expect(label("Inbox")).toHaveClass("w-0", "opacity-0");
   });
 
-  it("opens the display settings from the actions menu", async () => {
+  it("opens the display settings from their own button, as the other sections do", async () => {
     renderSection([item({ id: "n1", issue_id: "issue-a" })]);
-    expect(screen.queryByRole("button", { name: "Inbox display" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Inbox display" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("opens the filter from the actions menu", async () => {
+    renderSection([item({ id: "n1", issue_id: "issue-a" })]);
+    expect(screen.queryByRole("button", { name: "Filter inbox" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Inbox actions" }));
-    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Inbox display" }));
-    expect(await screen.findByRole("dialog", { name: "Inbox display" })).toBeInTheDocument();
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Filter" }));
+    expect(await screen.findByPlaceholderText("Filter by field or value...")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Read state/ }));
+    fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: /^Unread/ }));
+    expect(useInboxFilterStore.getState().filtersByWorkspace["ws-1"]?.unreadOnly).toBe(true);
+    expect(screen.getByPlaceholderText("Filter by field or value...")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "1 active filter" })).toBeInTheDocument();
   });
 
   it("is the whole list on a wide screen: no link out to another one, and a plain line when empty", () => {
@@ -558,7 +595,119 @@ describe("InboxSection", () => {
     fireEvent.click(within(await open()).getByRole("menuitem", { name: "Archive completed" }));
     expect(state.archiveCompleted).toHaveBeenCalledTimes(1);
     fireEvent.click(within(await open()).getByRole("menuitem", { name: "Archive all" }));
+    expect(state.archiveAll).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Archive all" }));
     expect(state.archiveAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels archive all without mutating when dismissed from the confirmation dialog", async () => {
+    renderSection([item({ id: "n1", issue_id: "issue-a" })]);
+    fireEvent.click(screen.getByRole("button", { name: "Inbox actions" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Archive all" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(state.archiveAll).not.toHaveBeenCalled();
+  });
+
+  it("shows the unfiltered active row count in the archive-all dialog even when filters narrow the list", async () => {
+    useInboxFilterStore.getState().toggleUnreadOnly("ws-1");
+    renderSection([
+      item({ id: "n1", issue_id: "issue-a", read: false }),
+      item({ id: "n2", issue_id: "issue-b", read: true }),
+      item({ id: "n3", issue_id: "issue-c", read: true }),
+      // Duplicate notification for issue-c should not double-count.
+      item({ id: "n4", issue_id: "issue-c", read: true, created_at: "2026-11-10T07:00:00Z" }),
+      // Snoozed issue is left untouched by archive-all and must not be counted.
+      item({ id: "n5", issue_id: "issue-d", read: false, snoozed_until: "2099-01-01T09:00:00Z" }),
+    ]);
+
+    expect(rows()).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Inbox actions" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Archive all" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("All 3 active notifications in your inbox will move to Archived.");
+  });
+
+  it("keeps InboxContextMenuProvider actions referentially stable across navigation re-renders", () => {
+    contextMenuActionsSeen.length = 0;
+    const items = [
+      item({ id: "n1", issue_id: "issue-a", title: "Row A" }),
+      item({ id: "n2", issue_id: "issue-b", title: "Row B", created_at: "2026-11-10T07:00:00Z" }),
+    ];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    client.setQueryData(["inbox", "ws-1", "list"], items);
+    client.setQueryData(snoozedInboxOptions("ws-1").queryKey, []);
+    client.setQueryData(agentListOptions("ws-1").queryKey, []);
+    client.setQueryData(agentTaskSnapshotOptions("ws-1").queryKey, []);
+
+    const nav = adapter("/acme/issues");
+    let setPathname!: (next: string) => void;
+    function NavigatingHarness() {
+      const [pathname, updatePathname] = useState("/acme/issues");
+      setPathname = updatePathname;
+      return <Harness pathname={pathname} openKey={null} />;
+    }
+
+    renderWithI18n(
+      <QueryClientProvider client={client}>
+        <NavigationProvider value={nav}>
+          <NavigatingHarness />
+        </NavigationProvider>
+      </QueryClientProvider>,
+    );
+    expect(rows()).toHaveLength(2);
+    const initialActions = contextMenuActionsSeen.at(-1);
+    expect(initialActions).toBeDefined();
+
+    act(() => setPathname("/acme/projects"));
+    expect(contextMenuActionsSeen.length).toBeGreaterThanOrEqual(2);
+    expect(contextMenuActionsSeen.at(-1)).toBe(initialActions);
+  });
+
+  it("offers right-click mark unread and delete on desktop sidebar rows", async () => {
+    state.deleteInbox.mockClear();
+    useInboxSelectionStore.setState({ manualUnreadIdByWorkspace: {} });
+    const { nav } = renderSection(
+      [
+        item({ id: "n1", issue_id: "issue-a", title: "Open one", read: true }),
+        item({ id: "n2", issue_id: "issue-b", title: "Next one", read: true, created_at: "2026-11-09T08:00:00Z" }),
+      ],
+      "issue-a",
+      "/acme/inbox?issue=issue-a",
+    );
+
+    fireEvent.contextMenu(rows()[0]!.firstElementChild!);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Mark as unread" }));
+    expect(state.markUnread).toHaveBeenCalledWith("n1", expect.any(Object));
+    expect(useInboxSelectionStore.getState().manualUnreadIdByWorkspace["ws-1"]).toBe("n1");
+
+    fireEvent.contextMenu(rows()[0]!.firstElementChild!);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(state.deleteInbox).toHaveBeenCalledWith("n1"));
+    expect(nav.push).toHaveBeenCalledWith("/acme/inbox?issue=issue-b");
+  });
+
+  it("offers right-click unarchive and delete on archived sidebar rows", async () => {
+    state.deleteInbox.mockClear();
+    apiMock.listArchivedInboxPage.mockResolvedValue({
+      items: [item({ id: "a1", issue_id: "issue-a", title: "Archived one", archived: true })],
+      nextCursor: null,
+      hasMore: false,
+    });
+    renderSection([], null, "/acme/inbox?view=archived");
+    const archivedRow = await screen.findByRole("link", { name: /^Archived one/ });
+    fireEvent.contextMenu(archivedRow.parentElement!);
+
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).queryByRole("menuitem", { name: "Mark as unread" })).toBeNull();
+    expect(within(menu).getByRole("menuitem", { name: "Unarchive" })).toBeInTheDocument();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(state.deleteInbox).toHaveBeenCalledWith("a1"));
   });
 
   it("opens the next row a bulk archive leaves when it takes the open one", async () => {
@@ -580,6 +729,8 @@ describe("InboxSection", () => {
     const { nav } = renderSection([item({ id: "n1", issue_id: "issue-a", title: "Open one" })], "issue-a");
     fireEvent.click(screen.getByRole("button", { name: "Inbox actions" }));
     fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Archive all" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Archive all" }));
     expect(state.archiveAll).toHaveBeenCalledTimes(1);
     expect(nav.push).toHaveBeenCalledWith("/acme/inbox");
     expect(useInboxSelectionStore.getState().leftRowKeyByWorkspace["ws-1"]).toBe("issue-a");
@@ -639,16 +790,44 @@ describe("InboxSection", () => {
     expect(tab).toHaveTextContent("1");
     fireEvent.click(tab);
     expect(tab).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("link", { name: /^MUL-26/ })).toHaveAttribute("href", "/acme/inbox?view=snoozed&issue=issue-z");
     expect(rows()).toHaveLength(0);
-    expect(screen.getByRole("link", { name: /^MUL-26/ })).toHaveAttribute("href", "/acme/inbox?view=snoozed&issue=issue-z");
-    // The bulk actions act on the live Inbox; the menu keeps only the display settings here.
-    fireEvent.click(screen.getByRole("button", { name: "Inbox actions" }));
-    expect(within(await screen.findByRole("menu")).getAllByRole("menuitem").map((el) => el.textContent)).toEqual([
-      "Inbox display",
-    ]);
+    // The bulk actions act on the live Inbox and snoozed issues have no filter: no actions menu here.
+    expect(screen.queryByRole("button", { name: "Inbox actions" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Bring back now" }));
     expect(state.unsnooze).toHaveBeenCalledWith(expect.objectContaining({ id: "z1" }));
+  });
+
+  it("swaps the lists at once with reduced motion", () => {
+    useAppearanceStore.getState().set({ reduceMotion: true });
+    renderSection([item({ id: "n1", issue_id: "issue-a" })], null, "/acme/issues", [], [
+      { issue_id: "issue-z", issue_identifier: "MUL-26", item_id: "z1", snoozed_until: "2099-01-01T09:00:00Z", snoozed_at: "2026-11-10T09:00:00Z", updates: 0 },
+    ]);
+    try {
+      fireEvent.click(screen.getByRole("tab", { name: /^Snoozed/ }));
+      expect(rows()).toHaveLength(0);
+      expect(screen.getByRole("link", { name: /^MUL-26/ })).toBeInTheDocument();
+    } finally {
+      useAppearanceStore.getState().reset();
+    }
+  });
+
+  it("lets go of the list's height when another tab opens while the archive is still loading", async () => {
+    apiMock.listArchivedInboxPage.mockReturnValue(new Promise(() => {}));
+    renderSection([item({ id: "n1", issue_id: "issue-a" })], null, "/acme/issues", [], [
+      { issue_id: "issue-z", issue_identifier: "MUL-26", item_id: "z1", snoozed_until: "2099-01-01T09:00:00Z", snoozed_at: "2026-11-10T09:00:00Z", updates: 0 },
+    ]);
+    const body = () => document.querySelector<HTMLElement>("[data-inbox-body]")!;
+
+    fireEvent.click(screen.getByRole("tab", { name: /^Archived/ }));
+    await waitFor(() => expect(rows()).toHaveLength(0));
+    expect(body()).toHaveClass("overflow-hidden");
+
+    fireEvent.click(screen.getByRole("tab", { name: /^Snoozed/ }));
+    expect(await screen.findByRole("link", { name: /^MUL-26/ })).toBeInTheDocument();
+    await waitFor(() => expect(body()).not.toHaveClass("overflow-hidden"));
+    expect(body().style.height).not.toMatch(/px$/);
   });
 
   it("lists the archive in a tab, each row opening there and restoring from its button", async () => {
@@ -688,15 +867,125 @@ describe("InboxSection", () => {
     fireEvent.click(restoreOpen!);
     expect(nav.replace).toHaveBeenCalledWith("/acme/inbox?view=archived&issue=issue-y");
     expect(state.unarchive).toHaveBeenCalledWith("a1");
+    expect(useInboxSelectionStore.getState().leftRowKeyByWorkspace["ws-1"]).toBe("issue-x");
+    expect(useInboxSelectionStore.getState().transitionByWorkspace["ws-1"]).toMatchObject({
+      targetKey: "issue-y",
+      direction: "next",
+    });
   });
 
-  it("follows the Inbox page's tab there, and switches the page's tab from the header", () => {
+  it("follows the Inbox page's tab there, and switches the page's tab from the header when nothing is open", () => {
     const { nav } = renderSection([item({ id: "n1", issue_id: "issue-a" })], null, "/acme/inbox?view=archived");
     expect(screen.getByRole("tab", { name: /^Archived/ })).toHaveAttribute("aria-selected", "true");
 
     fireEvent.click(screen.getByRole("tab", { name: /^Inbox/ }));
     expect(nav.replace).toHaveBeenCalledWith("/acme/inbox");
     expect(useInboxSelectionStore.getState().sectionTabByWorkspace["ws-1"]).toBe("inbox");
+  });
+
+  it("keeps an open archived issue on screen when switching sidebar tabs, and keeps it lit when switching back", async () => {
+    useAppearanceStore.getState().set({ reduceMotion: true });
+    apiMock.listArchivedInboxPage.mockResolvedValue({
+      items: [item({ id: "a1", issue_id: "issue-x", title: "Archived one", archived: true })],
+      nextCursor: null,
+      hasMore: false,
+    });
+    try {
+      const { nav } = renderSection(
+        [item({ id: "n1", issue_id: "issue-a", title: "Live one" })],
+        null,
+        "/acme/inbox?view=archived&issue=issue-x",
+      );
+      expect(await screen.findByRole("link", { name: /^Archived one/ })).toHaveAttribute("aria-current", "page");
+
+      fireEvent.click(screen.getByRole("tab", { name: /^Inbox/ }));
+      expect(nav.replace).not.toHaveBeenCalled();
+      expect(screen.getByRole("tab", { name: /^Inbox/ })).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByRole("link", { name: /^Live one/ })).not.toHaveAttribute("aria-current");
+
+      fireEvent.click(screen.getByRole("tab", { name: /^Archived/ }));
+      expect(nav.replace).not.toHaveBeenCalled();
+      expect(screen.getByRole("tab", { name: /^Archived/ })).toHaveAttribute("aria-selected", "true");
+      expect(await screen.findByRole("link", { name: /^Archived one/ })).toHaveAttribute("aria-current", "page");
+    } finally {
+      useAppearanceStore.getState().reset();
+    }
+  });
+
+  it("keeps an open live Inbox or Snoozed issue on screen when switching sidebar tabs", async () => {
+    useAppearanceStore.getState().set({ reduceMotion: true });
+    apiMock.listArchivedInboxPage.mockResolvedValue({
+      items: [item({ id: "a1", issue_id: "issue-x", title: "Archived one", archived: true })],
+      nextCursor: null,
+      hasMore: false,
+    });
+    try {
+      const first = renderSection([item({ id: "n1", issue_id: "issue-a", title: "Live one" })], "issue-a");
+      fireEvent.click(screen.getByRole("tab", { name: /^Archived/ }));
+      expect(first.nav.replace).not.toHaveBeenCalled();
+      expect(await screen.findByRole("link", { name: /^Archived one/ })).toBeInTheDocument();
+      first.unmount();
+
+      useInboxSelectionStore.setState({ sectionTabByWorkspace: {}, sectionTabSyncedUrlByWorkspace: {} });
+      const second = renderSection(
+        [item({ id: "n1", issue_id: "issue-a", title: "Live one" })],
+        null,
+        "/acme/inbox?view=snoozed&issue=issue-z",
+        [],
+        [
+          {
+            issue_id: "issue-z",
+            issue_identifier: "MUL-26",
+            item_id: "z1",
+            snoozed_until: "2099-01-01T09:00:00Z",
+            snoozed_at: "2026-11-10T09:00:00Z",
+            updates: 0,
+          },
+        ],
+      );
+      fireEvent.click(screen.getByRole("tab", { name: /^Inbox/ }));
+      expect(second.nav.replace).not.toHaveBeenCalled();
+      expect(screen.getByRole("link", { name: /^Live one/ })).toBeInTheDocument();
+    } finally {
+      useAppearanceStore.getState().reset();
+    }
+  });
+
+  it("keeps an open archived row visible past the limit and offers Load more when more pages exist within the limit", async () => {
+    useSidebarTreeStore.setState({ inboxSettings: { ...DEFAULT_SIDEBAR_INBOX_SETTINGS, limit: 5 } });
+    apiMock.listArchivedInboxPage.mockResolvedValue({
+      items: [
+        ...Array.from({ length: 5 }, (_, i) =>
+          item({ id: `a${i + 1}`, issue_id: `issue-${i + 1}`, title: `Row ${i + 1}`, archived: true }),
+        ),
+        item({ id: "a6", issue_id: "issue-6", title: "Open archived", archived: true }),
+      ],
+      nextCursor: "c2",
+      hasMore: true,
+    });
+    const first = renderSection([], null, "/acme/inbox?view=archived&issue=issue-6");
+    expect(await screen.findByRole("link", { name: /^Open archived/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Show 1 more..." })).toBeInTheDocument();
+    first.unmount();
+
+    useSidebarTreeStore.setState({ inboxSettings: { ...DEFAULT_SIDEBAR_INBOX_SETTINGS, limit: 10 } });
+    apiMock.listArchivedInboxPage.mockResolvedValue({
+      items: [item({ id: "a1", issue_id: "issue-1", title: "Only page row", archived: true })],
+      nextCursor: "c2",
+      hasMore: true,
+    });
+    renderSection([], null, "/acme/inbox?view=archived");
+    expect(await screen.findByRole("button", { name: "Load more" })).toBeInTheDocument();
+  });
+
+  it("says when filters hide every archived row and offers to clear them", async () => {
+    useInboxFilterStore.getState().toggleFilterValue("ws-1", "type", "mentions");
+    apiMock.listArchivedInboxPage.mockResolvedValue({ items: [], nextCursor: null, hasMore: false });
+    renderSection([], null, "/acme/inbox?view=archived");
+
+    expect(await screen.findByText("No notifications match your filters")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(useInboxFilterStore.getState().filtersByWorkspace["ws-1"]).toBeUndefined();
   });
 });
 
@@ -949,5 +1238,24 @@ describe("InboxSection while the Inbox loads", () => {
     expect(apiMock.listInbox).toHaveBeenCalledTimes(5);
     expect(rows().map((row) => row.textContent)).toEqual([expect.stringContaining("Still here")]);
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("InboxSection kept open row while an agent works", () => {
+  it("shows the running agent status on the kept row instead of generic Archived", async () => {
+    const first = item({ id: "n1", issue_id: "issue-a", title: "Run agent on this", read: true });
+    const second = item({ id: "n2", issue_id: "issue-b", title: "Next item", read: true });
+    const { client } = renderSection(
+      [first, second],
+      "issue-a",
+      "/acme/inbox?issue=issue-a",
+      [{ id: "t1", issue_id: "issue-a", agent_id: "agent-1", status: "running" }],
+    );
+    // The open issue is auto-archived while its agent runs.
+    act(() => client.setQueryData(["inbox", "ws-1", "list"], [second]));
+
+    expect(
+      await screen.findByText("Leo Park is working · Leaves the Inbox when you move on"),
+    ).toBeInTheDocument();
   });
 });

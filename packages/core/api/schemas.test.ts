@@ -23,6 +23,7 @@ import {
   FALLBACK_AUTOPILOT_RUN,
   CommentTriggerPreviewSchema,
   DashboardAgentRunTimeListSchema,
+  DashboardSquadRunTimeListSchema,
   DashboardRunTimeDailyListSchema,
   DashboardFailureByAgentListSchema,
   DashboardFailureDailyListSchema,
@@ -1466,6 +1467,20 @@ describe("dashboard + runtime usage schema drift", () => {
     ]);
     expect(parsed).toHaveLength(1);
     expect(parsed[0]?.agent_id).toBe("");
+  });
+  it("preserves squad IDs in squad-runtime rows", () => {
+    const parsed = DashboardSquadRunTimeListSchema.parse([
+      {
+        squad_id: "squad-1",
+        agent_id: "agent-1",
+        total_seconds: 42,
+        task_count: 3,
+        failed_count: 0,
+      },
+    ]);
+    expect(parsed[0]?.squad_id).toBe("squad-1");
+    expect(parsed[0]?.agent_id).toBe("agent-1");
+    expect(parsed[0]?.cancelled_count).toBe(0);
   });
 
   it("defaults a missing cancelled_count to 0 so a pre-cancelled-count server still renders", () => {

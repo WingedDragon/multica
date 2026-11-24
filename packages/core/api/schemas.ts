@@ -2501,6 +2501,12 @@ export const DashboardUsageByAgentListSchema = z.array(
   DashboardUsageByAgentSchema,
 );
 
+const DashboardUsageBySquadSchema = DashboardUsageByAgentSchema.extend({
+  squad_id: z.string().default(""),
+}).loose();
+
+export const DashboardUsageBySquadListSchema = z.array(DashboardUsageBySquadSchema);
+
 // `cancelled_count` defaults to 0 so an installed client pointed at a
 // backend that predates it still renders: those rows simply carry no
 // cancelled segment, which is exactly what that backend measured.
@@ -2516,6 +2522,12 @@ const DashboardAgentRunTimeSchema = z.object({
 export const DashboardAgentRunTimeListSchema = z.array(
   DashboardAgentRunTimeSchema,
 );
+
+const DashboardSquadRunTimeSchema = DashboardAgentRunTimeSchema.extend({
+  squad_id: z.string().default(""),
+}).loose();
+
+export const DashboardSquadRunTimeListSchema = z.array(DashboardSquadRunTimeSchema);
 
 const DashboardRunTimeDailySchema = z
   .object({
@@ -2561,6 +2573,14 @@ const DashboardFailureByAgentSchema = z
 
 export const DashboardFailureByAgentListSchema = z.array(
   DashboardFailureByAgentSchema,
+);
+
+const DashboardFailureBySquadSchema = DashboardFailureByAgentSchema.extend({
+  squad_id: z.string().default(""),
+}).loose();
+
+export const DashboardFailureBySquadListSchema = z.array(
+  DashboardFailureBySquadSchema,
 );
 
 // Runtime usage schemas — the runtime-detail page's four usage endpoints
@@ -2779,6 +2799,8 @@ export const AgentTaskSchema = z.object({
   created_at: z.string().default(""),
   chat_session_id: z.string().optional(),
   autopilot_run_id: z.string().optional(),
+  squad_id: z.string().optional().catch(undefined),
+  is_leader_task: z.boolean().optional().catch(undefined),
   parent_task_id: z.string().optional(),
   attempt: z.number().optional(),
   trigger_comment_id: z.string().optional(),

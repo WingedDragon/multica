@@ -295,7 +295,7 @@ func writeAvailableCommands(b *strings.Builder, ctx TaskContextForEnv) {
 	b.WriteString("- `multica issue wakeup <create|list|get|update|disable|trigger|delete|runs|events>` — persist an event, condition or time wakeup on this issue, then finish the current run. When the platform can check the fact itself, use one `--until-*` condition so no run starts before it holds; check the rule's `last_error` for missing PR links or snapshots, which are retried automatically. Conditions, PR rules and actor filters: `multica issue wakeup create --help` and the multica-platform issues reference.\n")
 	b.WriteString("- `multica issue children <id> [--output json]` — list a parent's sub-issues grouped by stage.\n")
 	if ctx.DocsEnabled {
-		b.WriteString("- `multica doc list|search|get|create|edit|update|move|history|restore|comment|folder` — workspace docs and folders (`doc folder list|create|update|move`); `doc search <query>` matches titles and content; people may be editing a doc live, so change part of it with `doc edit <id> --old <exact text> --new <text>`; `doc update` rewrites the whole doc and needs `--base-revision` from `multica doc get`; `doc comment list <id>` shows the open review threads on a doc; `doc history` / `doc restore` read and roll back versions (details: `multica doc --help`).\n")
+		b.WriteString("- `multica doc list|search|get|create|edit|update|move|history|restore|comment|folder` — workspace docs and folders (`doc folder list|create|update|move`); `doc search <query>` matches titles and content; people may be editing a doc live, so change part of it with `doc edit <id> --old <exact text> --new <text>` (`--old-file` / `--new-file` for multi-line text or anything with code or quotes); `doc update` rewrites the whole doc and needs `--base-revision` from `multica doc get`; `doc comment list <id>` shows the open review threads on a doc; `doc history` / `doc restore` read and roll back versions (details: `multica doc update --help`, `multica doc edit --help`).\n")
 	}
 	b.WriteString("- `multica issue comment add <issue-id> [--content \"...\" | --content-file <path> | --content-stdin] [--parent <comment-id>] [--attachment <path>]` — post a comment. Agent-authored bodies MUST use `--content-file` with a file inside your working directory; full flags: `multica issue comment add --help`.\n")
 	b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>] [--fresh]` — repository checkout on a dedicated branch; re-running it keeps a checkout that has uncommitted or unpushed work, or is already on this task's branch, and only fetches; a clean, fully pushed checkout on another branch starts over on a new branch. `--fresh` discards uncommitted and untracked files for a new branch; commits stay on the old branch, so push any you still need first.\n\n")
@@ -363,6 +363,10 @@ func writeIssueStatusCommand(b *strings.Builder, ctx TaskContextForEnv) {
 	// compete with it — built-ins the workflow may reject included. The line
 	// stays as the command's reference for other issues, and is fixed text so
 	// the cache prefix splits only on whether a workflow is present (MUL-8145).
+	if ctx.HasProjectWorkflow && ctx.ProjectWorkflowStatusMap {
+		b.WriteString("- `multica issue status <id> <status>` — flip status. This issue's status map is in `[Project workflow]`; for other issues, an invalid status errors with the full valid list.\n")
+		return
+	}
 	if ctx.HasProjectWorkflow {
 		b.WriteString("- `multica issue status <id> <status>` — flip status. This issue's statuses and commands are in `[Project workflow]`; for other issues, an invalid status errors with the full valid list.\n")
 		return
@@ -707,6 +711,11 @@ func writeWorkflowIssue(b *strings.Builder, ctx TaskContextForEnv) {
 	} else {
 		b.WriteString("4. **Post your final results as a comment — this step is mandatory**: post it with `multica issue comment add` using the platform-correct non-inline mode from ## Comment Formatting (never inline `--content`). When the per-turn user message carries a triggering comment, reply in its thread with the `--parent` value it gives you for THIS turn (never one from an earlier turn); when it lists several threads, post one reply per thread. With no triggering comment, post a new top-level comment. `## Output` states why this call is the only delivery channel.\n")
 	}
+	if ctx.HasProjectWorkflow && ctx.ProjectWorkflowStatusMap {
+		b.WriteString("5. Before exiting, confirm the issue's status in `[Project workflow]` matches where things actually stand.\n\n")
+		writeIssueStatusRulesForStatusMap(b, ctx)
+		return
+	}
 	if ctx.HasProjectWorkflow {
 		b.WriteString("5. Before exiting, confirm the issue sits where things actually stand: you ran the matching command from `[Project workflow]`, or you left it at its current step on purpose because its work continues.\n\n")
 		writeIssueStatusRulesForWorkflow(b, ctx)
@@ -722,12 +731,26 @@ func writeWorkflowIssue(b *strings.Builder, ctx TaskContextForEnv) {
 	if ctx.IsSquadLeader {
 		b.WriteString("- Squad leader: dispatching members is not delivery — a dispatch turn leaves the parent `in_progress`, and it moves to `in_review` only on the later turn (a member update or stage-barrier re-trigger) where you confirm the overall goal is met.\n")
 	}
-	// A custom catalog needs one reminder that workflow updates use exact keys.
+	// A custom catalog needs one reminder that the key rules above use exact
+	// keys. It names them and precedes the closed rule, which does pick by
+	// category, so the reminder cannot read as covering that rule too.
 	if len(ctx.IssueStatuses) > 0 {
-		b.WriteString("- The workflow rules above refer to exact built-in status keys, not categories. Custom statuses share lifecycle semantics only, not built-in automation behavior.\n")
+		b.WriteString("- The `in_progress` / `in_review` / `blocked` rules above refer to exact built-in status keys, not categories. Custom statuses share lifecycle semantics only, not built-in automation behavior.\n")
 	}
-	b.WriteString("- Your turn produced none of the issue's own deliverable — you answered a question or consulted on work owned elsewhere → write nothing, at any point; questions, discussion, and acknowledgements never touch status. This no-write default is what keeps concurrent runs from flapping the board.\n\n")
+	b.WriteString(issueStatusClosedRule)
+	b.WriteString(issueStatusNoWriteRule)
 }
+
+// issueStatusClosedRule and issueStatusNoWriteRule are the status rules an
+// issue follows with or without a project workflow: a closed-category status
+// is how an agent records that the work will not be done, whichever status
+// list it picks from (MUL-9913). Category names stay plain text, as in
+// writeIssueStatusCommand (MUL-7379); the duplicate mark's full command is
+// duplicateOfCommandLine in the command list.
+const (
+	issueStatusClosedRule  = "- The work won't be done — out of scope, not reproducible, a duplicate → a status in the closed category that fits (`cancelled` when there are no custom statuses); comment why first, and mark a duplicate with `--duplicate-of` (see `## Available Commands`).\n"
+	issueStatusNoWriteRule = "- Your turn produced none of the issue's own deliverable — you answered a question or consulted on work owned elsewhere → write nothing, at any point; questions, discussion, and acknowledgements never touch status. This no-write default is what keeps concurrent runs from flapping the board.\n\n"
+)
 
 // writeIssueStatusRulesForWorkflow replaces the built-in status rules for an
 // issue whose project workflow came with the claim (MUL-8145). The workflow
@@ -747,7 +770,27 @@ func writeIssueStatusRulesForWorkflow(b *strings.Builder, ctx TaskContextForEnv)
 	if ctx.IsSquadLeader {
 		b.WriteString("- Squad leader: dispatching members is not delivery — a dispatch turn leaves the parent at its current step, and you run Step done only on the later turn (a member update or stage-barrier re-trigger) where you confirm the overall goal is met.\n")
 	}
-	b.WriteString("- Your turn produced none of the issue's own deliverable — you answered a question or consulted on work owned elsewhere → write nothing, at any point; questions, discussion, and acknowledgements never touch status. This no-write default is what keeps concurrent runs from flapping the board.\n\n")
+	b.WriteString(issueStatusNoWriteRule)
+}
+
+// writeIssueStatusRulesForStatusMap states the rules for an issue whose
+// [Project workflow] block is a status map (MUL-9913): the block says what
+// each status means and who entering it hands off to, and the agent sets the
+// one that matches where the issue stands. These rules stay here, as fixed
+// text, so the per-turn block carries only the map and the cache prefix
+// splits only on the brief's form.
+func writeIssueStatusRulesForStatusMap(b *strings.Builder, ctx TaskContextForEnv) {
+	b.WriteString("**Issue status — this issue follows its project workflow** (skip any status call your Agent Identity forbids)\n\n")
+	b.WriteString("`[Project workflow]` is this issue's status map. When your work changes where the issue stands, set the status whose meaning matches.\n\n")
+	b.WriteString("- Entering a status that hands off reassigns the issue and starts its handler's run: go there only once your part is done. A status you handle starts your run by itself — add no wakeup for that. A status without a handler hands nothing off: the work stays yours until it is delivered or reaches one that does.\n")
+	b.WriteString("- At a step you handle, follow its Routes line. Otherwise, delivered work goes to the status meaning delivered; leave done-category statuses to a human unless Routes leads there or the map has no delivered status.\n")
+	b.WriteString(issueStatusClosedRule)
+	b.WriteString("- Work continues beyond this turn → leave the status.\n")
+	b.WriteString("- You cannot proceed without something you are missing → comment what is missing, then: at a done- or closed-category status, its send-back route if it has one; elsewhere `blocked` when the map has it, else your step's send-back route when it has one.\n")
+	if ctx.IsSquadLeader {
+		b.WriteString("- Squad leader: dispatching members is not delivery — move the parent on only on a later turn that confirms the current step's goal is met.\n")
+	}
+	b.WriteString(issueStatusNoWriteRule)
 }
 
 // writeSubIssueCreation emits the Sub-issue Creation section.

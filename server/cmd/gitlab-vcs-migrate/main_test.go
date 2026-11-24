@@ -43,6 +43,16 @@ func TestParseOptionsRequiresUTCReplayWindow(t *testing.T) {
 		}
 	}
 }
+
+func TestParseOptionsConfigurationOnly(t *testing.T) {
+	got, err := parseOptions([]string{"verify-hooks", "--since", "2026-11-23T10:00:00Z", "--configuration-only"})
+	if err != nil || !got.configurationOnly {
+		t.Fatalf("configuration-only verification = %#v, err=%v", got, err)
+	}
+	if _, err := parseOptions([]string{"finalize", "--configuration-only"}); err == nil {
+		t.Fatal("configuration-only accepted for finalize")
+	}
+}
 func TestParseOptionsAcceptsExactSystemHookAttestationOrigins(t *testing.T) {
 	tests := []struct {
 		command string

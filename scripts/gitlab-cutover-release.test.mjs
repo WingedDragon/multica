@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:net";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,9 +71,12 @@ if [[ "$PWD" == "$MULTICA_TEST_REMOTE_DIR"* ]]; then
     "rev-parse --abbrev-ref HEAD") echo "$MULTICA_TEST_BRANCH" ;;
     "status --porcelain")
       case "$MULTICA_TEST_SCENARIO" in
-        restored_new_head|restored_unknown_dir)
-          printf '?? .gitlab-vcs-cutover.state\\n?? %s/\\n' "$MULTICA_TEST_RESTORED_DIR"
-          if [ "$MULTICA_TEST_SCENARIO" = "restored_unknown_dir" ]; then printf '?? %s/\\n' "$MULTICA_TEST_UNKNOWN_CUTOVER_DIR"; fi
+        restored_new_head|restored_unknown_dir|begin_failure_retry|active_pending_retry)
+          printf '?? .gitlab-vcs-cutover.state\\n'
+          for snapshot in "$MULTICA_TEST_REMOTE_DIR"/.gitlab-vcs-cutover-*; do
+            [ -d "$snapshot" ] || continue
+            printf '?? %s/\\n' "\${snapshot##*/}"
+          done
           ;;
       esac
       ;;
@@ -141,6 +144,8 @@ if [ "$1" = up ]; then
     printf 'complete\\nfalse\\n0\\nfalse\\n' >"$MULTICA_TEST_STATE_DIR/state"
   elif [ "$MULTICA_TEST_SCENARIO" = restore_failure ]; then
     printf 'maintenance\\ntrue\\n0\\nfalse\\n' >"$MULTICA_TEST_STATE_DIR/state"
+  elif [[ "$MULTICA_TEST_SCENARIO" == restored_new_head || "$MULTICA_TEST_SCENARIO" == restored_unknown_dir || "$MULTICA_TEST_SCENARIO" == begin_failure_retry || "$MULTICA_TEST_SCENARIO" == active_pending_retry ]]; then
+    :
   else
     printf 'maintenance\\ntrue\\n0\\ntrue\\n' >"$MULTICA_TEST_STATE_DIR/state"
   fi
@@ -191,8 +196,19 @@ case "$cmd" in
     status_json
     ;;
   begin)
-    phase="$(sed -n '1p' "$state_file")"; generation="$(sed -n '3p' "$state_file")"
-    [ "$generation" -gt 0 ] || generation=1
+    if [ "$MULTICA_TEST_SCENARIO" = begin_failure_retry ] && [ ! -e "$MULTICA_TEST_STATE_DIR/begin_failed" ]; then
+      : >"$MULTICA_TEST_STATE_DIR/begin_failed"
+      echo "mock begin failed before advancing database generation" >&2
+      exit 21
+    fi
+    phase="$(sed -n '1p' "$state_file")"
+    generation="$(sed -n '3p' "$state_file")"
+    if [ "$phase" = restored ]; then
+      phase=maintenance
+      generation=$((generation + 1))
+    elif [ "$generation" -le 0 ]; then
+      generation=1
+    fi
     write_state "$phase" true "$generation"
     status_json
     ;;
@@ -216,8 +232,21 @@ case "$cmd" in
     ;;
   verify-hooks)
     if [ "$MULTICA_TEST_SCENARIO" = receipts_missing ]; then
-      echo "enabled event types without real reconciled deliveries: merge_request, pipeline, job, note" >&2
-      exit 22
+      case " $* " in
+        *" --configuration-only "*)
+          phase="$(sed -n '1p' "$state_file")"
+          maintenance="$(sed -n '2p' "$state_file")"
+          payload="$(sed -n '4p' "$state_file")"
+          if [ "$phase" != verification_pending ] || [ "$maintenance" != true ] || [ "$payload" != false ]; then
+            echo "configuration-only verification requires replayed receipts behind the maintenance gate" >&2
+            exit 23
+          fi
+          ;;
+        *)
+          echo "enabled event types without real reconciled deliveries: merge_request, pipeline, job, note" >&2
+          exit 22
+          ;;
+      esac
     fi
     write_state ready true "$(sed -n '3p' "$state_file")"
     status_json
@@ -388,13 +417,14 @@ fi
   for (const service of ["multica-backend", "multica-frontend"]) {
     writeFileSync(path.join(state, "services", service), "active");
   }
-  if (["restore_retry", "new_commit_restore_active", "resume_preparing_attested", "restored_new_head", "restored_unknown_dir"].includes(scenario)) {
-    const cutoverDir = `.gitlab-vcs-cutover-${pinnedCommit}-1`;
+  if (["restore_retry", "new_commit_restore_active", "resume_preparing_attested", "restored_new_head", "restored_unknown_dir", "begin_failure_retry", "active_pending_retry"].includes(scenario)) {
+    const oldBackupGeneration = scenario === "begin_failure_retry" ? 4 : 1;
+    const cutoverDir = `.gitlab-vcs-cutover-${pinnedCommit}-${oldBackupGeneration}`;
     const cutoverPath = path.join(remote, cutoverDir);
-    const restoredScenario = ["restored_new_head", "restored_unknown_dir"].includes(scenario);
+    const restoredScenario = ["restored_new_head", "restored_unknown_dir", "begin_failure_retry", "active_pending_retry"].includes(scenario);
     if (restoredScenario) restoredCutoverDir = cutoverDir;
     mkdirSync(cutoverPath, { recursive: true });
-    if (scenario === "resume_preparing_attested" || restoredScenario) {
+    if (scenario === "resume_preparing_attested" || restoredScenario || scenario === "restore_retry" || scenario === "new_commit_restore_active") {
       writeFileSync(path.join(cutoverPath, "database.dump"), "mock database backup", { mode: 0o600 });
     }
     if (scenario === "restored_unknown_dir") {
@@ -418,7 +448,7 @@ fi
       `status=${scenario === "resume_preparing_attested" ? "preparing" : restoredScenario ? "restored" : "active"}`,
       `backup_dir=${cutoverDir}`,
       "since=2026-11-23T00:00:00Z",
-      "generation=1",
+      `generation=${restoredScenario ? 2 : scenario === "resume_preparing_attested" ? 0 : 1}`,
       ...(scenario === "resume_preparing_attested" ? ["system_hook_attestation=https://gitlab.example.test"] : []),
       "backend_was_active=1",
       "frontend_was_active=1",
@@ -426,7 +456,7 @@ fi
     ].join("\n"), { mode: 0o600 });
     const resumePreparing = scenario === "resume_preparing_attested";
     const restorePhase = resumePreparing ? "maintenance" : scenario === "new_commit_restore_active" || restoredScenario ? "restored" : "restore_blocked";
-    const migrationGeneration = resumePreparing ? 0 : 1;
+    const migrationGeneration = resumePreparing ? 0 : restoredScenario ? 2 : 1;
     writeFileSync(path.join(state, "state"), `${restorePhase}\ntrue\n${migrationGeneration}\ntrue\n`);
     writeFileSync(path.join(remote, "apps", "web", ".next", "BUILD_ID"), "new-build\n");
     for (const name of ["server", "multica", "migrate"]) {
@@ -480,7 +510,7 @@ case "$cmd" in
     status_json
     ;;
   restore)
-    write_state restored true 1 true
+    write_state restored true "$(sed -n '3p' "$state_file")" true
     echo "restored"
     ;;
   *) echo "unexpected recovery command $cmd" >&2; exit 9 ;;
@@ -503,13 +533,14 @@ esac
     MULTICA_SKIP_CLI_INSTALL: "1",
     MULTICA_SKIP_PACKAGE: "1",
     MULTICA_SKIP_INSTALL: "1",
+    MULTICA_GITLAB_CONFIGURATION_ONLY: "0",
     MULTICA_TEST_LOG: log,
     MULTICA_TEST_STATE_DIR: state,
     MULTICA_TEST_REMOTE_DIR: remote,
     MULTICA_TEST_REMOTE_NAME: "origin",
     MULTICA_TEST_BRANCH: "feature/gitlab-cutover",
-    MULTICA_TEST_HEAD: ["new_commit_restore_active", "restored_new_head", "restored_unknown_dir"].includes(scenario) ? forwardedHead : pinnedHead,
-    MULTICA_TEST_COMMIT: ["new_commit_restore_active", "restored_new_head", "restored_unknown_dir"].includes(scenario) ? "feedface" : pinnedCommit,
+    MULTICA_TEST_HEAD: ["new_commit_restore_active", "restored_new_head", "restored_unknown_dir", "begin_failure_retry", "active_pending_retry"].includes(scenario) ? forwardedHead : pinnedHead,
+    MULTICA_TEST_COMMIT: ["new_commit_restore_active", "restored_new_head", "restored_unknown_dir", "begin_failure_retry", "active_pending_retry"].includes(scenario) ? "feedface" : pinnedCommit,
     MULTICA_TEST_UPSTREAM_PIN: upstreamPin,
     MULTICA_TEST_SCENARIO: scenario,
     MULTICA_TEST_RESTORED_DIR: restoredCutoverDir,
@@ -645,7 +676,8 @@ test("missing real event receipts stay gated on GitLab 13.12 without synthetic v
   const result = runRelease(fx);
   assert.notEqual(result.status, 0);
   const commands = log(fx);
-  assert.ok(hasCommand(commands, "gitlab-vcs-migrate verify-hooks"));
+  assert.ok(hasCommand(commands, "gitlab-vcs-migrate verify-hooks --since"));
+  assert.ok(!commands.some((command) => command.includes("verify-hooks --configuration-only")));
   assert.ok(!hasCommand(commands, "gitlab-vcs-migrate finalize"));
   assert.ok(!hasCommand(commands, "gitlab-vcs-migrate restore"));
   assert.ok(!hasCommand(commands, "gitlab-vcs-migrate test"));
@@ -653,6 +685,20 @@ test("missing real event receipts stay gated on GitLab 13.12 without synthetic v
   assert.equal(readFileSync(path.join(fx.state, "state"), "utf8").split("\n").slice(0, 2).join(" "), "verification_pending true");
   assert.equal(readFileSync(path.join(fx.state, "services", "multica-backend"), "utf8"), "active");
   assert.ok(!hasCommand(commands, "curl --noproxy \"*\" --max-time 20 --silent --show-error"), "normal-write smoke remains blocked");
+});
+
+test("explicit configuration-only mode replays receipts, verifies configuration, and keeps the maintenance gate", (t) => {
+  const fx = withFixture(t, "receipts_missing");
+  fx.env.MULTICA_GITLAB_CONFIGURATION_ONLY = "1";
+  const result = runRelease(fx);
+  assert.equal(result.status, 0, result.stderr);
+  const commands = log(fx);
+  assert.ok(hasCommand(commands, "gitlab-vcs-migrate preflight"));
+  assert.ok(hasCommand(commands, "gitlab-vcs-migrate switch-hooks"));
+  assertBefore(commands, "gitlab-vcs-migrate replay --since", "gitlab-vcs-migrate verify-hooks --configuration-only");
+  assertBefore(commands, "gitlab-vcs-migrate verify-hooks --configuration-only", "gitlab-vcs-migrate finalize");
+  assert.equal(readFileSync(path.join(fx.state, "state"), "utf8").split("\n").slice(0, 2).join(" "), "complete false");
+  assert.match(`${result.stdout}\n${result.stderr}`, /maintenance-period deliveries are not verified per event type/i);
 });
 
 test("failed data rollback keeps services stopped and leaves explicit maintenance instructions", (t) => {
@@ -809,7 +855,74 @@ test("a verified restored snapshot permits a new HEAD and retains the old recove
   assert.equal(readFileSync(path.join(oldSnapshot, "artifacts", "server.previous"), "utf8"), oldServer);
   assert.ok(existsSync(oldSnapshot), "the restored generation remains available after forward release");
   assert.ok(existsSync(path.join(fx.remote, ".gitlab-vcs-cutover-feedface-2", "database.dump")));
+  const record = readFileSync(path.join(fx.remote, ".gitlab-vcs-cutover.state"), "utf8");
+  assert.match(record, /generation=3/);
+  assert.match(record, /backup_generation=2/);
+  assert.match(record, /retained_backup_dir=\.gitlab-vcs-cutover-abc1234-1/);
 });
+test("an active verification-pending same-HEAD retry accepts only its registered retained snapshots", (t) => {
+  const fx = withFixture(t, "active_pending_retry");
+  const oldSnapshot = path.join(fx.remote, fx.env.MULTICA_TEST_RESTORED_DIR);
+  const pendingDir = ".gitlab-vcs-cutover-feedface-5";
+  const pendingSnapshot = path.join(fx.remote, pendingDir);
+  cpSync(oldSnapshot, pendingSnapshot, { recursive: true });
+  renameSync(
+    path.join(pendingSnapshot, `gitlab-vcs-migrate-${pinnedHead}`),
+    path.join(pendingSnapshot, `gitlab-vcs-migrate-${forwardedHead}`),
+  );
+  writeFileSync(path.join(fx.state, "state"), "verification_pending\ntrue\n3\nfalse\n");
+  writeFileSync(path.join(fx.remote, ".gitlab-vcs-cutover.state"), [
+    `head=${forwardedHead}`,
+    "status=active",
+    `backup_dir=${pendingDir}`,
+    "backup_generation=5",
+    `retained_backup_dir=${fx.env.MULTICA_TEST_RESTORED_DIR}`,
+    "since=2026-11-23T00:00:00Z",
+    "generation=3",
+    "backend_was_active=1",
+    "frontend_was_active=1",
+    "",
+  ].join("\n"), { mode: 0o600 });
+  const oldDatabase = readFileSync(path.join(oldSnapshot, "database.dump"), "utf8");
+
+  const result = runRelease(fx);
+  assert.equal(result.status, 0, result.stderr);
+  const commands = log(fx);
+  assertBefore(commands, "gitlab-vcs-migrate status", `pnpm cwd=${fx.remote} install --frozen-lockfile`);
+  assert.ok(hasCommand(commands, "gitlab-vcs-migrate replay --since"));
+  assert.ok(existsSync(path.join(oldSnapshot, "database.dump")));
+  assert.ok(existsSync(path.join(pendingSnapshot, "database.dump")));
+  assert.equal(readFileSync(path.join(oldSnapshot, "database.dump"), "utf8"), oldDatabase);
+});
+
+test("a begin failure restores its actual database generation and permits a same-HEAD retry", (t) => {
+  const fx = withFixture(t, "begin_failure_retry");
+  const originalSnapshot = path.join(fx.remote, fx.env.MULTICA_TEST_RESTORED_DIR);
+  const originalDatabase = readFileSync(path.join(originalSnapshot, "database.dump"), "utf8");
+
+  const first = runRelease(fx);
+  assert.notEqual(first.status, 0);
+  const firstRecord = readFileSync(path.join(fx.remote, ".gitlab-vcs-cutover.state"), "utf8");
+  assert.match(firstRecord, /status=restored/);
+  assert.match(firstRecord, /generation=2/);
+  assert.match(firstRecord, /backup_generation=5/);
+  assert.match(firstRecord, /retained_backup_dir=\.gitlab-vcs-cutover-abc1234-4/);
+  assert.equal(readFileSync(path.join(fx.state, "state"), "utf8").split("\n").slice(0, 3).join(" "), "restored true 2");
+
+  const second = runRelease(fx);
+  assert.equal(second.status, 0, second.stderr);
+  const finalRecord = readFileSync(path.join(fx.remote, ".gitlab-vcs-cutover.state"), "utf8");
+  assert.match(finalRecord, /status=complete/);
+  assert.match(finalRecord, /generation=3/);
+  assert.match(finalRecord, /backup_generation=6/);
+  assert.match(finalRecord, /retained_backup_dir=\.gitlab-vcs-cutover-abc1234-4/);
+  assert.match(finalRecord, /retained_backup_dir=\.gitlab-vcs-cutover-feedface-5/);
+  for (const dir of [".gitlab-vcs-cutover-abc1234-4", ".gitlab-vcs-cutover-feedface-5", ".gitlab-vcs-cutover-feedface-6"]) {
+    assert.ok(existsSync(path.join(fx.remote, dir, "database.dump")), `retained snapshot ${dir}`);
+  }
+  assert.equal(readFileSync(path.join(originalSnapshot, "database.dump"), "utf8"), originalDatabase);
+});
+
 
 test("a similar unrecorded cutover directory remains an unexpected remote change", (t) => {
   const fx = withFixture(t, "restored_unknown_dir");

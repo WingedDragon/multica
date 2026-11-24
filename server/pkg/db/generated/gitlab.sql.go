@@ -97,7 +97,14 @@ WHERE workspace_id = $1
   AND scope_type = $3
   AND scope_id = $4
   AND (legacy_hook_id = $5 OR new_hook_id = $5)
-  AND state IN ('updated', 'verified')
+  AND (
+    state IN ('updated', 'verified')
+    OR (
+      state = 'pending'
+      AND new_hook_id = $5
+      AND target_url <> ''
+    )
+  )
 `
 
 type GetGitLabMigrationHookForDeliveryParams struct {

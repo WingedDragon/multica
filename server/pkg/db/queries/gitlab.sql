@@ -39,7 +39,14 @@ WHERE workspace_id = sqlc.arg('workspace_id')
   AND scope_type = sqlc.arg('scope_type')
   AND scope_id = sqlc.arg('scope_id')
   AND (legacy_hook_id = sqlc.arg('hook_id') OR new_hook_id = sqlc.arg('hook_id'))
-  AND state IN ('updated', 'verified');
+  AND (
+    state IN ('updated', 'verified')
+    OR (
+      state = 'pending'
+      AND new_hook_id = sqlc.arg('hook_id')
+      AND target_url <> ''
+    )
+  );
 
 -- name: ResolveGitLabMigrationID :one
 SELECT unified_id FROM vcs_gitlab_migration_id_map

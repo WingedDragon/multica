@@ -189,10 +189,6 @@ func (r *Runner) SwitchHooks(ctx context.Context) error {
 				failures = append(failures, fmt.Errorf("snapshot GitLab Hook %d: %w", remoteID, err))
 				continue
 			}
-			if err := r.recordHookUpdate(ctx, hook, remoteID, target, previous, "pending", "", false); err != nil {
-				failures = append(failures, err)
-				continue
-			}
 		}
 		body := hookUpdateBody(remote, target)
 		if hook.Managed {
@@ -209,10 +205,18 @@ func (r *Runner) SwitchHooks(ctx context.Context) error {
 			}
 			body["token"] = connection.WebhookSecret
 		}
+		// GitLab may deliver to the new URL before this API call returns. Persist
+		// the exact Hook intent with its rollback snapshot before changing it.
+		if err := r.recordHookUpdate(ctx, hook, remoteID, target, previous, "pending", "", false); err != nil {
+			failures = append(failures, err)
+			continue
+		}
 		updated, err := connection.API.updateHook(ctx, hook.ScopeType, scopeNumericID(hook), remoteID, body)
 		if err != nil {
 			message := "Hook update permission was denied; update the displayed workspace-specific URL in GitLab and rerun switch-hooks"
-			_ = r.markHookFailure(ctx, hook, message)
+			if persistErr := r.recordHookUpdate(ctx, hook, remoteID, target, previous, "pending", message, false); persistErr != nil {
+				failures = append(failures, fmt.Errorf("retain pending GitLab %s Hook %d update intent: %w", hook.ScopeType, remoteID, persistErr))
+			}
 			failures = append(failures, fmt.Errorf("update GitLab %s Hook %d: %w", hook.ScopeType, remoteID, err))
 			continue
 		}
@@ -454,6 +458,14 @@ func redactHookError(message string) string {
 }
 
 func (r *Runner) VerifyHooks(ctx context.Context, since time.Time) error {
+	return r.verifyHooks(ctx, since, true)
+}
+
+func (r *Runner) VerifyConfiguredHooks(ctx context.Context, since time.Time) error {
+	return r.verifyHooks(ctx, since, false)
+}
+
+func (r *Runner) verifyHooks(ctx context.Context, since time.Time, requireDeliveries bool) error {
 	state, err := r.State(ctx)
 	if err != nil {
 		return err
@@ -553,10 +565,13 @@ func (r *Runner) VerifyHooks(ctx context.Context, since time.Time) error {
 			failures = append(failures, fmt.Errorf("GitLab %s Hook %d does not use its exact workspace-scoped URL", hook.ScopeType, hookID))
 			continue
 		}
-		receipts, err := r.hookReceipts(ctx, hook, hookID, since)
-		if err != nil {
-			failures = append(failures, err)
-			continue
+		receipts := map[string]string{}
+		if requireDeliveries {
+			receipts, err = r.hookReceipts(ctx, hook, hookID, since)
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
 		}
 		enabled := make(map[string]bool)
 		for category, field := range hookEventFields {
@@ -567,21 +582,23 @@ func (r *Runner) VerifyHooks(ctx context.Context, since time.Time) error {
 				enabled[category] = true
 			}
 		}
-		var missing []string
 		verifiedDelivery := ""
-		for category := range enabled {
-			if deliveryID := receipts[category]; deliveryID != "" {
-				if verifiedDelivery == "" {
-					verifiedDelivery = deliveryID
+		if requireDeliveries {
+			var missing []string
+			for category := range enabled {
+				if deliveryID := receipts[category]; deliveryID != "" {
+					if verifiedDelivery == "" {
+						verifiedDelivery = deliveryID
+					}
+				} else {
+					missing = append(missing, category)
 				}
-			} else {
-				missing = append(missing, category)
 			}
-		}
-		sort.Strings(missing)
-		if len(missing) != 0 {
-			failures = append(failures, fmt.Errorf("GitLab %s Hook %d has enabled event types without real reconciled deliveries since %s: %s", hook.ScopeType, hookID, since.UTC().Format(time.RFC3339), strings.Join(missing, ", ")))
-			continue
+			sort.Strings(missing)
+			if len(missing) != 0 {
+				failures = append(failures, fmt.Errorf("GitLab %s Hook %d has enabled event types without real reconciled deliveries since %s: %s", hook.ScopeType, hookID, since.UTC().Format(time.RFC3339), strings.Join(missing, ", ")))
+				continue
+			}
 		}
 		if _, err := r.pool.Exec(ctx, `
 			UPDATE vcs_gitlab_migration_hook
@@ -592,7 +609,7 @@ func (r *Runner) VerifyHooks(ctx context.Context, since time.Time) error {
 			continue
 		}
 		for category := range enabled {
-			if receipts[category] == "" {
+			if requireDeliveries && receipts[category] == "" {
 				continue
 			}
 			for _, project := range projects {
@@ -610,7 +627,7 @@ func (r *Runner) VerifyHooks(ctx context.Context, since time.Time) error {
 		key := project.ConnectionID + ":" + strconv.FormatInt(project.ProjectID, 10)
 		for _, category := range []string{"merge_request", "pipeline", "job", "note"} {
 			if !coverage[key][category] {
-				failures = append(failures, fmt.Errorf("project %s has no enabled Hook with a real reconciled %s delivery since %s", project.Path, category, since.UTC().Format(time.RFC3339)))
+				failures = append(failures, fmt.Errorf("project %s has no verified Hook for %s events", project.Path, category))
 			}
 		}
 	}
@@ -638,6 +655,7 @@ func (r *Runner) VerifyHooks(ctx context.Context, since time.Time) error {
 	lockTx = nil
 	return nil
 }
+
 
 func (r *Runner) hookReceipts(ctx context.Context, hook migrationHook, hookID int64, since time.Time) (map[string]string, error) {
 	rows, err := r.pool.Query(ctx, `

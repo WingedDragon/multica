@@ -89,6 +89,7 @@ type cutoverAcceptanceGitLab struct {
 	systemHookInventoryStatus map[string]int
 	createdAt                 string
 	updatedAt                 string
+	onHookUpdate              func(before, after cutoverAcceptanceHook)
 }
 
 func newCutoverAcceptanceFixture(t *testing.T) *cutoverAcceptanceFixture {
@@ -421,6 +422,7 @@ func (g *cutoverAcceptanceGitLab) updateHook(w http.ResponseWriter, r *http.Requ
 		http.NotFound(w, r)
 		return
 	}
+	previous := hook
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		g.mu.Unlock()
@@ -449,7 +451,11 @@ func (g *cutoverAcceptanceGitLab) updateHook(w http.ResponseWriter, r *http.Requ
 		hook.EnableSSLVerification = value
 	}
 	g.hooks[instance][projectID][hookID] = hook
+	onHookUpdate := g.onHookUpdate
 	g.mu.Unlock()
+	if onHookUpdate != nil && previous.URL != hook.URL {
+		onHookUpdate(previous, hook)
+	}
 	cutoverAcceptanceJSON(w, http.StatusOK, hook)
 }
 
@@ -602,8 +608,61 @@ func TestGitLabCutoverEndToEndAcceptance(t *testing.T) {
 		t.Fatalf("rollback Hook secret did not retain the legacy credential (decrypt error: %v)", openErr)
 	}
 
+	windowSources := make(map[string]*cutoverAcceptanceSource, len(sources))
+	for _, source := range sources {
+		windowSources[source.unifiedConnectionID] = source
+	}
+	type windowDeliveryResult struct {
+		deliveryID string
+		status     int
+		err        error
+	}
+	windowDeliveries := make(chan windowDeliveryResult, len(sources))
+	f.remote.mu.Lock()
+	f.remote.onHookUpdate = func(before, after cutoverAcceptanceHook) {
+		if before.URL == after.URL {
+			return
+		}
+		parsed, err := url.Parse(after.URL)
+		if err != nil {
+			windowDeliveries <- windowDeliveryResult{err: err}
+			return
+		}
+		connectionID := strings.TrimPrefix(parsed.Path, "/api/webhooks/vcs/")
+		source := windowSources[connectionID]
+		if source == nil {
+			windowDeliveries <- windowDeliveryResult{err: fmt.Errorf("updated Hook URL has unknown connection %q", connectionID)}
+			return
+		}
+		deliveryID := "cutover-window-" + source.legacyConnectionID
+		status, err := cutoverAcceptancePostResult(after.URL, after.Token, deliveryID, "Push Hook",
+			cutoverAcceptanceEvent("Push Hook", source.projectID, source.path))
+		windowDeliveries <- windowDeliveryResult{deliveryID: deliveryID, status: status, err: err}
+	}
+	f.remote.mu.Unlock()
+	since := time.Now().UTC().Add(-time.Hour)
 	if err := f.runner.SwitchHooks(ctx); err != nil {
 		t.Fatalf("switch managed project Hooks: %v", err)
+	}
+	if got := len(windowDeliveries); got != len(sources) {
+		t.Fatalf("cutover-window delivery count = %d, want %d", got, len(sources))
+	}
+	for range len(sources) {
+		result := <-windowDeliveries
+		if result.err != nil || result.status != http.StatusServiceUnavailable {
+			t.Fatalf("cutover-window delivery %q response = %d, err=%v; want durable-receipt 503", result.deliveryID, result.status, result.err)
+		}
+	}
+	var windowPushReceipts int64
+	if err := f.pool.QueryRow(ctx, `
+		SELECT count(*) FROM vcs_gitlab_migration_delivery
+		WHERE delivery_id LIKE 'cutover-window-%' AND event_type='Push Hook'
+		  AND payload IS NOT NULL AND reconciled_at IS NULL
+	`).Scan(&windowPushReceipts); err != nil {
+		t.Fatalf("count cutover-window Push Hook receipts: %v", err)
+	}
+	if windowPushReceipts != int64(len(sources)) {
+		t.Fatalf("cutover-window Push Hook receipts = %d, want %d", windowPushReceipts, len(sources))
 	}
 	pending, err := f.runner.State(ctx)
 	if err != nil || pending.Phase != "verification_pending" || !pending.MaintenanceMode {
@@ -636,11 +695,19 @@ func TestGitLabCutoverEndToEndAcceptance(t *testing.T) {
 		cutoverAcceptanceEvent("Merge Request Hook", sources[2].projectID, sources[2].path)); got != http.StatusUnauthorized {
 		t.Fatalf("other workspace's Hook accepted this workspace's secret: response=%d", got)
 	}
-	assertCutoverReceiptCounts(t, f.pool, 0, 0, 0)
+	assertCutoverReceiptCounts(t, f.pool, int64(len(sources)), int64(len(sources)), 0)
 
-	since := time.Now().UTC().Add(-time.Minute)
 	if err := f.runner.VerifyHooks(ctx, since); err == nil {
-		t.Fatal("verification without deliveries succeeded")
+		t.Fatal("verification accepted an unreconciled delivery")
+	}
+	if err := f.runner.Replay(ctx, since, f.handler.ReplayGitLabMigrationDelivery); err != nil {
+		t.Fatalf("replay cutover-window deliveries: %v", err)
+	}
+	if err := f.runner.VerifyHooks(ctx, since); err == nil {
+		t.Fatal("strict verification accepted missing event deliveries")
+	}
+	if err := f.runner.VerifyConfiguredHooks(ctx, since); err != nil {
+		t.Fatalf("verify configured Hooks without additional deliveries: %v", err)
 	}
 	events := []string{"Merge Request Hook", "Pipeline Hook", "Job Hook", "Note Hook"}
 	for _, source := range sources {
@@ -655,8 +722,8 @@ func TestGitLabCutoverEndToEndAcceptance(t *testing.T) {
 			}
 		}
 	}
-	wantReceipts := int64(len(sources) * len(events))
-	assertCutoverReceiptCounts(t, f.pool, wantReceipts, wantReceipts, 0)
+	wantReceipts := int64(len(sources) * (len(events) + 1))
+	assertCutoverReceiptCounts(t, f.pool, wantReceipts, wantReceipts, int64(len(sources)))
 	if err := f.runner.Replay(ctx, since, f.handler.ReplayGitLabMigrationDelivery); err != nil {
 		t.Fatalf("replay persisted real webhook receipts: %v", err)
 	}
@@ -1608,6 +1675,12 @@ func cutoverAcceptanceEvent(event string, projectID int64, projectPath string) [
 		base["object_attributes"] = map[string]any{
 			"id": int64(9901), "note": "new review comment", "created_at": "2026-11-23T09:59:00Z", "updated_at": "2026-11-23T09:59:00Z",
 		}
+	case "Push Hook":
+		base["object_kind"] = "push"
+		base["ref"] = "refs/heads/main"
+		base["before"] = "previous-head"
+		base["after"] = "head-77"
+		base["commits"] = []any{}
 	}
 	encoded, _ := json.Marshal(base)
 	return encoded
@@ -1615,9 +1688,17 @@ func cutoverAcceptanceEvent(event string, projectID int64, projectPath string) [
 
 func cutoverAcceptancePost(t *testing.T, targetURL, secret, deliveryID, event string, body []byte) int {
 	t.Helper()
+	status, err := cutoverAcceptancePostResult(targetURL, secret, deliveryID, event, body)
+	if err != nil {
+		t.Fatalf("send real GitLab webhook request: %v", err)
+	}
+	return status
+}
+
+func cutoverAcceptancePostResult(targetURL, secret, deliveryID, event string, body []byte) (int, error) {
 	request, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
-		t.Fatalf("build real GitLab webhook request: %v", err)
+		return 0, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Gitlab-Token", secret)
@@ -1625,12 +1706,13 @@ func cutoverAcceptancePost(t *testing.T, targetURL, secret, deliveryID, event st
 	request.Header.Set("X-Gitlab-Webhook-UUID", deliveryID)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		t.Fatalf("send real GitLab webhook request: %v", err)
+		return 0, err
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
-	return response.StatusCode
+	return response.StatusCode, nil
 }
+
 func installCodeMlampTLSRoute(t *testing.T, server *httptest.Server) {
 	t.Helper()
 	original, ok := http.DefaultTransport.(*http.Transport)

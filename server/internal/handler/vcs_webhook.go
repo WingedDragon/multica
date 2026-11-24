@@ -1038,6 +1038,9 @@ func (h *Handler) replayGitLabMigrationPayload(ctx context.Context, conn db.VcsC
 				return nil
 			}
 			return h.syncGitLabMigrationMergeRequest(ctx, conn, noteOwner, noteName, note.MergeRequest.IID)
+		case "Push Hook":
+			// Normal ingress accepts Push Hooks without syncing state.
+			return nil
 		default:
 			if system {
 				return nil

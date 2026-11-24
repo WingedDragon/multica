@@ -21,6 +21,7 @@ type options struct {
 	publicURL                   string
 	since                       time.Time
 	systemHookAttestationOrigin string
+	configurationOnly           bool
 }
 
 func main() {
@@ -81,7 +82,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		}
 		err = runner.Replay(ctx, parsed.since, replayHandler.ReplayGitLabMigrationDelivery)
 	case "verify-hooks":
-		err = runner.VerifyHooks(ctx, parsed.since)
+		if parsed.configurationOnly {
+			err = runner.VerifyConfiguredHooks(ctx, parsed.since)
+		} else {
+			err = runner.VerifyHooks(ctx, parsed.since)
+		}
 	case "finalize":
 		err = runner.Finalize(ctx)
 	case "restore":
@@ -107,7 +112,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 
 func parseOptions(args []string) (options, error) {
 	if len(args) == 0 {
-		return options{}, errors.New("usage: gitlab-vcs-migrate <preflight|begin|migrate|switch-hooks|replay|verify-hooks|finalize|restore|status> [--public-url URL] [--since RFC3339-UTC] [--attest-no-legacy-system-hooks-for=https://gitlab.example.com]")
+		return options{}, errors.New("usage: gitlab-vcs-migrate <preflight|begin|migrate|switch-hooks|replay|verify-hooks|finalize|restore|status> [--public-url URL] [--since RFC3339-UTC] [--configuration-only] [--attest-no-legacy-system-hooks-for=https://gitlab.example.com]")
 	}
 	command := args[0]
 	switch command {
@@ -120,6 +125,7 @@ func parseOptions(args []string) (options, error) {
 	publicURL := flags.String("public-url", "", "public API origin used for Hook URLs")
 	sinceRaw := flags.String("since", "", "UTC RFC3339 lower bound for delivery replay/verification")
 	attestationOrigin := flags.String("attest-no-legacy-system-hooks-for", "", "one-time operator confirmation for an exact HTTPS GitLab origin")
+	configurationOnly := flags.Bool("configuration-only", false, "verify Hook configuration without requiring event deliveries")
 	if err := flags.Parse(args[1:]); err != nil {
 		return options{}, err
 	}
@@ -132,6 +138,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if !needsSince && *sinceRaw != "" {
 		return options{}, fmt.Errorf("--since is only valid with replay and verify-hooks")
+	}
+	if *configurationOnly && command != "verify-hooks" {
+		return options{}, errors.New("--configuration-only is only valid with verify-hooks")
 	}
 	if *attestationOrigin != "" {
 		if command != "preflight" && command != "begin" {
@@ -154,7 +163,7 @@ func parseOptions(args []string) (options, error) {
 		}
 		since = parsed.UTC()
 	}
-	return options{command: command, publicURL: *publicURL, since: since, systemHookAttestationOrigin: *attestationOrigin}, nil
+	return options{command: command, publicURL: *publicURL, since: since, systemHookAttestationOrigin: *attestationOrigin, configurationOnly: *configurationOnly}, nil
 }
 func migrationOperatorIdentity() string {
 	for _, key := range []string{"SUDO_USER", "USER", "LOGNAME"} {

@@ -23,6 +23,11 @@ if [ -n "$SYSTEM_HOOK_ATTESTATION" ] && ! is_https_origin "$SYSTEM_HOOK_ATTESTAT
   echo "MULTICA_GITLAB_SYSTEM_HOOKS_ATTESTED must be one complete HTTPS origin without a path, user info, query, or fragment." >&2
   exit 2
 fi
+GITLAB_CONFIGURATION_ONLY="${MULTICA_GITLAB_CONFIGURATION_ONLY:-0}"
+case "$GITLAB_CONFIGURATION_ONLY" in
+  0|1) ;;
+  *) echo "MULTICA_GITLAB_CONFIGURATION_ONLY must be 0 or 1." >&2; exit 2 ;;
+esac
 
 SKIP_DEPLOY="${MULTICA_SKIP_DEPLOY:-0}"
 SKIP_PACKAGE="${MULTICA_SKIP_PACKAGE:-0}"
@@ -304,8 +309,12 @@ cutover_dir=""
 cutover_since=""
 cutover_generation=0
 cutover_backup_generation=0
+cutover_retained_backup_dirs=()
 cutover_record_status=""
-restored_git_status_dir=""
+git_status_backup_dirs=()
+git_status_record_valid=0
+gitlab_configuration_only="${MULTICA_RELEASE_GITLAB_CONFIGURATION_ONLY:-0}"
+case "$gitlab_configuration_only" in 0|1) ;; *) echo "Invalid GitLab configuration-only release setting." >&2; exit 7 ;; esac
 cutover_record_system_hook_attestation=""
 cutover_record_backend=0
 cutover_record_frontend=0
@@ -496,29 +505,47 @@ run_workspace_pg() (
 )
 
 read_cutover_record() {
+  local recorded_backup_generation="" parsed_backup_generation="" retained existing
   cutover_record_head=""
   cutover_record_status=""
   cutover_record_system_hook_attestation=""
   cutover_dir=""
   cutover_since=""
   cutover_generation=0
+  cutover_backup_generation=0
+  cutover_retained_backup_dirs=()
   cutover_record_backend=0
   cutover_record_frontend=0
-  [ -f "$cutover_state_file" ] || return 1
+  [ -f "$cutover_state_file" ] && [ ! -L "$cutover_state_file" ] || return 1
   while IFS='=' read -r key value; do
     case "$key" in
       head) cutover_record_head="$value" ;;
       status) cutover_record_status="$value" ;;
       system_hook_attestation) cutover_record_system_hook_attestation="$value" ;;
       backup_dir) cutover_dir="$value" ;;
+      backup_generation) recorded_backup_generation="$value" ;;
+      retained_backup_dir)
+        [[ "$value" =~ ^\.gitlab-vcs-cutover-[0-9a-f]{7,64}-[1-9][0-9]*$ ]] || return 1
+        for existing in "${cutover_retained_backup_dirs[@]}"; do [ "$existing" != "$value" ] || return 1; done
+        cutover_retained_backup_dirs+=("$value")
+        ;;
       since) cutover_since="$value" ;;
       generation) cutover_generation="$value" ;;
       backend_was_active) cutover_record_backend="$value" ;;
       frontend_was_active) cutover_record_frontend="$value" ;;
     esac
   done <"$cutover_state_file"
-  case "$cutover_dir" in .gitlab-vcs-cutover-*) ;; *) echo "Invalid GitLab cutover recovery directory; refusing to proceed." >&2; return 1 ;; esac
+  [[ "$cutover_record_head" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 1
+  case "$cutover_record_status" in preparing|active|restored|complete) ;; *) return 1 ;; esac
+  [[ "$cutover_dir" =~ ^\.gitlab-vcs-cutover-([0-9a-f]{7,64})-([1-9][0-9]*)$ ]] || return 1
+  parsed_backup_generation="${BASH_REMATCH[2]}"
   case "$cutover_generation" in ''|*[!0-9]*) echo "Invalid GitLab cutover generation; refusing to proceed." >&2; return 1 ;; esac
+  if [ -n "$recorded_backup_generation" ] && [ "$recorded_backup_generation" != "$parsed_backup_generation" ]; then
+    echo "Invalid GitLab cutover backup generation; refusing to proceed." >&2
+    return 1
+  fi
+  for retained in "${cutover_retained_backup_dirs[@]}"; do [ "$retained" != "$cutover_dir" ] || return 1; done
+  cutover_backup_generation="$parsed_backup_generation"
   if [ -n "$cutover_record_system_hook_attestation" ] && ! is_https_origin "$cutover_record_system_hook_attestation"; then
     echo "Invalid GitLab System Hook attestation in cutover recovery record; refusing to proceed." >&2
     return 1
@@ -528,11 +555,14 @@ read_cutover_record() {
 write_cutover_record() {
   local status="$1"
   local temporary="$cutover_state_file.tmp.$$"
+  local retained
   umask 077
   {
     printf 'head=%s\n' "$EXPECTED_HEAD"
     printf 'status=%s\n' "$status"
     printf 'backup_dir=%s\n' "$cutover_dir"
+    printf 'backup_generation=%s\n' "$cutover_backup_generation"
+    for retained in "${cutover_retained_backup_dirs[@]}"; do printf 'retained_backup_dir=%s\n' "$retained"; done
     printf 'since=%s\n' "$cutover_since"
     printf 'generation=%s\n' "$cutover_generation"
     printf 'system_hook_attestation=%s\n' "$system_hook_attestation"
@@ -543,6 +573,13 @@ write_cutover_record() {
   mv -f "$temporary" "$cutover_state_file"
 }
 
+retain_cutover_backup_dir() {
+  local candidate="$1" existing
+  for existing in "${cutover_retained_backup_dirs[@]}"; do [ "$existing" != "$candidate" ] || return 0; done
+  cutover_retained_backup_dirs+=("$candidate")
+}
+
+
 read_cli_state() {
   local json="$1"
   cutover_phase="$(json_field phase <<<"$json")"
@@ -551,33 +588,30 @@ read_cli_state() {
   [ -n "$cutover_phase" ] && [ -n "$cutover_maintenance" ] && [ -n "$cutover_generation" ]
 }
 
-validate_restored_cutover_snapshot() {
-  local snapshot="$REMOTE_DIR/$cutover_dir"
-  local recovery_tool="$snapshot/gitlab-vcs-migrate-$cutover_record_head"
-  local record_generation="$cutover_generation"
-  local directory_hash directory_suffix state_json state_generation key value
+validate_cutover_snapshot_directory() {
+  local directory="$1" expected_head="${2:-}" expected_generation="${3:-}"
+  local snapshot="$REMOTE_DIR/$directory"
+  local directory_hash directory_generation recovery_tool recovery_head tool_count=0 key value
   local snapshot_web="" snapshot_server="" snapshot_multica="" snapshot_migrate=""
 
-  [ "$cutover_record_status" = "restored" ] || return 1
-  [[ "$cutover_record_head" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 1
-  [[ "$record_generation" =~ ^[1-9][0-9]*$ ]] || return 1
-  case "$cutover_dir" in .gitlab-vcs-cutover-*) ;; *) return 1 ;; esac
-  directory_hash="${cutover_dir#.gitlab-vcs-cutover-}"
-  directory_suffix="-$record_generation"
-  case "$directory_hash" in
-    *"$directory_suffix") directory_hash="${directory_hash%"$directory_suffix"}" ;;
-    *) return 1 ;;
-  esac
-  [[ "$directory_hash" =~ ^[0-9a-f]{7,64}$ ]] || return 1
-  [[ "$cutover_record_head" == "$directory_hash"* ]] || return 1
-  [ "$cutover_dir" = ".gitlab-vcs-cutover-$directory_hash-$record_generation" ] || return 1
-
-  [ -f "$cutover_state_file" ] && [ ! -L "$cutover_state_file" ] || return 1
+  [[ "$directory" =~ ^\.gitlab-vcs-cutover-([0-9a-f]{7,64})-([1-9][0-9]*)$ ]] || return 1
+  directory_hash="${BASH_REMATCH[1]}"
+  directory_generation="${BASH_REMATCH[2]}"
+  [ -z "$expected_generation" ] || [ "$directory_generation" = "$expected_generation" ] || return 1
   [ -d "$snapshot" ] && [ ! -L "$snapshot" ] || return 1
   [ -s "$snapshot/database.dump" ] && [ ! -L "$snapshot/database.dump" ] || return 1
   [ -f "$snapshot/artifacts.state" ] && [ ! -L "$snapshot/artifacts.state" ] || return 1
   [ -d "$snapshot/artifacts" ] && [ ! -L "$snapshot/artifacts" ] || return 1
-  [ -x "$recovery_tool" ] && [ ! -L "$recovery_tool" ] || return 1
+  for recovery_tool in "$snapshot"/gitlab-vcs-migrate-*; do
+    [ -e "$recovery_tool" ] || continue
+    [ -x "$recovery_tool" ] && [ ! -L "$recovery_tool" ] || return 1
+    recovery_head="${recovery_tool##*/gitlab-vcs-migrate-}"
+    [[ "$recovery_head" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 1
+    [[ "$recovery_head" == "$directory_hash"* ]] || return 1
+    [ -z "$expected_head" ] || [ "$recovery_head" = "$expected_head" ] || return 1
+    tool_count=$((tool_count + 1))
+  done
+  [ "$tool_count" -eq 1 ] || return 1
   while IFS='=' read -r key value; do
     case "$key" in
       web) [ -z "$snapshot_web" ] || return 1; snapshot_web="$value" ;;
@@ -603,8 +637,17 @@ validate_restored_cutover_snapshot() {
   if [ "$snapshot_migrate" = "1" ]; then
     [ -f "$snapshot/artifacts/migrate.previous" ] && [ ! -L "$snapshot/artifacts/migrate.previous" ] || return 1
   fi
+}
 
+validate_restored_cutover_snapshot() {
+  local record_generation="$cutover_generation" recovery_tool state_json state_generation
+
+  [ "$cutover_record_status" = "restored" ] || return 1
+  [[ "$record_generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  validate_cutover_snapshot_directory "$cutover_dir" "$cutover_record_head" "$cutover_backup_generation" || return 1
+  [ -f "$cutover_state_file" ] && [ ! -L "$cutover_state_file" ] || return 1
   load_workspace_env || return 1
+  recovery_tool="$REMOTE_DIR/$cutover_dir/gitlab-vcs-migrate-$cutover_record_head"
   state_json="$("$recovery_tool" status 2>&1)" || return 1
   read_cli_state "$state_json" || return 1
   state_generation="$cutover_generation"
@@ -612,7 +655,6 @@ validate_restored_cutover_snapshot() {
   [ "$cutover_phase" = "restored" ] || return 1
   [ "$cutover_maintenance" = "true" ] || return 1
   [ "$state_generation" = "$record_generation" ] || return 1
-  restored_git_status_dir="$cutover_dir"
 }
 
 capture_recovery_deliveries() {
@@ -903,10 +945,30 @@ export PATH="$HOME/.nvm/versions/node/v24.14.0/bin:$HOME/.local/bin:$HOME/go/bin
 cd "$REMOTE_DIR"
 if [ -f "$cutover_state_file" ]; then
   read_cutover_record || exit 7
-  if [ "$cutover_record_status" = "restored" ] && ! validate_restored_cutover_snapshot; then
-    echo "The restored GitLab recovery record, pinned status, or snapshot is incomplete or unverifiable; refusing to ignore its files or advance the release." >&2
-    exit 7
-  fi
+  case "$cutover_record_status" in
+    restored)
+      if ! validate_restored_cutover_snapshot; then
+        echo "The restored GitLab recovery record, pinned status, or snapshot is incomplete or unverifiable; refusing to ignore its files or advance the release." >&2
+        exit 7
+      fi
+      ;;
+    preparing|active|complete)
+      if ! validate_cutover_snapshot_directory "$cutover_dir" "$cutover_record_head" "$cutover_backup_generation"; then
+        echo "The GitLab recovery record or pinned snapshot is incomplete or unverifiable; refusing to ignore its files or advance the release." >&2
+        exit 7
+      fi
+      ;;
+  esac
+  for retained in "${cutover_retained_backup_dirs[@]}"; do
+    if [ -e "$REMOTE_DIR/$retained" ] || [ -L "$REMOTE_DIR/$retained" ]; then
+      if ! validate_cutover_snapshot_directory "$retained"; then
+        echo "A retained GitLab recovery snapshot is incomplete or unverifiable; refusing to ignore its files or advance the release." >&2
+        exit 7
+      fi
+    fi
+  done
+  git_status_backup_dirs=("${cutover_retained_backup_dirs[@]}" "$cutover_dir")
+  git_status_record_valid=1
   if [ "$cutover_record_status" = "preparing" ] && [ "$cutover_record_head" != "$EXPECTED_HEAD" ]; then
     echo "An interrupted pre-migration GitLab release is pinned to $cutover_record_head. Rerun that exact HEAD before deploying $EXPECTED_HEAD; do not mix release commits." >&2
     exit 7
@@ -953,13 +1015,17 @@ if [ -n "$remote_git_status" ]; then
     case "$status_entry" in
       " M apps/web/next-env.d.ts") next_env_dirty=1 ;;
       "?? .gitlab-vcs-cutover.state")
-        if [ -z "$restored_git_status_dir" ]; then unexpected+="${status_entry}"$'\n'; fi
+        if [ "$git_status_record_valid" != "1" ]; then unexpected+="${status_entry}"$'\n'; fi
         ;;
-      *)
-        if [ -z "$restored_git_status_dir" ] || [ "$status_entry" != "?? $restored_git_status_dir/" ]; then
-          unexpected+="${status_entry}"$'\n'
-        fi
+      "?? "*)
+        status_path="${status_entry#?? }"
+        known_backup=0
+        for registered_backup in "${git_status_backup_dirs[@]}"; do
+          if [ "$status_path" = "$registered_backup/" ]; then known_backup=1; break; fi
+        done
+        if [ "$known_backup" != "1" ]; then unexpected+="${status_entry}"$'\n'; fi
         ;;
+      *) unexpected+="${status_entry}"$'\n' ;;
     esac
   done <<<"$remote_git_status"
   if [ -n "$unexpected" ]; then
@@ -1246,7 +1312,11 @@ if [ "$no_op" = "true" ] && { [ "$cutover_record_status" = "active" ] || [ "$cut
   exit 7
 fi
 if [ "$no_op" = "false" ]; then
-  echo "This cutover requires genuine MR, pipeline, job, and note deliveries for every affected project; the release does not synthesize events or use a Hook test trigger. GitLab before 16.11 lacks the project Hook test-trigger API and before 17.3 lacks delivery-history API. Prepare operators and safe real event actions before maintenance; after Hook switch, perform those genuine events while the new endpoint remains gated. Verification stays gated until required receipts are persisted and reconciled; missing evidence can extend downtime." >&2
+  if [ "$gitlab_configuration_only" = "1" ]; then
+    echo "Configuration-only GitLab verification is explicitly enabled. Hook URL/event configuration and persisted receipt replay are still checked; maintenance-period deliveries are not verified per event type." >&2
+  else
+    echo "This cutover requires genuine MR, pipeline, job, and note deliveries for every affected project; the release does not synthesize events or use a Hook test trigger. GitLab before 16.11 lacks the project Hook test-trigger API and before 17.3 lacks delivery-history API. Prepare operators and safe real event actions before maintenance; after Hook switch, perform those genuine events while the new endpoint remains gated. Verification stays gated until required receipts are persisted and reconciled; missing evidence can extend downtime." >&2
+  fi
 fi
 
 if [ "$no_op" = "false" ]; then
@@ -1264,7 +1334,6 @@ if [ "$no_op" = "true" ]; then
 else
   case "$cutover_record_status" in
     active|preparing)
-      cutover_backup_generation="$cutover_generation"
       if [ -z "$cutover_dir" ] || [ -z "$cutover_since" ] || [ ! -s "$cutover_dir/database.dump" ] || [ ! -f "$cutover_dir/artifacts.state" ] || [ ! -x "$cutover_tool" ]; then
         cutover_pending=1
         echo "The pinned cutover backup, artifact snapshot, or tool is missing. Keep services stopped and restore the exact recovery materials before retrying." >&2
@@ -1273,11 +1342,11 @@ else
       ;;
     ""|restored)
       if [ "$cutover_record_status" = "restored" ]; then
-        cutover_backup_generation=$((cutover_generation + 1))
+        retain_cutover_backup_dir "$cutover_dir"
+        cutover_backup_generation=$((cutover_backup_generation + 1))
       else
         cutover_backup_generation=1
       fi
-      cutover_generation="$cutover_backup_generation"
       cutover_dir=".gitlab-vcs-cutover-$EXPECTED_COMMIT-$cutover_backup_generation"
       cutover_since="$(date -u "+%Y-%m-%dT%H:%M:%SZ")"
       mkdir -m 0700 -p "$cutover_dir"
@@ -1377,7 +1446,6 @@ else
         exit 7
         ;;
     esac
-    cutover_generation="$cutover_backup_generation"
     if ! write_cutover_record active; then
       echo "Could not promote the pinned pre-migration recovery record; keep services stopped." >&2
       exit 7
@@ -1400,6 +1468,14 @@ else
       exit 7
     fi
     printf '%s\n' "$cli_output"
+    if ! read_cli_state "$cli_output" || [ "$cutover_phase" != "maintenance" ] || [ "$cutover_maintenance" != "true" ]; then
+      echo "GitLab migration begin did not confirm its maintenance-gated generation; refusing to continue." >&2
+      exit 7
+    fi
+    if ! write_cutover_record active; then
+      echo "Could not persist the active GitLab cutover generation; keep services stopped." >&2
+      exit 7
+    fi
     if ! cli_output="$("$cutover_tool" migrate 2>&1)"; then
       printf '%s\n' "$cli_output" >&2
       exit 7
@@ -1461,14 +1537,20 @@ else
   fi
   status_json="$("$cutover_tool" status 2>&1)" || exit 7
   capture_recovery_deliveries "$status_json"
-  if ! cli_output="$("$cutover_tool" verify-hooks --since "$cutover_since" 2>&1)"; then
+  verify_hooks_args=()
+  if [ "$gitlab_configuration_only" = "1" ]; then verify_hooks_args+=(--configuration-only); fi
+  if ! cli_output="$("$cutover_tool" verify-hooks "${verify_hooks_args[@]}" --since "$cutover_since" 2>&1)"; then
     printf '%s\n' "$cli_output" >&2
     status_json="$("$cutover_tool" status 2>&1 || true)"
     cutover_phase="$(json_field phase <<<"$status_json" 2>/dev/null || true)"
     report_recovery_deliveries "$status_json"
     if [ "$cutover_phase" = "verification_pending" ] || [ "$cutover_phase" = "ready" ]; then
       cutover_pending=1
-      echo "GitLab Hook/delivery verification is pending. On GitLab 13.12.15 only genuine MR, pipeline, job, and note deliveries create receipts; no test-trigger or delivery-history API can fill or enumerate them. Arrange controlled real events, keep maintenance enabled, and rerun replay, verification, and finalization at the same pinned HEAD. Missing evidence means extended downtime; do not bypass the gate." >&2
+      if [ "$gitlab_configuration_only" = "1" ]; then
+        echo "Configuration-only Hook verification remains pending; correct Hook URL/event configuration and rerun replay, verification, and finalization at the same pinned HEAD. Maintenance-period deliveries are not verified per event type; do not bypass the maintenance gate." >&2
+      else
+        echo "GitLab Hook/delivery verification is pending. On GitLab 13.12.15 only genuine MR, pipeline, job, and note deliveries create receipts; no test-trigger or delivery-history API can fill or enumerate them. Arrange controlled real events, keep maintenance enabled, and rerun replay, verification, and finalization at the same pinned HEAD. Missing evidence means extended downtime; do not bypass the gate." >&2
+      fi
       exit 7
     fi
     exit 7
@@ -1551,7 +1633,7 @@ git status --short --branch
 git rev-parse HEAD
 REMOTE_SCRIPT
 )"
-  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") EXPECTED_COMMIT=$(printf '%q' "$EXPECTED_COMMIT") EXPECTED_BINARY_VERSION=$(printf '%q' "$EXPECTED_BINARY_VERSION") REMOTE_ARTIFACT=$(printf '%q' "$remote_artifact") PUBLIC_URL=$(printf '%q' 'https://multica.zxyh.club') MULTICA_RELEASE_SYSTEM_HOOK_ATTESTATION=$(printf '%q' "$SYSTEM_HOOK_ATTESTATION") bash -s" <<<"$remote_script"
+  ssh -o RequestTTY=no "$REMOTE_HOST" "REMOTE_DIR=$(printf '%q' "$REMOTE_DIR") REMOTE_NAME=$(printf '%q' "$REMOTE_NAME") BRANCH=$(printf '%q' "$branch") EXPECTED_HEAD=$(printf '%q' "$EXPECTED_HEAD") EXPECTED_COMMIT=$(printf '%q' "$EXPECTED_COMMIT") EXPECTED_BINARY_VERSION=$(printf '%q' "$EXPECTED_BINARY_VERSION") REMOTE_ARTIFACT=$(printf '%q' "$remote_artifact") PUBLIC_URL=$(printf '%q' 'https://multica.zxyh.club') MULTICA_RELEASE_SYSTEM_HOOK_ATTESTATION=$(printf '%q' "$SYSTEM_HOOK_ATTESTATION") MULTICA_RELEASE_GITLAB_CONFIGURATION_ONLY=$(printf '%q' "$GITLAB_CONFIGURATION_ONLY") bash -s" <<<"$remote_script"
   trap - EXIT
 fi
 

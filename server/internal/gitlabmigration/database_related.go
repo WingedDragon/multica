@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -74,8 +75,12 @@ func (r *Runner) importPipelines(ctx context.Context, tx pgx.Tx, connections map
 		if pullRequestID == "" {
 			return fmt.Errorf("legacy GitLab pipeline %d has no unified MR ID mapping", pipeline.pipelineID)
 		}
-		pipelineProjectID, pipelinePath, ok := resolvePipelineProjectIdentity(pipeline.pipelineProjectID, pipeline.projectID, pipeline.projectPath,
-			pipeline.sourceProjectID, pipeline.sourcePath, pipeline.sourceBranch, pipeline.mrNumber, pipeline.ref)
+		pipelineProjectID, pipelinePath, ok, err := resolvePipelineProjectIdentity(
+			ctx, connection.API, pipeline.pipelineProjectID, pipeline.projectID, pipeline.projectPath,
+			pipeline.sourceProjectID, pipeline.sourcePath, pipeline.pipelineID, pipeline.sha, pipeline.webURL)
+		if err != nil {
+			return fmt.Errorf("resolve GitLab pipeline %d project identity: %w", pipeline.pipelineID, err)
+		}
 		if !ok {
 			return fmt.Errorf("GitLab pipeline %d on MR %s!%d has unknown project identity; resolve it before migration", pipeline.pipelineID, pipeline.projectPath, pipeline.mrNumber)
 		}
@@ -88,26 +93,293 @@ func (r *Runner) importPipelines(ctx context.Context, tx pgx.Tx, connections map
 	return nil
 }
 
-func resolvePipelineProjectIdentity(pipelineProjectID, targetProjectID int64, targetPath string, sourceProjectID pgtype.Int8, sourcePath, sourceBranch string, number int32, ref string) (int64, string, bool) {
+type gitLabProjectIdentity struct {
+	ID                int64  `json:"id"`
+	PathWithNamespace string `json:"path_with_namespace"`
+}
+
+type gitLabPipelineIdentity struct {
+	ID        int64  `json:"id"`
+	ProjectID int64  `json:"project_id"`
+	SHA       string `json:"sha"`
+	Ref       string `json:"ref"`
+	WebURL    string `json:"web_url"`
+}
+
+type pipelineProjectCandidate struct {
+	id   int64
+	path string
+}
+
+func resolvePipelineProjectIdentity(ctx context.Context, api *gitlabAPI, pipelineProjectID, targetProjectID int64, targetPath string,
+	sourceProjectID pgtype.Int8, sourcePath string, pipelineID int64, sha string, webURL pgtype.Text,
+) (int64, string, bool, error) {
+	if pipelineID <= 0 || targetProjectID <= 0 || strings.TrimSpace(targetPath) == "" {
+		return 0, "", false, nil
+	}
+	if sourceProjectID.Valid && sourceProjectID.Int64 > 0 &&
+		((sourceProjectID.Int64 == targetProjectID && sourcePath != "" && sourcePath != targetPath) ||
+			(sourcePath == targetPath && sourcePath != "" && sourceProjectID.Int64 != targetProjectID)) {
+		return 0, "", false, errors.New("merge request source and target project identities conflict")
+	}
+	if pipelineProjectID > 0 {
+		if id, path, ok := resolvePipelineProjectIdentityFromStoredFields(
+			pipelineProjectID, targetProjectID, targetPath, sourceProjectID, sourcePath,
+		); ok {
+			return id, path, true, nil
+		}
+	}
+
+	urlPresent := webURL.Valid && strings.TrimSpace(webURL.String) != ""
+	if urlPresent {
+		if api == nil {
+			return 0, "", false, errors.New("GitLab connection API is unavailable to validate pipeline URL")
+		}
+		urlProjectPath, ok := pipelineProjectPathFromURL(api.baseURL, webURL.String, pipelineID)
+		if !ok {
+			return 0, "", false, errors.New("stored pipeline URL does not identify this pipeline on the connected GitLab instance")
+		}
+		if pipelineProjectID > 0 {
+			project, err := gitLabProjectByID(ctx, api, pipelineProjectID)
+			if err != nil {
+				return 0, "", false, fmt.Errorf("verify pipeline project %d from its URL: %w", pipelineProjectID, err)
+			}
+			if project.PathWithNamespace != urlProjectPath {
+				return 0, "", false, fmt.Errorf("pipeline URL project %q conflicts with API project %q", urlProjectPath, project.PathWithNamespace)
+			}
+			if err := validateProjectAgainstMR(project, targetProjectID, targetPath, sourceProjectID, sourcePath); err != nil {
+				return 0, "", false, err
+			}
+			return project.ID, project.PathWithNamespace, true, nil
+		}
+		if urlProjectPath == targetPath {
+			return targetProjectID, targetPath, true, nil
+		}
+		if sourcePath != "" && urlProjectPath == sourcePath {
+			if sourceProjectID.Valid && sourceProjectID.Int64 > 0 {
+				return sourceProjectID.Int64, sourcePath, true, nil
+			}
+			project, err := gitLabProjectByPath(ctx, api, sourcePath)
+			if err != nil {
+				return 0, "", false, fmt.Errorf("resolve pipeline source project %q: %w", sourcePath, err)
+			}
+			return project.ID, project.PathWithNamespace, true, nil
+		}
+		return 0, "", false, fmt.Errorf("pipeline URL project %q is neither the MR target nor its recorded source project", urlProjectPath)
+	}
+
+	if id, path, ok := resolvePipelineProjectIdentityFromStoredFields(
+		pipelineProjectID, targetProjectID, targetPath, sourceProjectID, sourcePath,
+	); ok {
+		return id, path, true, nil
+	}
+	if api == nil {
+		return 0, "", false, errors.New("GitLab connection API is unavailable to resolve pipeline project")
+	}
+	if pipelineProjectID > 0 {
+		project, err := gitLabProjectByID(ctx, api, pipelineProjectID)
+		if err != nil {
+			return 0, "", false, fmt.Errorf("resolve pipeline project %d: %w", pipelineProjectID, err)
+		}
+		if err := validateProjectAgainstMR(project, targetProjectID, targetPath, sourceProjectID, sourcePath); err != nil {
+			return 0, "", false, err
+		}
+		candidate := pipelineProjectCandidate{id: project.ID, path: project.PathWithNamespace}
+		if err := verifyGitLabPipelineIdentity(ctx, api, candidate, pipelineID, sha); err != nil {
+			return 0, "", false, err
+		}
+		return candidate.id, candidate.path, true, nil
+	}
+
+	targetProject, err := gitLabProjectByID(ctx, api, targetProjectID)
+	if err != nil {
+		return 0, "", false, fmt.Errorf("verify target project %d for URL-less pipeline: %w", targetProjectID, err)
+	}
+	if targetProject.PathWithNamespace != targetPath {
+		return 0, "", false, fmt.Errorf("merge request target path %q conflicts with API project %q", targetPath, targetProject.PathWithNamespace)
+	}
+	candidates := []pipelineProjectCandidate{{id: targetProject.ID, path: targetProject.PathWithNamespace}}
+	addCandidate := func(candidate pipelineProjectCandidate) error {
+		for _, existing := range candidates {
+			if existing.id == candidate.id && existing.path == candidate.path {
+				return nil
+			}
+			if existing.id == candidate.id || existing.path == candidate.path {
+				return fmt.Errorf("candidate project identities conflict: %d (%s) and %d (%s)",
+					existing.id, existing.path, candidate.id, candidate.path)
+			}
+		}
+		candidates = append(candidates, candidate)
+		return nil
+	}
+	if sourceProjectID.Valid && sourceProjectID.Int64 > 0 {
+		if sourceProjectID.Int64 != targetProjectID {
+			project, err := gitLabProjectByID(ctx, api, sourceProjectID.Int64)
+			if err != nil {
+				return 0, "", false, fmt.Errorf("resolve merge request source project %d: %w", sourceProjectID.Int64, err)
+			}
+			if sourcePath != "" && project.PathWithNamespace != sourcePath {
+				return 0, "", false, fmt.Errorf("merge request source path %q conflicts with API project %q", sourcePath, project.PathWithNamespace)
+			}
+			if err := addCandidate(pipelineProjectCandidate{id: project.ID, path: project.PathWithNamespace}); err != nil {
+				return 0, "", false, err
+			}
+		}
+	} else if sourcePath != "" {
+		project, err := gitLabProjectByPath(ctx, api, sourcePath)
+		if err != nil {
+			return 0, "", false, fmt.Errorf("resolve merge request source project path %q: %w", sourcePath, err)
+		}
+		if err := addCandidate(pipelineProjectCandidate{id: project.ID, path: project.PathWithNamespace}); err != nil {
+			return 0, "", false, err
+		}
+	}
+
+	var matches []pipelineProjectCandidate
+	var failures []error
+	for _, candidate := range candidates {
+		if err := verifyGitLabPipelineIdentity(ctx, api, candidate, pipelineID, sha); err != nil {
+			failures = append(failures, fmt.Errorf("candidate project %d (%s): %w", candidate.id, candidate.path, err))
+			continue
+		}
+		matches = append(matches, candidate)
+	}
+	if len(failures) != 0 {
+		return 0, "", false, fmt.Errorf("pipeline project remains ambiguous because candidate verification failed: %w", errors.Join(failures...))
+	}
+	if len(matches) != 1 {
+		if len(matches) > 1 {
+			return 0, "", false, errors.New("pipeline ID and SHA exist in multiple candidate projects")
+		}
+		return 0, "", false, nil
+	}
+	return matches[0].id, matches[0].path, true, nil
+}
+
+func resolvePipelineProjectIdentityFromStoredFields(pipelineProjectID, targetProjectID int64, targetPath string,
+	sourceProjectID pgtype.Int8, sourcePath string,
+) (int64, string, bool) {
 	if pipelineProjectID == targetProjectID && pipelineProjectID > 0 && strings.TrimSpace(targetPath) != "" {
 		return pipelineProjectID, targetPath, true
 	}
 	if sourceProjectID.Valid && pipelineProjectID == sourceProjectID.Int64 && sourceProjectID.Int64 > 0 && strings.TrimSpace(sourcePath) != "" {
 		return sourceProjectID.Int64, sourcePath, true
 	}
-	if pipelineProjectID > 0 {
-		return 0, "", false
-	}
-	// Old rows created before pipeline_project_id was added can be identified
-	// only when GitLab's stable MR ref or the MR's authoritative source branch
-	// proves the project. Otherwise migration stops instead of guessing.
-	if targetProjectID > 0 && strings.TrimSpace(targetPath) != "" && targetMRRef(number, ref) {
-		return targetProjectID, targetPath, true
-	}
-	if sourceProjectID.Valid && sourceProjectID.Int64 > 0 && strings.TrimSpace(sourcePath) != "" && sourceBranch != "" && ref == sourceBranch {
-		return sourceProjectID.Int64, sourcePath, true
-	}
 	return 0, "", false
+}
+
+func pipelineProjectPathFromURL(instanceURL, rawURL string, pipelineID int64) (string, bool) {
+	instance, err := url.Parse(strings.TrimSpace(instanceURL))
+	if err != nil || instance.Scheme == "" || instance.Host == "" || instance.User != nil {
+		return "", false
+	}
+	pipeline, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || pipeline.Scheme == "" || pipeline.Host == "" || pipeline.User != nil ||
+		pipeline.RawQuery != "" || pipeline.Fragment != "" ||
+		!strings.EqualFold(instance.Scheme, pipeline.Scheme) || !strings.EqualFold(instance.Host, pipeline.Host) {
+		return "", false
+	}
+	path := pipeline.EscapedPath()
+	basePath := strings.TrimSuffix(instance.EscapedPath(), "/")
+	if basePath != "" {
+		if !strings.HasPrefix(path, basePath+"/") {
+			return "", false
+		}
+		path = strings.TrimPrefix(path, basePath)
+	}
+	if strings.Contains(strings.ToLower(path), "%2f") || pipelineID <= 0 {
+		return "", false
+	}
+	suffix := fmt.Sprintf("/-/pipelines/%d", pipelineID)
+	if !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	escapedProjectPath := strings.TrimPrefix(strings.TrimSuffix(path, suffix), "/")
+	if escapedProjectPath == "" || strings.Contains(escapedProjectPath, "//") {
+		return "", false
+	}
+	projectPath, err := url.PathUnescape(escapedProjectPath)
+	if err != nil || strings.TrimSpace(projectPath) == "" {
+		return "", false
+	}
+	for _, segment := range strings.Split(projectPath, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", false
+		}
+	}
+	return projectPath, true
+}
+
+func gitLabProjectByID(ctx context.Context, api *gitlabAPI, projectID int64) (gitLabProjectIdentity, error) {
+	var project gitLabProjectIdentity
+	if projectID <= 0 {
+		return project, errors.New("GitLab project ID is invalid")
+	}
+	_, err := api.request(ctx, http.MethodGet, "/projects/"+strconv.FormatInt(projectID, 10), nil, &project)
+	if err != nil {
+		return project, err
+	}
+	if project.ID != projectID || strings.TrimSpace(project.PathWithNamespace) == "" {
+		return project, fmt.Errorf("GitLab returned an inconsistent project identity for ID %d", projectID)
+	}
+	return project, nil
+}
+
+func gitLabProjectByPath(ctx context.Context, api *gitlabAPI, projectPath string) (gitLabProjectIdentity, error) {
+	var project gitLabProjectIdentity
+	if strings.TrimSpace(projectPath) == "" {
+		return project, errors.New("GitLab project path is empty")
+	}
+	_, err := api.request(ctx, http.MethodGet, "/projects/"+url.PathEscape(projectPath), nil, &project)
+	if err != nil {
+		return project, err
+	}
+	if project.ID <= 0 || project.PathWithNamespace != projectPath {
+		return project, fmt.Errorf("GitLab returned project path %q for requested path %q", project.PathWithNamespace, projectPath)
+	}
+	return project, nil
+}
+
+func validateProjectAgainstMR(project gitLabProjectIdentity, targetProjectID int64, targetPath string, sourceProjectID pgtype.Int8, sourcePath string) error {
+	if project.ID == targetProjectID && project.PathWithNamespace == targetPath {
+		return nil
+	}
+	if sourceProjectID.Valid && sourceProjectID.Int64 > 0 && project.ID == sourceProjectID.Int64 &&
+		(sourcePath == "" || project.PathWithNamespace == sourcePath) {
+		return nil
+	}
+	if !sourceProjectID.Valid && sourcePath != "" && project.PathWithNamespace == sourcePath {
+		return nil
+	}
+	if project.ID == targetProjectID || project.PathWithNamespace == targetPath {
+		return fmt.Errorf("GitLab project identity (%d,%q) conflicts with MR target (%d,%q)", project.ID, project.PathWithNamespace, targetProjectID, targetPath)
+	}
+	if (sourceProjectID.Valid && sourceProjectID.Int64 > 0 && project.ID == sourceProjectID.Int64) ||
+		(sourcePath != "" && project.PathWithNamespace == sourcePath) {
+		return fmt.Errorf("GitLab project identity (%d,%q) conflicts with MR source (%d,%q)", project.ID, project.PathWithNamespace, sourceProjectID.Int64, sourcePath)
+	}
+	return fmt.Errorf("GitLab project identity (%d,%q) is neither the MR target nor its recorded source project", project.ID, project.PathWithNamespace)
+}
+
+func verifyGitLabPipelineIdentity(ctx context.Context, api *gitlabAPI, candidate pipelineProjectCandidate, pipelineID int64, sha string) error {
+	var pipeline gitLabPipelineIdentity
+	path := fmt.Sprintf("/projects/%d/pipelines/%d", candidate.id, pipelineID)
+	if _, err := api.request(ctx, http.MethodGet, path, nil, &pipeline); err != nil {
+		return err
+	}
+	if pipeline.ID != pipelineID || pipeline.ProjectID != candidate.id || strings.TrimSpace(sha) == "" ||
+		strings.TrimSpace(pipeline.SHA) == "" || pipeline.SHA != sha {
+		return errors.New("GitLab pipeline response does not match stored pipeline ID, project ID, and SHA")
+	}
+	if pipeline.WebURL != "" {
+		projectPath, ok := pipelineProjectPathFromURL(api.baseURL, pipeline.WebURL, pipelineID)
+		if !ok || projectPath != candidate.path {
+			return fmt.Errorf("GitLab pipeline response URL does not match project %q and pipeline %d", candidate.path, pipelineID)
+		}
+	}
+	// GitLab may normalize an MR pipeline ref to refs/merge-requests/<iid>/head;
+	// ref is not project identity and is intentionally not compared.
+	return nil
 }
 
 func upsertGitLabPipeline(ctx context.Context, tx pgx.Tx, workspaceID, connectionID, pullRequestID string, pipelineID, projectID int64, projectPath, sha, ref, status string, webURL pgtype.Text, updatedAt, createdAt, rowUpdatedAt time.Time) error {
@@ -787,10 +1059,6 @@ func verifyImportedRows(ctx context.Context, tx pgx.Tx) error {
 		}
 	}
 	return nil
-}
-
-func targetMRRef(number int32, ref string) bool {
-	return ref == fmt.Sprintf("refs/merge-requests/%d/head", number) || ref == fmt.Sprintf("refs/merge-requests/%d/merge", number)
 }
 
 func projectGroupAncestor(groupPath, projectPath string) bool {

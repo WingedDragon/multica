@@ -906,19 +906,19 @@ func TestDatabaseMigrationNoOpsAfterFinalizeWithoutLegacyTables(t *testing.T) {
 	}
 }
 
-func TestDatabaseMigrationResolvesPipelineProjectIDFromMergeRequestRef(t *testing.T) {
+func TestDatabaseMigrationResolvesPipelineProjectIDFromCompleteURL(t *testing.T) {
 	f := newDatabaseMigrationFixture(t)
 	f.seedLegacyProjectAndMR(t)
 	if _, err := f.pool.Exec(context.Background(), `
 		INSERT INTO gitlab_mr_pipeline (
 			merge_request_id,pipeline_id,pipeline_project_id,sha,ref,status,web_url,pipeline_updated_at
 		) VALUES ($1,1901,0,'legacy-ci-head','refs/merge-requests/81/head','failed',
-			'https://gitlab.example.test/group/sub/project/-/pipelines/1901',$2)
-	`, f.mergeReq, f.at); err != nil {
+			$2,$3)
+	`, f.mergeReq, f.server.URL+"/group/sub/project/-/pipelines/1901", f.at); err != nil {
 		t.Fatalf("insert legacy pipeline without project ID: %v", err)
 	}
 	if err := f.runner.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate legacy pipeline with an authoritative MR ref: %v", err)
+		t.Fatalf("migrate legacy pipeline with a complete same-instance project URL: %v", err)
 	}
 	var pipelineProjectID int64
 	var pipelineProjectPath string
@@ -940,9 +940,8 @@ func TestDatabaseMigrationFailsClosedOnUnknownPipelineProject(t *testing.T) {
 	if _, err := f.pool.Exec(context.Background(), `
 		INSERT INTO gitlab_mr_pipeline (
 			merge_request_id,pipeline_id,pipeline_project_id,sha,ref,status,web_url,pipeline_updated_at
-		) VALUES ($1,1902,0,'unknown-ci-head','feature/not-the-authoritative-branch','failed',
-			'https://gitlab.example.test/pipeline/1902',$2)
-	`, f.mergeReq, f.at); err != nil {
+		) VALUES ($1,1902,0,'unknown-ci-head','feature/not-the-authoritative-branch','failed',$2,$3)
+	`, f.mergeReq, f.server.URL+"/group/unrelated/project/-/pipelines/1902", f.at); err != nil {
 		t.Fatalf("insert pipeline with unknown project identity: %v", err)
 	}
 	if err := f.runner.Migrate(context.Background()); err == nil {

@@ -23,6 +23,7 @@ type connectionMapping struct {
 	Legacy legacyConnection
 	ID     string
 	Login  string
+	API    *gitlabAPI
 }
 
 type projectMapping struct {
@@ -180,7 +181,7 @@ func (r *Runner) importConnections(ctx context.Context, tx pgx.Tx, box *secretbo
 		if err := upsertIDMapping(ctx, tx, old.WorkspaceID, "connection", old.ID, id); err != nil {
 			return nil, err
 		}
-		connections[workspaceIdentity(old.WorkspaceID, old.ID)] = connectionMapping{Legacy: old, ID: id, Login: login}
+		connections[workspaceIdentity(old.WorkspaceID, old.ID)] = connectionMapping{Legacy: old, ID: id, Login: login, API: api}
 	}
 	return connections, nil
 }

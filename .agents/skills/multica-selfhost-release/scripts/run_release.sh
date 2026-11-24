@@ -305,6 +305,7 @@ cutover_since=""
 cutover_generation=0
 cutover_backup_generation=0
 cutover_record_status=""
+restored_git_status_dir=""
 cutover_record_system_hook_attestation=""
 cutover_record_backend=0
 cutover_record_frontend=0
@@ -548,6 +549,70 @@ read_cli_state() {
   cutover_maintenance="$(json_field maintenance_mode <<<"$json")"
   cutover_generation="$(json_field generation <<<"$json")"
   [ -n "$cutover_phase" ] && [ -n "$cutover_maintenance" ] && [ -n "$cutover_generation" ]
+}
+
+validate_restored_cutover_snapshot() {
+  local snapshot="$REMOTE_DIR/$cutover_dir"
+  local recovery_tool="$snapshot/gitlab-vcs-migrate-$cutover_record_head"
+  local record_generation="$cutover_generation"
+  local directory_hash directory_suffix state_json state_generation key value
+  local snapshot_web="" snapshot_server="" snapshot_multica="" snapshot_migrate=""
+
+  [ "$cutover_record_status" = "restored" ] || return 1
+  [[ "$cutover_record_head" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 1
+  [[ "$record_generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  case "$cutover_dir" in .gitlab-vcs-cutover-*) ;; *) return 1 ;; esac
+  directory_hash="${cutover_dir#.gitlab-vcs-cutover-}"
+  directory_suffix="-$record_generation"
+  case "$directory_hash" in
+    *"$directory_suffix") directory_hash="${directory_hash%"$directory_suffix"}" ;;
+    *) return 1 ;;
+  esac
+  [[ "$directory_hash" =~ ^[0-9a-f]{7,64}$ ]] || return 1
+  [[ "$cutover_record_head" == "$directory_hash"* ]] || return 1
+  [ "$cutover_dir" = ".gitlab-vcs-cutover-$directory_hash-$record_generation" ] || return 1
+
+  [ -f "$cutover_state_file" ] && [ ! -L "$cutover_state_file" ] || return 1
+  [ -d "$snapshot" ] && [ ! -L "$snapshot" ] || return 1
+  [ -s "$snapshot/database.dump" ] && [ ! -L "$snapshot/database.dump" ] || return 1
+  [ -f "$snapshot/artifacts.state" ] && [ ! -L "$snapshot/artifacts.state" ] || return 1
+  [ -d "$snapshot/artifacts" ] && [ ! -L "$snapshot/artifacts" ] || return 1
+  [ -x "$recovery_tool" ] && [ ! -L "$recovery_tool" ] || return 1
+  while IFS='=' read -r key value; do
+    case "$key" in
+      web) [ -z "$snapshot_web" ] || return 1; snapshot_web="$value" ;;
+      server) [ -z "$snapshot_server" ] || return 1; snapshot_server="$value" ;;
+      multica) [ -z "$snapshot_multica" ] || return 1; snapshot_multica="$value" ;;
+      migrate) [ -z "$snapshot_migrate" ] || return 1; snapshot_migrate="$value" ;;
+      "") ;;
+      *) return 1 ;;
+    esac
+  done <"$snapshot/artifacts.state"
+  for value in "$snapshot_web" "$snapshot_server" "$snapshot_multica" "$snapshot_migrate"; do
+    case "$value" in 0|1) ;; *) return 1 ;; esac
+  done
+  if [ "$snapshot_web" = "1" ]; then
+    [ -d "$snapshot/artifacts/web.previous" ] && [ ! -L "$snapshot/artifacts/web.previous" ] || return 1
+  fi
+  if [ "$snapshot_server" = "1" ]; then
+    [ -f "$snapshot/artifacts/server.previous" ] && [ ! -L "$snapshot/artifacts/server.previous" ] || return 1
+  fi
+  if [ "$snapshot_multica" = "1" ]; then
+    [ -f "$snapshot/artifacts/multica.previous" ] && [ ! -L "$snapshot/artifacts/multica.previous" ] || return 1
+  fi
+  if [ "$snapshot_migrate" = "1" ]; then
+    [ -f "$snapshot/artifacts/migrate.previous" ] && [ ! -L "$snapshot/artifacts/migrate.previous" ] || return 1
+  fi
+
+  load_workspace_env || return 1
+  state_json="$("$recovery_tool" status 2>&1)" || return 1
+  read_cli_state "$state_json" || return 1
+  state_generation="$cutover_generation"
+  cutover_generation="$record_generation"
+  [ "$cutover_phase" = "restored" ] || return 1
+  [ "$cutover_maintenance" = "true" ] || return 1
+  [ "$state_generation" = "$record_generation" ] || return 1
+  restored_git_status_dir="$cutover_dir"
 }
 
 capture_recovery_deliveries() {
@@ -838,6 +903,10 @@ export PATH="$HOME/.nvm/versions/node/v24.14.0/bin:$HOME/.local/bin:$HOME/go/bin
 cd "$REMOTE_DIR"
 if [ -f "$cutover_state_file" ]; then
   read_cutover_record || exit 7
+  if [ "$cutover_record_status" = "restored" ] && ! validate_restored_cutover_snapshot; then
+    echo "The restored GitLab recovery record, pinned status, or snapshot is incomplete or unverifiable; refusing to ignore its files or advance the release." >&2
+    exit 7
+  fi
   if [ "$cutover_record_status" = "preparing" ] && [ "$cutover_record_head" != "$EXPECTED_HEAD" ]; then
     echo "An interrupted pre-migration GitLab release is pinned to $cutover_record_head. Rerun that exact HEAD before deploying $EXPECTED_HEAD; do not mix release commits." >&2
     exit 7
@@ -876,14 +945,29 @@ git fetch "$REMOTE_NAME" "$BRANCH"
 if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
   git switch "$BRANCH" || git switch -c "$BRANCH" "$REMOTE_NAME/$BRANCH"
 fi
-if [ -n "$(git status --porcelain)" ]; then
-  unexpected="$(git status --porcelain | grep -v "^ M apps/web/next-env.d.ts$" || true)"
+remote_git_status="$(git status --porcelain)"
+if [ -n "$remote_git_status" ]; then
+  unexpected=""
+  next_env_dirty=0
+  while IFS= read -r status_entry; do
+    case "$status_entry" in
+      " M apps/web/next-env.d.ts") next_env_dirty=1 ;;
+      "?? .gitlab-vcs-cutover.state")
+        if [ -z "$restored_git_status_dir" ]; then unexpected+="${status_entry}"$'\n'; fi
+        ;;
+      *)
+        if [ -z "$restored_git_status_dir" ] || [ "$status_entry" != "?? $restored_git_status_dir/" ]; then
+          unexpected+="${status_entry}"$'\n'
+        fi
+        ;;
+    esac
+  done <<<"$remote_git_status"
   if [ -n "$unexpected" ]; then
     echo "Remote worktree has unexpected local changes:" >&2
     git status --short >&2
     exit 4
   fi
-  git restore apps/web/next-env.d.ts
+  if [ "$next_env_dirty" = "1" ]; then git restore apps/web/next-env.d.ts; fi
 fi
 if ! git merge --ff-only "$REMOTE_NAME/$BRANCH"; then
   echo "Remote checkout cannot fast-forward; refusing to reset or discard commits automatically." >&2

@@ -9,8 +9,9 @@ import test from "node:test";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const releaseScript = path.resolve(scriptDir, "../.agents/skills/multica-selfhost-release/scripts/run_release.sh");
-const pinnedHead = "abc1234deadbeef";
+const pinnedHead = "abc1234deadbeef" + "0".repeat(25);
 const pinnedCommit = "abc1234";
+const forwardedHead = "feedfacecafebeef" + "0".repeat(24);
 const upstreamPin = "a".repeat(40);
 const databaseSecret = "database-password-must-never-be-printed";
 const redisSecret = "redis-password-must-never-be-printed";
@@ -68,7 +69,14 @@ if [[ "$PWD" == "$MULTICA_TEST_REMOTE_DIR"* ]]; then
   case "$*" in
     "fetch $MULTICA_TEST_REMOTE_NAME $MULTICA_TEST_BRANCH") ;;
     "rev-parse --abbrev-ref HEAD") echo "$MULTICA_TEST_BRANCH" ;;
-    "status --porcelain") ;;
+    "status --porcelain")
+      case "$MULTICA_TEST_SCENARIO" in
+        restored_new_head|restored_unknown_dir)
+          printf '?? .gitlab-vcs-cutover.state\\n?? %s/\\n' "$MULTICA_TEST_RESTORED_DIR"
+          if [ "$MULTICA_TEST_SCENARIO" = "restored_unknown_dir" ]; then printf '?? %s/\\n' "$MULTICA_TEST_UNKNOWN_CUTOVER_DIR"; fi
+          ;;
+      esac
+      ;;
     "restore apps/web/next-env.d.ts") ;;
     "merge --ff-only $MULTICA_TEST_REMOTE_NAME/$MULTICA_TEST_BRANCH") ;;
     "rev-parse HEAD") echo "$MULTICA_TEST_HEAD" ;;
@@ -375,15 +383,25 @@ else
 fi
 `);
 
+  let restoredCutoverDir = "";
+  let unknownCutoverDir = "";
   for (const service of ["multica-backend", "multica-frontend"]) {
     writeFileSync(path.join(state, "services", service), "active");
   }
-  if (["restore_retry", "new_commit_restore_active", "resume_preparing_attested"].includes(scenario)) {
+  if (["restore_retry", "new_commit_restore_active", "resume_preparing_attested", "restored_new_head", "restored_unknown_dir"].includes(scenario)) {
     const cutoverDir = `.gitlab-vcs-cutover-${pinnedCommit}-1`;
     const cutoverPath = path.join(remote, cutoverDir);
+    const restoredScenario = ["restored_new_head", "restored_unknown_dir"].includes(scenario);
+    if (restoredScenario) restoredCutoverDir = cutoverDir;
     mkdirSync(cutoverPath, { recursive: true });
-    if (scenario === "resume_preparing_attested") {
-      writeFileSync(path.join(cutoverPath, "database.dump"), "mock database backup\n", { mode: 0o600 });
+    if (scenario === "resume_preparing_attested" || restoredScenario) {
+      writeFileSync(path.join(cutoverPath, "database.dump"), "mock database backup", { mode: 0o600 });
+    }
+    if (scenario === "restored_unknown_dir") {
+      unknownCutoverDir = `.gitlab-vcs-cutover-${pinnedCommit}-nearby`;
+      const unknownPath = path.join(remote, unknownCutoverDir);
+      mkdirSync(unknownPath, { recursive: true });
+      writeFileSync(path.join(unknownPath, "unrelated.txt"), "preserve me");
     }
     const artifacts = path.join(cutoverPath, "artifacts");
     const oldWeb = path.join(artifacts, "web.previous");
@@ -397,7 +415,7 @@ fi
     writeFileSync(path.join(cutoverPath, "artifacts.state"), "web=1\nserver=1\nmultica=1\nmigrate=1\n", { mode: 0o600 });
     writeFileSync(path.join(remote, ".gitlab-vcs-cutover.state"), [
       `head=${pinnedHead}`,
-      `status=${scenario === "resume_preparing_attested" ? "preparing" : "active"}`,
+      `status=${scenario === "resume_preparing_attested" ? "preparing" : restoredScenario ? "restored" : "active"}`,
       `backup_dir=${cutoverDir}`,
       "since=2026-11-23T00:00:00Z",
       "generation=1",
@@ -407,7 +425,7 @@ fi
       "",
     ].join("\n"), { mode: 0o600 });
     const resumePreparing = scenario === "resume_preparing_attested";
-    const restorePhase = resumePreparing ? "maintenance" : scenario === "new_commit_restore_active" ? "restored" : "restore_blocked";
+    const restorePhase = resumePreparing ? "maintenance" : scenario === "new_commit_restore_active" || restoredScenario ? "restored" : "restore_blocked";
     const migrationGeneration = resumePreparing ? 0 : 1;
     writeFileSync(path.join(state, "state"), `${restorePhase}\ntrue\n${migrationGeneration}\ntrue\n`);
     writeFileSync(path.join(remote, "apps", "web", ".next", "BUILD_ID"), "new-build\n");
@@ -490,10 +508,12 @@ esac
     MULTICA_TEST_REMOTE_DIR: remote,
     MULTICA_TEST_REMOTE_NAME: "origin",
     MULTICA_TEST_BRANCH: "feature/gitlab-cutover",
-    MULTICA_TEST_HEAD: scenario === "new_commit_restore_active" ? "feedfacecafebeef" : pinnedHead,
-    MULTICA_TEST_COMMIT: scenario === "new_commit_restore_active" ? "feedface" : pinnedCommit,
+    MULTICA_TEST_HEAD: ["new_commit_restore_active", "restored_new_head", "restored_unknown_dir"].includes(scenario) ? forwardedHead : pinnedHead,
+    MULTICA_TEST_COMMIT: ["new_commit_restore_active", "restored_new_head", "restored_unknown_dir"].includes(scenario) ? "feedface" : pinnedCommit,
     MULTICA_TEST_UPSTREAM_PIN: upstreamPin,
     MULTICA_TEST_SCENARIO: scenario,
+    MULTICA_TEST_RESTORED_DIR: restoredCutoverDir,
+    MULTICA_TEST_UNKNOWN_CUTOVER_DIR: unknownCutoverDir,
     MULTICA_TEST_DB_PASSWORD: databaseSecret,
     MULTICA_TEST_DBHOST: "127.0.0.1",
     MULTICA_TEST_DBPORT: "5432",
@@ -772,6 +792,40 @@ test("a new HEAD cannot bypass unfinished old-service recovery", (t) => {
   assert.ok(!hasCommand(commands, "pnpm cwd=" + fx.remote + " install --frozen-lockfile"));
   assert.ok(!hasCommand(commands, "systemctl stop"));
   assert.match(`${result.stdout}\n${result.stderr}`, /Rerun its exact HEAD/i);
+});
+
+test("a verified restored snapshot permits a new HEAD and retains the old recovery materials", (t) => {
+  const fx = withFixture(t, "restored_new_head");
+  const oldSnapshot = path.join(fx.remote, fx.env.MULTICA_TEST_RESTORED_DIR);
+  const oldDatabase = readFileSync(path.join(oldSnapshot, "database.dump"), "utf8");
+  const oldServer = readFileSync(path.join(oldSnapshot, "artifacts", "server.previous"), "utf8");
+  const result = runRelease(fx);
+  assert.equal(result.status, 0, result.stderr);
+
+  const commands = log(fx);
+  assertBefore(commands, "gitlab-vcs-migrate status", `git cwd=${fx.remote} fetch`);
+  assert.ok(hasCommand(commands, `git cwd=${fx.remote} merge --ff-only origin/${fx.env.MULTICA_TEST_BRANCH}`));
+  assert.equal(readFileSync(path.join(oldSnapshot, "database.dump"), "utf8"), oldDatabase);
+  assert.equal(readFileSync(path.join(oldSnapshot, "artifacts", "server.previous"), "utf8"), oldServer);
+  assert.ok(existsSync(oldSnapshot), "the restored generation remains available after forward release");
+  assert.ok(existsSync(path.join(fx.remote, ".gitlab-vcs-cutover-feedface-2", "database.dump")));
+});
+
+test("a similar unrecorded cutover directory remains an unexpected remote change", (t) => {
+  const fx = withFixture(t, "restored_unknown_dir");
+  const oldSnapshot = path.join(fx.remote, fx.env.MULTICA_TEST_RESTORED_DIR);
+  const unknownFile = path.join(fx.remote, fx.env.MULTICA_TEST_UNKNOWN_CUTOVER_DIR, "unrelated.txt");
+  const oldDatabase = readFileSync(path.join(oldSnapshot, "database.dump"), "utf8");
+  const result = runRelease(fx);
+  assert.notEqual(result.status, 0);
+
+  const commands = log(fx);
+  assert.ok(hasCommand(commands, "git cwd=" + fx.remote + " status --porcelain"));
+  assert.ok(!hasCommand(commands, `git cwd=${fx.remote} merge --ff-only origin/${fx.env.MULTICA_TEST_BRANCH}`));
+  assert.ok(!hasCommand(commands, "systemctl stop"));
+  assert.match(`${result.stdout}\n${result.stderr}`, /unexpected local changes/i);
+  assert.equal(readFileSync(path.join(oldSnapshot, "database.dump"), "utf8"), oldDatabase);
+  assert.equal(readFileSync(unknownFile, "utf8"), "preserve me");
 });
 test("one-time exact-instance System Hook attestation is passed and pinned for cutover retries", (t) => {
   const fx = withFixture(t, "success");

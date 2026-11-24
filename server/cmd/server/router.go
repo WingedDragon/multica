@@ -1440,6 +1440,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 							PublicBaseURL: callbackBase,
 							Bus:           bus,
 						}
+						// Monthly app calls (MUL-10047) are metered only
+						// while Multica Cloud is connected.
+						if h.Entitlements != nil {
+							appsCfg.CallQuota = service.AppToolCallQuota{
+								Queries: queries, Entitlements: h.Entitlements, TxStarter: pool, Bus: bus,
+							}
+						}
 						// Remote MCP apps (MUL-9792) store OAuth tokens, so
 						// they need their own at-rest key; without it they
 						// stay off and Composio apps work as before.
@@ -1968,6 +1975,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// is checked on the server regardless.
 					r.Get("/member-limit", h.GetMemberLimit)
 					r.Get("/storage-usage", h.GetStorageUsage)
+					r.Get("/app-call-usage", h.GetAppCallUsage)
 					r.Post("/leave", h.LeaveWorkspace)
 					r.Get("/invitations", h.ListWorkspaceInvitations)
 					// Listing GitHub installations is member-visible so the
@@ -2579,6 +2587,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Delete("/", h.DeleteSquad)
 					r.Get("/members", h.ListSquadMembers)
 					r.Get("/members/status", h.ListSquadMemberStatus)
+					r.Get("/briefs", h.ListSquadBriefs)
 					r.Post("/members", h.AddSquadMember)
 					r.Delete("/members", h.RemoveSquadMember)
 					r.Patch("/members/role", h.UpdateSquadMemberRole)

@@ -1179,6 +1179,7 @@ func newIssueCreateTestCmd() *cobra.Command {
 	cmd.Flags().String("assignee-id", "", "")
 	cmd.Flags().Bool("assignee-picker", false, "")
 	cmd.Flags().String("parent", "", "")
+	cmd.Flags().StringArray("blocked-by", nil, "")
 	cmd.Flags().Int("stage", 0, "")
 	cmd.Flags().String("project", "", "")
 	cmd.Flags().String("start-date", "", "")
@@ -1444,8 +1445,9 @@ func TestRunIssueCreateSendsExistingAttachmentIDs(t *testing.T) {
 	}
 }
 
-func TestRunIssueCreateDefaultsProjectFromCurrentGitRemote(t *testing.T) {
+func TestRunIssueCreateDefaultsProjectFromCurrentGitRemoteAndAppliesBlockers(t *testing.T) {
 	const projectID = "31163d2d-2a4d-49c0-93fb-abc9169afc70"
+	const blockerID = "41111111-1111-4111-8111-111111111111"
 
 	setFakeGitOriginURL(t, "git@code.mlamp.cn:cosynth/cosynth.git")
 	chdirTemp(t)
@@ -1453,6 +1455,10 @@ func TestRunIssueCreateDefaultsProjectFromCurrentGitRemote(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/config":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"issue_blockers_supported": true})
+		case "/api/issues/MUL-2":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": blockerID, "identifier": "MUL-2", "title": "Blocker"})
 		case "/api/projects":
 			if got := r.URL.Query().Get("workspace_id"); got != "ws-1" {
 				t.Errorf("workspace_id query = %q, want ws-1", got)
@@ -1512,11 +1518,15 @@ func TestRunIssueCreateDefaultsProjectFromCurrentGitRemote(t *testing.T) {
 
 	cmd := newIssueCreateTestCmd()
 	_ = cmd.Flags().Set("title", "Repo-bound task")
+	_ = cmd.Flags().Set("blocked-by", "MUL-2")
 	if err := runIssueCreate(cmd, nil); err != nil {
 		t.Fatalf("runIssueCreate: %v", err)
 	}
 	if got := body["project_id"]; got != projectID {
 		t.Fatalf("project_id = %#v, want %q", got, projectID)
+	}
+	if got, ok := body["blocked_by"].([]any); !ok || !reflect.DeepEqual(got, []any{blockerID}) {
+		t.Fatalf("blocked_by = %#v, want [%q]", body["blocked_by"], blockerID)
 	}
 }
 

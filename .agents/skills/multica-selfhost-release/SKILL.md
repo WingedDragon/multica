@@ -211,6 +211,7 @@ Useful environment overrides:
 ```bash
 MULTICA_REPO=/Users/dong/.wtc/projects/multica
 MULTICA_UPSTREAM_SYNC_STRATEGY=auto  # auto | merge | rebase
+MULTICA_UPSTREAM_PIN="<full 40- or 64-character commit SHA>" # optional; freeze reviewed upstream baseline
 MULTICA_MY_MINI_HOST=my-mini       # CLI installation host only
 MULTICA_REMOTE_HOST=dj             # direct deployment host
 MULTICA_REMOTE_DIR=/home/ubuntu/apps/multica
@@ -221,6 +222,7 @@ MULTICA_SKIP_PACKAGE=1
 MULTICA_SKIP_INSTALL=1
 MULTICA_SKIP_CLI_INSTALL=1
 ```
+For a release based on a reviewed upstream commit already merged into current `HEAD`, set `MULTICA_UPSTREAM_PIN` to its full 40-character SHA-1 or 64-character SHA-256 commit ID. The script requires it to resolve exactly to a commit and be an ancestor of `HEAD`; pin mode skips `upstream/main` fetch/update and does not merge or rebase. It still checks and fetches `origin/<branch>`, rejects origin-ahead commits, and pushes normally. It then pins the unchanged final `HEAD` for build artifacts and deployment. The pin does not claim to include later upstream changes. Omit it to retain the default fetch/merge/rebase behavior.
 
 The script intentionally exits on a dirty local worktree, an invalid strategy, an indeterminate origin lookup, an origin branch with commits missing locally, or a non-fast-forward deployment checkout. Commit, integrate, or inspect deliberately first, then rerun it.
 

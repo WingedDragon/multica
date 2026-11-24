@@ -147,16 +147,40 @@ sync_upstream() {
   local remote_published=0
   local remote_ahead=0
   local remote_lookup_status=0
+  local upstream_pin="${MULTICA_UPSTREAM_PIN:-}"
+  local normalized_pin=""
+  local resolved_pin=""
 
-  case "$requested" in
-    auto|merge|rebase) ;;
-    *)
-      echo "Invalid MULTICA_UPSTREAM_SYNC_STRATEGY=$requested; expected auto, merge, or rebase." >&2
+  if [ -n "$upstream_pin" ]; then
+    if [[ ! "$upstream_pin" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+      echo "MULTICA_UPSTREAM_PIN must be a full 40- or 64-character commit SHA." >&2
       exit 2
-      ;;
-  esac
+    fi
+    normalized_pin="$(printf '%s' "$upstream_pin" | tr '[:upper:]' '[:lower:]')"
+    if ! resolved_pin="$(git rev-parse --verify "${normalized_pin}^{commit}" 2>/dev/null)"; then
+      echo "MULTICA_UPSTREAM_PIN does not resolve to an existing commit: $upstream_pin." >&2
+      exit 2
+    fi
+    if [ "$resolved_pin" != "$normalized_pin" ]; then
+      echo "MULTICA_UPSTREAM_PIN must identify the commit object exactly; resolved $upstream_pin to $resolved_pin." >&2
+      exit 2
+    fi
+    if ! git merge-base --is-ancestor "$resolved_pin" HEAD; then
+      echo "MULTICA_UPSTREAM_PIN $resolved_pin is not an ancestor of HEAD; integrate and review that baseline before releasing." >&2
+      exit 2
+    fi
+    effective="pinned"
+  else
+    case "$requested" in
+      auto|merge|rebase) ;;
+      *)
+        echo "Invalid MULTICA_UPSTREAM_SYNC_STRATEGY=$requested; expected auto, merge, or rebase." >&2
+        exit 2
+        ;;
+    esac
 
-  git fetch upstream main --tags
+    git fetch upstream main --tags
+  fi
 
   if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
     remote_published=1
@@ -174,19 +198,22 @@ sync_upstream() {
     fi
   fi
 
-  if git merge-base --is-ancestor upstream/main HEAD; then
-    effective="none"
-  elif [ "$requested" = "auto" ]; then
-    if [ "$remote_published" = "1" ]; then
-      effective="merge"
-    else
-      effective="rebase"
+  if [ -z "$upstream_pin" ]; then
+    if git merge-base --is-ancestor upstream/main HEAD; then
+      effective="none"
+    elif [ "$requested" = "auto" ]; then
+      if [ "$remote_published" = "1" ]; then
+        effective="merge"
+      else
+        effective="rebase"
+      fi
     fi
+    echo "==> Upstream sync: $effective (requested: $requested, published: $remote_published)"
+  else
+    echo "==> Upstream sync: pinned baseline $resolved_pin (upstream fetch/merge disabled, published: $remote_published)"
   fi
-
-  echo "==> Upstream sync: $effective (requested: $requested, published: $remote_published)"
   case "$effective" in
-    none) ;;
+    none|pinned) ;;
     merge)
       git merge --no-ff upstream/main -m "chore: merge upstream/main"
       ;;

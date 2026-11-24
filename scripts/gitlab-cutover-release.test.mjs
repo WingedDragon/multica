@@ -10,6 +10,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const releaseScript = path.resolve(scriptDir, "../.agents/skills/multica-selfhost-release/scripts/run_release.sh");
 const pinnedHead = "abc1234deadbeef";
 const pinnedCommit = "abc1234";
+const upstreamPin = "a".repeat(40);
 const databaseSecret = "database-password-must-never-be-printed";
 const redisSecret = "redis-password-must-never-be-printed";
 
@@ -76,7 +77,17 @@ else
     "fetch upstream main --tags") ;;
     "ls-remote --exit-code --heads origin $MULTICA_TEST_BRANCH") exit 0 ;;
     "fetch origin $MULTICA_TEST_BRANCH") ;;
-    "rev-list --count HEAD..origin/$MULTICA_TEST_BRANCH") echo 0 ;;
+    "rev-parse --verify $MULTICA_TEST_UPSTREAM_PIN^{commit}")
+      if [ "$MULTICA_TEST_SCENARIO" = pin_missing_commit ]; then exit 1; fi
+      echo "$MULTICA_TEST_UPSTREAM_PIN"
+      ;;
+    "rev-list --count HEAD..origin/$MULTICA_TEST_BRANCH")
+      if [ "$MULTICA_TEST_SCENARIO" = pin_origin_ahead ]; then echo 1; else echo 0; fi
+      ;;
+    "merge-base --is-ancestor $MULTICA_TEST_UPSTREAM_PIN HEAD")
+      if [ "$MULTICA_TEST_SCENARIO" = pin_not_ancestor ]; then exit 1; fi
+      exit 0
+      ;;
     "merge-base --is-ancestor upstream/main HEAD") exit 1 ;;
     "merge --no-ff upstream/main -m chore: merge upstream/main") ;;
     "push origin $MULTICA_TEST_BRANCH") ;;
@@ -428,6 +439,7 @@ esac
     MULTICA_REMOTE_DIR: remote,
     MULTICA_REMOTE_NAME: "origin",
     MULTICA_UPSTREAM_SYNC_STRATEGY: "merge",
+    MULTICA_UPSTREAM_PIN: "",
     MULTICA_SKIP_CLI_INSTALL: "1",
     MULTICA_SKIP_PACKAGE: "1",
     MULTICA_SKIP_INSTALL: "1",
@@ -438,6 +450,7 @@ esac
     MULTICA_TEST_BRANCH: "feature/gitlab-cutover",
     MULTICA_TEST_HEAD: scenario === "new_commit_restore_active" ? "feedfacecafebeef" : pinnedHead,
     MULTICA_TEST_COMMIT: scenario === "new_commit_restore_active" ? "feedface" : pinnedCommit,
+    MULTICA_TEST_UPSTREAM_PIN: upstreamPin,
     MULTICA_TEST_SCENARIO: scenario,
   };
   return { root, bin, repo, remote, home, state, log, env };
@@ -586,6 +599,8 @@ test("ordinary no-legacy release keeps the existing migration/restart path", (t)
   const result = runRelease(fx);
   assert.equal(result.status, 0, result.stderr);
   const commands = log(fx);
+  assert.ok(hasCommand(commands, "fetch upstream main --tags"));
+  assert.ok(hasCommand(commands, "merge --no-ff upstream/main"));
   assert.ok(hasCommand(commands, "migrate up"));
   assert.ok(hasCommand(commands, "gitlab-vcs-migrate preflight"));
   assertBefore(commands, "gitlab-vcs-migrate preflight state_table=absent", "migrate up");
@@ -744,4 +759,73 @@ test("preparing cutover retry reuses its pinned System Hook attestation", (t) =>
   assert.match(state, /status=complete/);
   assert.match(state, /system_hook_attestation=https:\/\/gitlab\.example\.test/);
   assert.ok(!`${result.stdout}\n${result.stderr}\n${commands.join("\n")}`.includes(databaseSecret));
+});
+
+test("a full ancestor upstream pin skips upstream updates and preserves origin checks and normal push", (t) => {
+  const fx = withFixture(t, "pin_success");
+  const releaseHead = "b".repeat(40);
+  fx.env.MULTICA_UPSTREAM_PIN = upstreamPin;
+  fx.env.MULTICA_TEST_HEAD = releaseHead;
+  const result = runRelease(fx);
+  assert.equal(result.status, 0, result.stderr);
+
+  const commands = log(fx);
+  assert.ok(hasCommand(commands, `rev-parse --verify ${upstreamPin}^{commit}`));
+  assert.ok(hasCommand(commands, `merge-base --is-ancestor ${upstreamPin} HEAD`));
+  assert.ok(!hasCommand(commands, "fetch upstream main --tags"));
+  assert.ok(!hasCommand(commands, "merge --no-ff upstream/main"));
+  assert.ok(!hasCommand(commands, "rebase upstream/main"));
+  assert.ok(hasCommand(commands, "ls-remote --exit-code --heads origin feature/gitlab-cutover"));
+  assert.ok(hasCommand(commands, "fetch origin feature/gitlab-cutover"));
+  assert.ok(hasCommand(commands, "rev-list --count HEAD..origin/feature/gitlab-cutover"));
+  assert.ok(hasCommand(commands, "push origin feature/gitlab-cutover"));
+  assert.ok(!hasCommand(commands, "push --force"));
+  assert.ok(commands.some((command) => command.includes(`EXPECTED_HEAD=${releaseHead}`)));
+  assert.match(result.stdout, new RegExp(`pinned baseline ${upstreamPin}`));
+});
+
+test("upstream pins reject malformed or unresolved full commit identifiers", (t) => {
+  const malformed = withFixture(t, "pin_invalid_format");
+  malformed.env.MULTICA_UPSTREAM_PIN = "abc1234";
+  const malformedResult = runRelease(malformed);
+  assert.notEqual(malformedResult.status, 0);
+  assert.match(`${malformedResult.stdout}\n${malformedResult.stderr}`, /full 40- or 64-character commit SHA/i);
+  assert.ok(!hasCommand(log(malformed), "rev-parse --verify"));
+  assert.ok(!hasCommand(log(malformed), "ls-remote --exit-code --heads origin"));
+
+  const missing = withFixture(t, "pin_missing_commit");
+  missing.env.MULTICA_UPSTREAM_PIN = upstreamPin;
+  const missingResult = runRelease(missing);
+  assert.notEqual(missingResult.status, 0);
+  assert.ok(hasCommand(log(missing), `rev-parse --verify ${upstreamPin}^{commit}`));
+  assert.match(`${missingResult.stdout}\n${missingResult.stderr}`, /does not resolve to an existing commit/i);
+  assert.ok(!hasCommand(log(missing), "ls-remote --exit-code --heads origin"));
+});
+
+test("an upstream pin outside HEAD is rejected before origin or release work", (t) => {
+  const fx = withFixture(t, "pin_not_ancestor");
+  fx.env.MULTICA_UPSTREAM_PIN = upstreamPin;
+  const result = runRelease(fx);
+  assert.notEqual(result.status, 0);
+  const commands = log(fx);
+  assert.ok(hasCommand(commands, `merge-base --is-ancestor ${upstreamPin} HEAD`));
+  assert.match(`${result.stdout}\n${result.stderr}`, /is not an ancestor of HEAD/i);
+  assert.ok(!hasCommand(commands, "fetch upstream main --tags"));
+  assert.ok(!hasCommand(commands, "ls-remote --exit-code --heads origin"));
+  assert.ok(!hasCommand(commands, "push origin feature/gitlab-cutover"));
+});
+
+test("an upstream pin still refuses to push when origin contains newer commits", (t) => {
+  const fx = withFixture(t, "pin_origin_ahead");
+  fx.env.MULTICA_UPSTREAM_PIN = upstreamPin;
+  const result = runRelease(fx);
+  assert.notEqual(result.status, 0);
+  const commands = log(fx);
+  assert.ok(hasCommand(commands, `merge-base --is-ancestor ${upstreamPin} HEAD`));
+  assert.ok(hasCommand(commands, "ls-remote --exit-code --heads origin feature/gitlab-cutover"));
+  assert.ok(hasCommand(commands, "fetch origin feature/gitlab-cutover"));
+  assert.ok(hasCommand(commands, "rev-list --count HEAD..origin/feature/gitlab-cutover"));
+  assert.ok(!hasCommand(commands, "fetch upstream main --tags"));
+  assert.ok(!hasCommand(commands, "push origin feature/gitlab-cutover"));
+  assert.match(`${result.stdout}\n${result.stderr}`, /origin\/feature\/gitlab-cutover contains 1 commit.*not present locally/i);
 });

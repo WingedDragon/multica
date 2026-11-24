@@ -1074,10 +1074,11 @@ export function useRealtimeSync(
       },
       gitlab_project: () => {
         const wsId = getCurrentWsId();
-        if (wsId) qc.invalidateQueries({ queryKey: gitlabKeys.config(wsId) });
+        if (wsId) qc.invalidateQueries({ queryKey: gitlabKeys.projects(wsId) });
       },
       gitlab_merge_request: () => {
         qc.invalidateQueries({ queryKey: ["gitlab"] });
+        qc.invalidateQueries({ queryKey: ["github", "pull-requests"] });
       },
       lark_installation: () => {
         const wsId = getCurrentWsId();

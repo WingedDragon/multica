@@ -1,6 +1,6 @@
 ---
 title: Self-hosted Git providers
-description: Connect a self-hosted Forgejo, Gitea, or GitLab instance per workspace so pull/merge requests that carry an issue identifier in their branch name or title, or after a closing keyword in the body, auto-attach to that issue, move it to the workspace's chosen status when they merge, and show CI status.
+description: Connect self-hosted Forgejo, Gitea, and GitLab through one workspace-scoped VCS entry. Each workspace can connect multiple GitLab instances and projects, link merge requests to issues, show current-head CI, and manage project webhooks.
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -11,12 +11,14 @@ import { Tab, Tabs } from "fumadocs-ui/components/tabs";
 **Self-hosted Multica only.** This integration is available only when you run Multica yourself; it is not offered on Multica Cloud. You usually self-host Multica so it can reach a Git instance on your own network. The server must enable `MULTICA_VCS_INTEGRATION_ENABLED=true` and set `MULTICA_VCS_SECRET_KEY`; otherwise the row does not appear in **Settings → Code**.
 </Callout>
 
-Multica connects to a self-hosted Git provider per workspace: Forgejo, Gitea, or GitLab. Once connected, any pull request (GitLab: merge request) whose branch name or title contains an issue identifier (for example `MUL-123`), or whose body names one after a closing keyword (`Closes MUL-123`), is auto-linked to that [issue](/issues) and appears under **Pull requests** in the issue sidebar. When every PR linked to the issue is merged, the issue moves to the status the workspace chose (**Done** by default). CI for the head commit shows as a checks bar on the card.
+Multica connects Forgejo, Gitea, and GitLab through the same workspace-scoped **Self-hosted Git** entry in **Settings → Code → Code hosting**. A workspace can connect multiple GitLab instances and add multiple projects to each. Connecting the same GitLab instance from another workspace creates a separate connection, token, and project allowlist.
 
-These providers run alongside GitHub, and a workspace can connect several of them.
+Any pull request (GitLab: merge request) whose branch name or title contains an issue identifier (for example `MUL-123`), or whose body names one after a closing keyword (`Closes MUL-123`), is auto-linked to that [issue](/issues) and appears under **Pull requests** in its sidebar. When every linked PR is merged, the issue moves to the status the workspace chose (**Done** by default). The current head's CI status appears on the card.
+
+Workspace owners and admins manage connections and project bindings. Members can read only the GitLab projects and merge requests their workspace permits; credentials and project access are never shared across workspaces.
 
 <Callout type="info">
-Unlike GitHub, these providers have no App model. Each workspace stores its own instance URL plus an access token, and registers a webhook on its repository or organisation. The token and webhook secret are encrypted at rest.
+GitLab has no App model. Each workspace stores its own instance URL and access token, and GitLab projects are added under that connection. Tokens and webhook secrets are encrypted at rest.
 </Callout>
 
 ## Prerequisites (server)
@@ -47,25 +49,26 @@ Set `MULTICA_PUBLIC_URL` to the server's public base URL so Multica can show a r
 
 <Steps>
 <Step>
-Create an access token in your provider with read access to the repositories you want mirrored:
+Create a token with read access to the repositories you want to mirror:
 
-- **Forgejo / Gitea**: Settings → Applications.
-- **GitLab**: a personal (or group/project) access token with the `read_api` scope.
+- **Forgejo / Gitea**: create an application token in Settings → Applications.
+- **GitLab**: a personal, group, or project access token with the `read_api` scope can read projects and merge requests. To let Multica create or update a project webhook, use a token with the `api` scope and a GitLab role allowed to manage project webhooks (typically Maintainer or Owner). A `read_api`-only token cannot manage hooks.
 </Step>
 <Step>
-In Multica, open **Settings → Code**, then click **Connect** in the **Self-hosted Git** row.
+In Multica, open **Settings → Code → Code hosting** and use the **Self-hosted Git** entry to connect the provider. GitLab connections belong to this workspace; create a separate connection in another workspace even when it uses the same instance.
 </Step>
 <Step>
-Choose the **provider**, enter the instance URL (for example `https://forgejo.example.com`) and the access token, then **Connect**. Multica validates the token against the instance before saving.
+Choose the provider, enter the instance URL (including any path prefix), and provide the access token. Multica validates it before saving. For GitLab, add projects to that connection using the full group/subgroup/project path or the project URL.
 </Step>
 <Step>
-Copy the **webhook URL** and **webhook secret** shown after connecting.
+For GitLab projects, Multica attempts to create the required project webhooks when you add the project. Check each project's webhook status and any reported failure. If Multica cannot manage the hook, an authorized GitLab administrator can configure it manually using the URL and secret shown for that connection. For Forgejo/Gitea, copy the webhook URL and secret shown by Multica and register them as described below.
 </Step>
 </Steps>
 
 <Callout type="warn">
-The webhook secret is shown only once. Copy it before leaving the page. Reconnecting the same instance rotates the token and secret.
+Treat access tokens and webhook secrets as credentials. Copy a webhook secret when Multica displays it; it is not included in ordinary API responses or logs.
 </Callout>
+
 
 ### Instance with a private CA
 
@@ -90,32 +93,104 @@ Settings → Webhooks → Add Webhook → Forgejo/Gitea:
 </Tab>
 <Tab value="GitLab" id="gitlab">
 
+When you add a GitLab project from Multica, it attempts to create that project's webhook for **Merge request events**, **Pipeline events**, **Job events**, and **Comments** (GitLab Note events). If creation or updating fails, the project shows the hook status and reason. Configure the project hook manually with the URL and secret shown by Multica:
+
 Settings → Webhooks:
 
-- **URL**: the webhook URL.
-- **Secret token**: the webhook secret (sent as `X-Gitlab-Token` and compared verbatim).
-- **Triggers**: enable **Merge request events**, and **Pipeline events** to mirror CI.
+- **URL**: the URL for the GitLab connection.
+- **Secret token**: the matching webhook secret.
+- **Triggers**: enable **Merge request events**, **Pipeline events**, **Job events**, and **Comments**.
+
+`read_api` is read-only and cannot create or modify a project webhook. Automatic project-hook management needs the `api` scope and a GitLab role allowed to manage that project's hooks (Administrator, Maintainer, or Owner). A group hook requires a GitLab administrator or group Owner; a System Hook requires a GitLab instance administrator. If those permissions are unavailable, an administrator must configure and verify the hook manually.
 
 </Tab>
 </Tabs>
 
-GitLab also supports an instance-wide **System Hook** under the administrator area. Use the same URL and secret token, and enable **Merge request events**. Multica accepts its MR events only for repositories listed under this workspace's **Settings → Code → Repositories**, on the connected GitLab instance, and readable by the connected access token; unrelated or unauthorized system events are ignored. Repository entries may use HTTPS or SSH clone URLs. This avoids creating a hook in every project, but the GitLab administrator must configure the system hook. System Hooks deliver MR events only, not Pipeline events; retain repository or group Pipeline webhooks if you need CI status. Project/group hooks and a System Hook may coexist. A webhook delivery returning `202` means it was acknowledged, not that an issue was linked or moved. Existing merged MRs are not retroactively replayed when you connect the hook.
-
-Multica authenticates every delivery against the stored secret, so a webhook without the matching secret is rejected.
-
+GitLab administrators can configure an instance-wide [System Hook](https://docs.gitlab.com/administration/system_hooks/) for merge request events. Do not rely on a System Hook alone to provide Pipeline, Job, or Note event coverage: verify actual deliveries and configure project/group hooks for any required events it does not deliver. Multica processes events only for projects explicitly listed in this workspace's GitLab project bindings, on the connected instance, and readable by the connection token; a System Hook does not grant access to other projects or workspaces. Verify each project's required event coverage across its applicable hooks rather than expecting every hook type to deliver all four event types. Every delivery is authenticated with the stored secret.
 
 ## What gets mirrored
 
-- **Pull / merge requests**: open, closed, merged, and draft state, author, branch, and (where the provider supplies them) diff stats.
-- **Issue links**: an identifier in the title or branch links the PR to the issue, as does an identifier after a closing keyword in the body; a bare mention in the body links nothing. Once every PR linked to the issue is merged, across GitHub and self-hosted providers, the issue moves to the status the workspace chose, under the same setting and rules as [GitHub](/github-integration#when-merged-prs-move-an-issue). This page shows the same **After PRs merge, move the issue to** setting once a provider is connected.
-- **CI**: Forgejo/Gitea commit statuses and GitLab pipelines aggregate into a passed/failed/pending checks bar for the head commit.
+- **Pull / merge requests**: state, author, branches, diff statistics, approvals and approval rules, discussions and unresolved comments.
+- **Issue links**: an identifier in the title or branch links the PR to the issue, as does an identifier after a closing keyword in the body; a bare mention in the body links nothing. When every linked PR is merged, across GitHub and self-hosted providers, the issue moves to the status the workspace chose, under the same setting and rules as [GitHub](/github-integration).
+- **CI**: GitLab pipeline and job status for the current MR head, alongside Forgejo/Gitea commit statuses. Unknown, stale-head, or running pipelines are not shown as completed.
+- **GitLab details**: pipeline and job information, bounded failure-log summaries, and artifact links using the existing access checks. Full logs and artifact contents are not copied into the database.
+- **Wakeups**: linked GitLab MRs can wake an issue when merged, when current-head CI finishes, or when a conflict is detected. Chat wakeups can wait for a specified MR to merge, close, or finish current-head CI; see [Issue wakeups](/issue-wakeups).
+
+Use the issue's **Refresh** action to refresh an MR, or refresh a GitLab project to update MRs already mirrored for that project. Project refresh does not promise to discover every historical MR. Merging an MR uses the connected GitLab token's permissions; failures remain visible and are never reported as a successful merge.
 
 ## Agents opening pull requests
 
 Agents need no provider configuration in Multica to open PRs. They check out repositories in the runtime and push branches and open PRs using the runtime host's own Git credentials. To let agents work against a provider, ensure the daemon host can authenticate to it (for example with an SSH deploy key, or a token in the host's Git credential helper) and add the repository URL as usual. Repository checkout works with any Git URL, so no provider-specific wiring is required.
 
-## GitLab project connections
+## GitLab connections and projects
 
-In **Settings → Code**, workspace owners and admins can connect multiple GitLab instances in the GitLab section and add projects under each instance. Enter the instance URL and an access token with access to those projects. The server needs `MULTICA_VCS_SECRET_KEY` to encrypt the tokens.
+In **Settings → Code → Code hosting → Self-hosted Git**, workspace owners and admins can connect multiple GitLab instances and add multiple projects under each connection. Include the complete instance base URL (including a subpath, if present) and the full project path, including every subgroup. Another workspace that connects the same instance has its own token and project list.
+`GITLAB_PROXY_URL` optionally routes GitLab token validation, project and webhook management, MR detail, and wakeup-status requests through an outbound proxy. When unset, Multica connects directly; other providers are unaffected.
 
-The webhook secret is shown only when the instance is connected. Save it if you need to configure a project webhook manually. Existing projects configured through the server's GitLab settings remain available.
+Adding a project validates that the connection token can read it and attempts to register MR, Pipeline, Job, and Note hooks. Hook status and the reason for a failure remain visible. A `read_api` token can read GitLab data but cannot create or change hooks; use a token with `api` scope and a role permitted to manage the project hook, or have the appropriate GitLab administrator configure a project, group, or System Hook. System Hook events still pass the workspace project allowlist and token-readability checks.
+
+Project removal stops using that binding. Project refresh updates locally mirrored MRs; it does not guarantee discovery of all historical MRs.
+
+## Upgrading an existing GitLab integration
+
+Treat the GitLab cutover as a maintenance procedure, not as an ordinary database migration. Before upgrading, back up the database and current application version, preserve `MULTICA_VCS_SECRET_KEY`, inventory connections, projects, managed and manual hooks, and ensure the relevant GitLab tokens can read their projects. Do not print or copy tokens or webhook secrets into logs.
+
+The ordinary schema migration creates the canonical VCS and migration-ledger tables but does not drop or rewrite legacy GitLab tables or rows. Before running it, stop the old application and wakeup workers. From `server/`, set `DATABASE_URL`; if legacy GitLab rows are expected, also set `MULTICA_VCS_INTEGRATION_ENABLED=true`, `MULTICA_VCS_SECRET_KEY`, and an absolute HTTP(S) public origin through `MULTICA_PUBLIC_URL` or `--public-url URL`. Then run:
+
+```sh
+go run ./cmd/migrate up
+go run ./cmd/gitlab-vcs-migrate preflight
+```
+
+`preflight` is read-only: it checks legacy credentials, project mappings, conflicts, and Hook inventory, and its JSON reports counts (including `legacy_pipelines`) without exposing secrets. If it reports `no_op: true`, there is no legacy GitLab data to import; skip the cutover, including legacy credentials, key, and Hook steps. The normal `MULTICA_VCS_SECRET_KEY` is still required if you enable self-hosted VCS. Otherwise, resolve every finding before proceeding and keep the exact legacy credentials and encryption key available until migration completes. Encrypted legacy credentials take precedence; `GITLAB_BASE_URL`, `GITLAB_TOKEN`, and `GITLAB_WEBHOOK_SECRET` are optional environment fallbacks only for the exact matching legacy instance when the corresponding stored credential is not encrypted. Every CLI command requires `DATABASE_URL`; `--public-url URL` can override `MULTICA_PUBLIC_URL`.
+If run before the schema migration, `preflight` continues with `state` set to `not_initialized` only when all cutover-specific table, column, and index markers are absent; a partial set of markers fails closed. `status` still requires the migration-state and delivery tables.
+
+With a clean preflight, begin maintenance and import the legacy data:
+
+```sh
+go run ./cmd/gitlab-vcs-migrate begin
+go run ./cmd/gitlab-vcs-migrate migrate
+```
+
+`migrate` runs preflight again and imports the VCS data in one transaction without removing legacy tables. Existing MR links and task/chat wakeup targets and their CI baselines remain bound to the same MR; an old Pipeline result is not treated as a new CI event. Deploy and start the new application in maintenance mode, then switch managed hooks:
+
+```sh
+go run ./cmd/gitlab-vcs-migrate switch-hooks
+```
+
+The CLI uses `MULTICA_PUBLIC_URL` for workspace-specific Hook URLs; `--public-url URL` is an optional override. If a manual project, group, or System Hook is missing or cannot be updated, the step fails and the service must remain in maintenance. A GitLab administrator must configure the Hook at the exact workspace-specific URL reported by the tool, send controlled validation events, and rerun the switch step. `read_api` alone cannot update managed hooks. Verify each project's overall event coverage across the configured hooks; do not assume a System Hook supplies Pipeline, Job, or Note events or that any one hook type supplies all four event types.
+
+GitLab capabilities are discovered per instance. A confirmed Free plan or Community Edition disables only Group Hooks, while project webhooks remain available. A Group Hook API `404` proves that capability unavailable only when the connection is confirmed as a group Owner or instance administrator; otherwise it is an inventory/permission blocker. A `403`, hidden ancestor group, or failed capability check is not evidence that no Hook exists, so keep maintenance active and have an authorized administrator verify access and inventory. System Hooks are available on Free self-managed GitLab but require an instance administrator; a `403` must not be treated as an unsupported feature or as proof that there is no existing System Hook.
+
+For a one-time exception explicitly confirmed for a single GitLab instance, provide `MULTICA_GITLAB_SYSTEM_HOOKS_ATTESTED=https://gitlab.example.com` (CLI: `--attest-no-legacy-system-hooks-for=https://gitlab.example.com`). Supply only the full HTTPS origin—no path, credentials, query, or fragment—and matching is exact, including the port. Only that exact instance's `GET /hooks` response of `403` can skip System Hook inventory; the attestation is audited and pinned for recovery retries. A `403` remains a permission result, not proof that System Hooks are unsupported. This does not repair permissions, apply to other origins or errors, or waive project/group inventory, actual delivery verification, recoverable Hook state, workspace isolation, or the maintenance gate. This is one-time input, not permanent `.env` configuration.
+
+
+During maintenance, GitLab webhooks that pass signature and authorization checks are persisted as receipts and deliberately answered with HTTP 503 so GitLab retries them; a recorded receipt is not an acknowledgement. Record one UTC cutoff for the maintenance window and reuse it for both replay and verification. `--since` is required only for these two commands and must be a valid RFC3339 UTC timestamp ending in `Z`:
+
+```sh
+CUTOVER_SINCE="2026-06-12T09:00:00Z" # Replace with the UTC cutoff recorded for this cutover.
+go run ./cmd/gitlab-vcs-migrate replay --since "$CUTOVER_SINCE"
+go run ./cmd/gitlab-vcs-migrate verify-hooks --since "$CUTOVER_SINCE"
+```
+
+`replay` sends persisted maintenance receipts through the authoritative GitLab reconciliation path; it does not redeliver events to GitLab or recover deliveries that were never persisted. `verify-hooks` checks Hook URLs and real, reconciled deliveries for enabled events since the cutoff, plus overall Merge Request, Pipeline, Job, and Note coverage for each project. If replay or verification fails or coverage is missing, keep maintenance enabled, resolve the Hook or delivery issue, and rerun with the same release version and cutoff. Do not finalize while any check is pending.
+
+Finalize only after verification succeeds, then confirm the migration state:
+
+```sh
+go run ./cmd/gitlab-vcs-migrate finalize
+go run ./cmd/gitlab-vcs-migrate status
+```
+
+Normal writes may resume only when `status` reports `phase: "complete"` and `maintenance_mode: false`. Under the migration lock, finalization confirms that all configured hooks are verified and all receipts are reconciled, then removes legacy tables and rollback snapshots and clears receipt payloads. After it, `restore` cannot recover them.
+
+Before finalization, an abandoned cutover can be restored only while all writers remain stopped and maintenance is active:
+
+```sh
+go run ./cmd/gitlab-vcs-migrate restore
+go run ./cmd/gitlab-vcs-migrate status
+```
+
+`restore` first restores each Hook's recorded original configuration and secret, then restores the migration's recorded database before-images. On success, `status` reports `phase: "restored"` while `maintenance_mode` remains `true`. It does not restore application binaries or a full database backup; the release recovery procedure handles pre-release application artifacts separately. Any Hook or database restore failure sets the state to `restore_blocked` with maintenance active. If that state or another restore outcome cannot be verified, keep services stopped and do not start the old application or any writer. Never apply a full pre-cutover backup over new writes.
+
+After finalization or restoration of the old service, check GitLab's complete delivery history for every maintenance HTTP 503. The migration tool's retained `recovery_delivery_ids` help identify persisted receipts but are not a complete delivery record. Redeliver failed deliveries and explicitly acknowledge any unrecoverable ones, then synchronize authoritative MR/Pipeline state. Neither the database snapshot nor `replay` can reconstruct an event that was never persisted or can no longer be redelivered; report any unconfirmed event and do not guess its state or use it to trigger a wakeup.

@@ -56,11 +56,11 @@ Dans la tâche ci-dessous, Assistant ops a demandé des devis et attend les rép
 | Collaboration | Un champ prend une valeur | Le statut, l'assigné, une étiquette ou une propriété personnalisée de la tâche prend la valeur choisie. |
 | Exécutions et sous-tâches | L’exécution d’un agent se termine | Une exécution d'un agent donné (ou de n'importe quel agent) sur cette tâche réussit, échoue ou est annulée. |
 | Exécutions et sous-tâches | Les sous-tâches se terminent | Toutes les sous-tâches sont closes (`done` ou `cancelled`), ou toutes celles jusqu'à l'étape choisie. Sans sous-tâche, la règle ne se déclenche jamais. |
-| Liés | La CI d’une PR liée se termine | Ou la PR est fusionnée, ou elle a des conflits de fusion. Seules les PR liées directement à cette tâche comptent ; s'il y en a plusieurs, une seule suffit. La CI et les conflits prennent en charge les PR GitHub et les merge requests GitLab. |
+| Liés | La CI d’une PR liée se termine | La fusion ou les conflits de fusion d’une PR sont aussi proposés. Seules les PR/MR associées directement à cette tâche comptent ; s'il y en a plusieurs, une seule suffit. Les déclencheurs de fusion et de conflit prennent en charge les PR GitHub et les MR GitLab ; la CI porte sur le head actuel. |
 | Liés | Le statut d’une autre tâche | Une autre tâche est terminée, terminée ou annulée, ou passe en revue. |
 | | Événements personnalisés | Choisissez parmi 25 événements bruts : réactions, pièces jointes, commentaires modifiés, fils résolus… |
 
-Multica vérifie lui-même les conditions sur un champ, les sous-tâches, les PR et les autres tâches. Si la condition est déjà remplie à la création, la vérification suivante (dans les 30 secondes environ) réveille l'agent. La CI fait exception : seules les vérifications terminées après la création de la règle comptent.
+Multica vérifie lui-même les conditions sur un champ, les sous-tâches, les PR et les autres tâches. Si la condition est déjà remplie à la création ou à la réactivation de la règle, la vérification suivante (dans les 30 secondes environ) réveille l'agent. La CI fait exception : elle porte sur le head actuel et ne compte qu'un résultat terminé après la création ou la réactivation de la règle. Un état inconnu, associé à un ancien head ou encore en cours ne compte pas comme terminé. Si son état est temporairement inaccessible, la règle continue d'attendre sans deviner le résultat.
 
 Toutes les conditions autres que le temps attendent un événement et ont trois réglages de plus :
 

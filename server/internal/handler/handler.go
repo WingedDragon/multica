@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
@@ -597,6 +598,20 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	taskSvc.PRSnapshotsEnabled = h.PRRefresh.Enabled()
 
 	return h
+}
+
+// NewGitLabMigrationReplayHandler constructs the minimal handler dependencies
+// needed by the cutover CLI to replay authenticated GitLab webhook receipts.
+func NewGitLabMigrationReplayHandler(pool *pgxpool.Pool, box *secretbox.Box, cfg Config) (*Handler, error) {
+	if pool == nil {
+		return nil, errors.New("GitLab migration replay requires a database pool")
+	}
+	if box == nil {
+		return nil, errors.New("GitLab migration replay requires a secret box")
+	}
+	h := New(db.New(pool), pool, nil, nil, nil, nil, nil, nil, cfg)
+	h.VCSSecretBox = box
+	return h, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

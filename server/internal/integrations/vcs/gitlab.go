@@ -68,25 +68,25 @@ type glMergeRequestPayload struct {
 		PathWithNamespace string `json:"path_with_namespace"`
 	} `json:"project"`
 	ObjectAttributes struct {
-		IID               int32  `json:"iid"`
-		Title             string `json:"title"`
-		Description       string `json:"description"`
-		State             string `json:"state"` // opened|closed|merged|locked
-		Action            string `json:"action"`
-		SourceBranch      string `json:"source_branch"`
-		SourceProjectID   int64  `json:"source_project_id"`
-		SourceProject     struct {
+		IID             int32  `json:"iid"`
+		Title           string `json:"title"`
+		Description     string `json:"description"`
+		State           string `json:"state"` // opened|closed|merged|locked
+		Action          string `json:"action"`
+		SourceBranch    string `json:"source_branch"`
+		SourceProjectID int64  `json:"source_project_id"`
+		SourceProject   struct {
 			ID                int64  `json:"id"`
 			PathWithNamespace string `json:"path_with_namespace"`
 		} `json:"source"`
-		URL            string `json:"url"`
-		Draft          bool   `json:"draft"`
-		WorkInProgress bool   `json:"work_in_progress"`
-		HasConflicts   *bool  `json:"has_conflicts"`
+		URL                 string `json:"url"`
+		Draft               bool   `json:"draft"`
+		WorkInProgress      bool   `json:"work_in_progress"`
+		HasConflicts        *bool  `json:"has_conflicts"`
 		DetailedMergeStatus string `json:"detailed_merge_status"`
-		CreatedAt      string `json:"created_at"`
-		UpdatedAt      string `json:"updated_at"`
-		LastCommit     struct {
+		CreatedAt           string `json:"created_at"`
+		UpdatedAt           string `json:"updated_at"`
+		LastCommit          struct {
 			ID string `json:"id"`
 		} `json:"last_commit"`
 	} `json:"object_attributes"`
@@ -255,7 +255,11 @@ func (gitlabProvider) ValidateToken(ctx context.Context, instanceURL, token stri
 	req.Header.Set("PRIVATE-TOKEN", token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := httpClient.Do(req)
+	client, err := gitLabProviderHTTPClient()
+	if err != nil {
+		return Account{}, fmt.Errorf("gitlab: configure HTTP client: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return Account{}, fmt.Errorf("gitlab: request: %w", err)
 	}
@@ -295,7 +299,11 @@ func (gitlabProvider) RepositoryReadable(ctx context.Context, instanceURL, owner
 	}
 	req.Header.Set("PRIVATE-TOKEN", token)
 	req.Header.Set("Accept", "application/json")
-	resp, err := httpClient.Do(req)
+	client, err := gitLabProviderHTTPClient()
+	if err != nil {
+		return false, fmt.Errorf("gitlab: configure HTTP client: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("gitlab: project request: %w", err)
 	}
@@ -308,9 +316,12 @@ func (gitlabProvider) RepositoryReadable(ctx context.Context, instanceURL, owner
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&projectInfo); err != nil {
 			return false, fmt.Errorf("gitlab: decode project: %w", err)
 		}
-		return projectInfo.PathWithNamespace == owner+"/"+name, nil
+		if projectInfo.PathWithNamespace != owner+"/"+name {
+			return false, errors.New("gitlab: project identity could not be confirmed")
+		}
+		return true, nil
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
-		return false, nil
+		return false, fmt.Errorf("gitlab: GET project could not confirm repository access (status %d)", resp.StatusCode)
 	default:
 		return false, fmt.Errorf("gitlab: GET project: status %d", resp.StatusCode)
 	}

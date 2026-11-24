@@ -288,11 +288,33 @@ func (h *Handler) DeleteVCSConnection(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.Queries.DeleteVCSConnection(r.Context(), db.DeleteVCSConnectionParams{
+	if h.TxStarter == nil {
+		writeError(w, http.StatusInternalServerError, "database transactions are unavailable")
+		return
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin connection cleanup")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	q := h.Queries.WithTx(tx)
+	if err := q.DeleteVCSGitLabConnectionArtifacts(r.Context(), db.DeleteVCSGitLabConnectionArtifactsParams{
+		WorkspaceID:  wsUUID,
+		ConnectionID: idUUID,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to clean GitLab connection data")
+		return
+	}
+	if err := q.DeleteVCSConnection(r.Context(), db.DeleteVCSConnectionParams{
 		ID:          idUUID,
 		WorkspaceID: wsUUID,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove connection")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit connection cleanup")
 		return
 	}
 	h.publish(protocol.EventVCSConnectionDeleted, workspaceID, "system", "", map[string]any{

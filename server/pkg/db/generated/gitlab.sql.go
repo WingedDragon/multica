@@ -11,57 +11,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const beginGitLabMergeRequestWakeupSync = `-- name: BeginGitLabMergeRequestWakeupSync :one
-UPDATE gitlab_merge_request
-SET wakeup_sync_generation = wakeup_sync_generation + 1,
-    last_refreshed_at = now(),
-    last_refresh_error = 'MR refresh pending',
-    pipeline_sync_at = now(),
-    pipeline_sync_error = 'Pipeline refresh pending',
-    updated_at = now()
+const deleteVCSGitLabProject = `-- name: DeleteVCSGitLabProject :one
+DELETE FROM vcs_gitlab_project
 WHERE id = $1 AND workspace_id = $2
-RETURNING wakeup_sync_generation
+RETURNING id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, legacy_link_policy, last_sync_error, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at, created_at, updated_at
 `
 
-type BeginGitLabMergeRequestWakeupSyncParams struct {
+type DeleteVCSGitLabProjectParams struct {
 	ID          pgtype.UUID `json:"id"`
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
 }
 
-func (q *Queries) BeginGitLabMergeRequestWakeupSync(ctx context.Context, arg BeginGitLabMergeRequestWakeupSyncParams) (int64, error) {
-	row := q.db.QueryRow(ctx, beginGitLabMergeRequestWakeupSync, arg.ID, arg.WorkspaceID)
-	var wakeup_sync_generation int64
-	err := row.Scan(&wakeup_sync_generation)
-	return wakeup_sync_generation, err
-}
-
-const deleteGitLabMRPipelinesByMR = `-- name: DeleteGitLabMRPipelinesByMR :execrows
-DELETE FROM gitlab_mr_pipeline
-WHERE merge_request_id = $1
-`
-
-func (q *Queries) DeleteGitLabMRPipelinesByMR(ctx context.Context, mergeRequestID pgtype.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteGitLabMRPipelinesByMR, mergeRequestID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const deleteGitLabProjectBinding = `-- name: DeleteGitLabProjectBinding :one
-DELETE FROM gitlab_project_binding
-WHERE id = $1 AND workspace_id = $2
-RETURNING id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, last_sync_error, created_at, updated_at, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at
-`
-
-type DeleteGitLabProjectBindingParams struct {
-	ID          pgtype.UUID `json:"id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) DeleteGitLabProjectBinding(ctx context.Context, arg DeleteGitLabProjectBindingParams) (GitlabProjectBinding, error) {
-	row := q.db.QueryRow(ctx, deleteGitLabProjectBinding, arg.ID, arg.WorkspaceID)
-	var i GitlabProjectBinding
+func (q *Queries) DeleteVCSGitLabProject(ctx context.Context, arg DeleteVCSGitLabProjectParams) (VcsGitlabProject, error) {
+	row := q.db.QueryRow(ctx, deleteVCSGitLabProject, arg.ID, arg.WorkspaceID)
+	var i VcsGitlabProject
 	err := row.Scan(
 		&i.ID,
 		&i.WorkspaceID,
@@ -71,425 +34,212 @@ func (q *Queries) DeleteGitLabProjectBinding(ctx context.Context, arg DeleteGitL
 		&i.WebUrl,
 		&i.HookID,
 		&i.HookEnabled,
+		&i.LegacyLinkPolicy,
 		&i.LastSyncError,
-		&i.CreatedAt,
-		&i.UpdatedAt,
 		&i.LastRefreshAt,
 		&i.LastRefreshError,
 		&i.LastEventAt,
 		&i.LastEventType,
 		&i.RefreshInProgressAt,
-	)
-	return i, err
-}
-
-const getGitLabConnectionByID = `-- name: GetGitLabConnectionByID :one
-SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted FROM gitlab_connection
-WHERE id = $1 AND workspace_id = $2
-`
-
-type GetGitLabConnectionByIDParams struct {
-	ID          pgtype.UUID `json:"id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) GetGitLabConnectionByID(ctx context.Context, arg GetGitLabConnectionByIDParams) (GitlabConnection, error) {
-	row := q.db.QueryRow(ctx, getGitLabConnectionByID, arg.ID, arg.WorkspaceID)
-	var i GitlabConnection
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.BaseUrl,
-		&i.Host,
-		&i.ConnectedByID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.AccessTokenEncrypted,
-		&i.WebhookSecretEncrypted,
 	)
 	return i, err
 }
 
-const getGitLabConnectionByWorkspace = `-- name: GetGitLabConnectionByWorkspace :one
-SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted FROM gitlab_connection
+const getGitLabMigrationDeliveryForUpdate = `-- name: GetGitLabMigrationDeliveryForUpdate :one
+SELECT delivery_id, workspace_id, connection_id, scope_type, scope_id, scope_path, hook_id, event_type, received_at, payload, reconciled_at, reconciliation_note FROM vcs_gitlab_migration_delivery
+WHERE delivery_id = $1 AND workspace_id = $2 AND connection_id = $3
+  AND scope_type = $4 AND scope_id = $5 AND hook_id = $6
+FOR UPDATE
+`
+
+type GetGitLabMigrationDeliveryForUpdateParams struct {
+	DeliveryID   string      `json:"delivery_id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ConnectionID pgtype.UUID `json:"connection_id"`
+	ScopeType    string      `json:"scope_type"`
+	ScopeID      string      `json:"scope_id"`
+	HookID       int64       `json:"hook_id"`
+}
+
+func (q *Queries) GetGitLabMigrationDeliveryForUpdate(ctx context.Context, arg GetGitLabMigrationDeliveryForUpdateParams) (VcsGitlabMigrationDelivery, error) {
+	row := q.db.QueryRow(ctx, getGitLabMigrationDeliveryForUpdate,
+		arg.DeliveryID,
+		arg.WorkspaceID,
+		arg.ConnectionID,
+		arg.ScopeType,
+		arg.ScopeID,
+		arg.HookID,
+	)
+	var i VcsGitlabMigrationDelivery
+	err := row.Scan(
+		&i.DeliveryID,
+		&i.WorkspaceID,
+		&i.ConnectionID,
+		&i.ScopeType,
+		&i.ScopeID,
+		&i.ScopePath,
+		&i.HookID,
+		&i.EventType,
+		&i.ReceivedAt,
+		&i.Payload,
+		&i.ReconciledAt,
+		&i.ReconciliationNote,
+	)
+	return i, err
+}
+
+const getGitLabMigrationHookForDelivery = `-- name: GetGitLabMigrationHookForDelivery :one
+SELECT connection_id, workspace_id, scope_type, scope_id, scope_path, legacy_hook_id, new_hook_id, managed, created_by_tool, previous_config, previous_secret_encrypted, target_url, state, verified_delivery_id, verified_at, last_error, created_at, updated_at FROM vcs_gitlab_migration_hook
 WHERE workspace_id = $1
-ORDER BY created_at ASC
-LIMIT 1
+  AND connection_id = $2
+  AND scope_type = $3
+  AND scope_id = $4
+  AND (legacy_hook_id = $5 OR new_hook_id = $5)
+  AND state IN ('updated', 'verified')
 `
 
-func (q *Queries) GetGitLabConnectionByWorkspace(ctx context.Context, workspaceID pgtype.UUID) (GitlabConnection, error) {
-	row := q.db.QueryRow(ctx, getGitLabConnectionByWorkspace, workspaceID)
-	var i GitlabConnection
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.BaseUrl,
-		&i.Host,
-		&i.ConnectedByID,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.AccessTokenEncrypted,
-		&i.WebhookSecretEncrypted,
+type GetGitLabMigrationHookForDeliveryParams struct {
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ConnectionID pgtype.UUID `json:"connection_id"`
+	ScopeType    string      `json:"scope_type"`
+	ScopeID      string      `json:"scope_id"`
+	HookID       int64       `json:"hook_id"`
+}
+
+func (q *Queries) GetGitLabMigrationHookForDelivery(ctx context.Context, arg GetGitLabMigrationHookForDeliveryParams) (VcsGitlabMigrationHook, error) {
+	row := q.db.QueryRow(ctx, getGitLabMigrationHookForDelivery,
+		arg.WorkspaceID,
+		arg.ConnectionID,
+		arg.ScopeType,
+		arg.ScopeID,
+		arg.HookID,
 	)
-	return i, err
-}
-
-const getGitLabConnectionForWebhook = `-- name: GetGitLabConnectionForWebhook :one
-SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted FROM gitlab_connection
-WHERE id = $1 AND webhook_secret_encrypted <> ''
-`
-
-func (q *Queries) GetGitLabConnectionForWebhook(ctx context.Context, id pgtype.UUID) (GitlabConnection, error) {
-	row := q.db.QueryRow(ctx, getGitLabConnectionForWebhook, id)
-	var i GitlabConnection
+	var i VcsGitlabMigrationHook
 	err := row.Scan(
-		&i.ID,
+		&i.ConnectionID,
 		&i.WorkspaceID,
-		&i.BaseUrl,
-		&i.Host,
-		&i.ConnectedByID,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.AccessTokenEncrypted,
-		&i.WebhookSecretEncrypted,
-	)
-	return i, err
-}
-
-const getGitLabMRApprovalState = `-- name: GetGitLabMRApprovalState :one
-SELECT merge_request_id, workspace_id, approved, approvals_required, approvals_left, approved_by, rules, raw_state, fetched_at, updated_at FROM gitlab_mr_approval_state
-WHERE workspace_id = $1 AND merge_request_id = $2
-`
-
-type GetGitLabMRApprovalStateParams struct {
-	WorkspaceID    pgtype.UUID `json:"workspace_id"`
-	MergeRequestID pgtype.UUID `json:"merge_request_id"`
-}
-
-func (q *Queries) GetGitLabMRApprovalState(ctx context.Context, arg GetGitLabMRApprovalStateParams) (GitlabMrApprovalState, error) {
-	row := q.db.QueryRow(ctx, getGitLabMRApprovalState, arg.WorkspaceID, arg.MergeRequestID)
-	var i GitlabMrApprovalState
-	err := row.Scan(
-		&i.MergeRequestID,
-		&i.WorkspaceID,
-		&i.Approved,
-		&i.ApprovalsRequired,
-		&i.ApprovalsLeft,
-		&i.ApprovedBy,
-		&i.Rules,
-		&i.RawState,
-		&i.FetchedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const getGitLabMergeRequestByBinding = `-- name: GetGitLabMergeRequestByBinding :one
-SELECT id, workspace_id, project_binding_id, gitlab_project_id, mr_iid, title, description, state, web_url, source_branch, target_branch, author_username, author_avatar_url, sha, merge_commit_sha, detailed_merge_status, has_conflicts, additions, deletions, changed_files, mr_created_at, mr_updated_at, merged_at, closed_at, created_at, updated_at, reviewers, assignees, labels, last_refreshed_at, last_refresh_error, conflict_sha, source_project_id, source_project_path, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM gitlab_merge_request
-WHERE workspace_id = $1 AND project_binding_id = $2 AND mr_iid = $3
-`
-
-type GetGitLabMergeRequestByBindingParams struct {
-	WorkspaceID      pgtype.UUID `json:"workspace_id"`
-	ProjectBindingID pgtype.UUID `json:"project_binding_id"`
-	MrIid            int32       `json:"mr_iid"`
-}
-
-func (q *Queries) GetGitLabMergeRequestByBinding(ctx context.Context, arg GetGitLabMergeRequestByBindingParams) (GitlabMergeRequest, error) {
-	row := q.db.QueryRow(ctx, getGitLabMergeRequestByBinding, arg.WorkspaceID, arg.ProjectBindingID, arg.MrIid)
-	var i GitlabMergeRequest
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.ProjectBindingID,
-		&i.GitlabProjectID,
-		&i.MrIid,
-		&i.Title,
-		&i.Description,
+		&i.ScopeType,
+		&i.ScopeID,
+		&i.ScopePath,
+		&i.LegacyHookID,
+		&i.NewHookID,
+		&i.Managed,
+		&i.CreatedByTool,
+		&i.PreviousConfig,
+		&i.PreviousSecretEncrypted,
+		&i.TargetUrl,
 		&i.State,
-		&i.WebUrl,
-		&i.SourceBranch,
-		&i.TargetBranch,
-		&i.AuthorUsername,
-		&i.AuthorAvatarUrl,
-		&i.Sha,
-		&i.MergeCommitSha,
-		&i.DetailedMergeStatus,
-		&i.HasConflicts,
-		&i.Additions,
-		&i.Deletions,
-		&i.ChangedFiles,
-		&i.MrCreatedAt,
-		&i.MrUpdatedAt,
-		&i.MergedAt,
-		&i.ClosedAt,
+		&i.VerifiedDeliveryID,
+		&i.VerifiedAt,
+		&i.LastError,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.Reviewers,
-		&i.Assignees,
-		&i.Labels,
-		&i.LastRefreshedAt,
-		&i.LastRefreshError,
-		&i.ConflictSha,
-		&i.SourceProjectID,
-		&i.SourceProjectPath,
-		&i.PipelineSyncAt,
-		&i.PipelineSyncError,
-		&i.WakeupSyncGeneration,
 	)
 	return i, err
 }
 
-const getGitLabMergeRequestByID = `-- name: GetGitLabMergeRequestByID :one
-SELECT id, workspace_id, project_binding_id, gitlab_project_id, mr_iid, title, description, state, web_url, source_branch, target_branch, author_username, author_avatar_url, sha, merge_commit_sha, detailed_merge_status, has_conflicts, additions, deletions, changed_files, mr_created_at, mr_updated_at, merged_at, closed_at, created_at, updated_at, reviewers, assignees, labels, last_refreshed_at, last_refresh_error, conflict_sha, source_project_id, source_project_path, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM gitlab_merge_request
+const getVCSGitLabMigrationState = `-- name: GetVCSGitLabMigrationState :one
+SELECT id, phase, maintenance_mode, generation, began_at, updated_at, last_error FROM vcs_gitlab_migration_state
+WHERE id = 1
+`
+
+// Canonical VCS GitLab rows. Legacy HTTP handlers are boundary adapters only.
+func (q *Queries) GetVCSGitLabMigrationState(ctx context.Context) (VcsGitlabMigrationState, error) {
+	row := q.db.QueryRow(ctx, getVCSGitLabMigrationState)
+	var i VcsGitlabMigrationState
+	err := row.Scan(
+		&i.ID,
+		&i.Phase,
+		&i.MaintenanceMode,
+		&i.Generation,
+		&i.BeganAt,
+		&i.UpdatedAt,
+		&i.LastError,
+	)
+	return i, err
+}
+
+const getVCSGitLabMigrationStateForShare = `-- name: GetVCSGitLabMigrationStateForShare :one
+SELECT id, phase, maintenance_mode, generation, began_at, updated_at, last_error FROM vcs_gitlab_migration_state
+WHERE id = 1
+FOR SHARE
+`
+
+// Maintenance ingress holds this row lock through receipt commit so Finalize
+// cannot pass its receipt check while an accepted webhook is still in flight.
+func (q *Queries) GetVCSGitLabMigrationStateForShare(ctx context.Context) (VcsGitlabMigrationState, error) {
+	row := q.db.QueryRow(ctx, getVCSGitLabMigrationStateForShare)
+	var i VcsGitlabMigrationState
+	err := row.Scan(
+		&i.ID,
+		&i.Phase,
+		&i.MaintenanceMode,
+		&i.Generation,
+		&i.BeganAt,
+		&i.UpdatedAt,
+		&i.LastError,
+	)
+	return i, err
+}
+
+const getVCSGitLabProject = `-- name: GetVCSGitLabProject :one
+SELECT id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, legacy_link_policy, last_sync_error, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at, created_at, updated_at FROM vcs_gitlab_project
 WHERE id = $1 AND workspace_id = $2
 `
 
-type GetGitLabMergeRequestByIDParams struct {
+type GetVCSGitLabProjectParams struct {
 	ID          pgtype.UUID `json:"id"`
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
 }
 
-func (q *Queries) GetGitLabMergeRequestByID(ctx context.Context, arg GetGitLabMergeRequestByIDParams) (GitlabMergeRequest, error) {
-	row := q.db.QueryRow(ctx, getGitLabMergeRequestByID, arg.ID, arg.WorkspaceID)
-	var i GitlabMergeRequest
+func (q *Queries) GetVCSGitLabProject(ctx context.Context, arg GetVCSGitLabProjectParams) (VcsGitlabProject, error) {
+	row := q.db.QueryRow(ctx, getVCSGitLabProject, arg.ID, arg.WorkspaceID)
+	var i VcsGitlabProject
 	err := row.Scan(
 		&i.ID,
 		&i.WorkspaceID,
-		&i.ProjectBindingID,
+		&i.ConnectionID,
 		&i.GitlabProjectID,
-		&i.MrIid,
-		&i.Title,
-		&i.Description,
-		&i.State,
+		&i.PathWithNamespace,
 		&i.WebUrl,
-		&i.SourceBranch,
-		&i.TargetBranch,
-		&i.AuthorUsername,
-		&i.AuthorAvatarUrl,
-		&i.Sha,
-		&i.MergeCommitSha,
-		&i.DetailedMergeStatus,
-		&i.HasConflicts,
-		&i.Additions,
-		&i.Deletions,
-		&i.ChangedFiles,
-		&i.MrCreatedAt,
-		&i.MrUpdatedAt,
-		&i.MergedAt,
-		&i.ClosedAt,
+		&i.HookID,
+		&i.HookEnabled,
+		&i.LegacyLinkPolicy,
+		&i.LastSyncError,
+		&i.LastRefreshAt,
+		&i.LastRefreshError,
+		&i.LastEventAt,
+		&i.LastEventType,
+		&i.RefreshInProgressAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.Reviewers,
-		&i.Assignees,
-		&i.Labels,
-		&i.LastRefreshedAt,
-		&i.LastRefreshError,
-		&i.ConflictSha,
-		&i.SourceProjectID,
-		&i.SourceProjectPath,
-		&i.PipelineSyncAt,
-		&i.PipelineSyncError,
-		&i.WakeupSyncGeneration,
 	)
 	return i, err
 }
 
-const getGitLabMergeRequestForIssue = `-- name: GetGitLabMergeRequestForIssue :one
-SELECT mr.id, mr.workspace_id, mr.project_binding_id, mr.gitlab_project_id, mr.mr_iid, mr.title, mr.description, mr.state, mr.web_url, mr.source_branch, mr.target_branch, mr.author_username, mr.author_avatar_url, mr.sha, mr.merge_commit_sha, mr.detailed_merge_status, mr.has_conflicts, mr.additions, mr.deletions, mr.changed_files, mr.mr_created_at, mr.mr_updated_at, mr.merged_at, mr.closed_at, mr.created_at, mr.updated_at, mr.reviewers, mr.assignees, mr.labels, mr.last_refreshed_at, mr.last_refresh_error, mr.conflict_sha, mr.source_project_id, mr.source_project_path, mr.pipeline_sync_at, mr.pipeline_sync_error, mr.wakeup_sync_generation
-FROM gitlab_merge_request mr
-JOIN issue_gitlab_merge_request imr
-  ON imr.merge_request_id = mr.id
- AND imr.workspace_id = mr.workspace_id
-WHERE imr.issue_id = $1
-  AND mr.id = $2
-  AND mr.workspace_id = $3
+const getVCSGitLabProjectByConnectionPath = `-- name: GetVCSGitLabProjectByConnectionPath :one
+SELECT p.id, p.workspace_id, p.connection_id, p.gitlab_project_id, p.path_with_namespace, p.web_url, p.hook_id, p.hook_enabled, p.legacy_link_policy, p.last_sync_error, p.last_refresh_at, p.last_refresh_error, p.last_event_at, p.last_event_type, p.refresh_in_progress_at, p.created_at, p.updated_at
+FROM vcs_gitlab_project p
+JOIN vcs_connection c
+  ON c.id = p.connection_id
+ AND c.workspace_id = p.workspace_id
+ AND c.provider = 'gitlab'
+WHERE p.workspace_id = $1
+  AND p.connection_id = $2
+  AND lower(p.path_with_namespace) = lower($3)
 `
 
-type GetGitLabMergeRequestForIssueParams struct {
-	IssueID     pgtype.UUID `json:"issue_id"`
-	ID          pgtype.UUID `json:"id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) GetGitLabMergeRequestForIssue(ctx context.Context, arg GetGitLabMergeRequestForIssueParams) (GitlabMergeRequest, error) {
-	row := q.db.QueryRow(ctx, getGitLabMergeRequestForIssue, arg.IssueID, arg.ID, arg.WorkspaceID)
-	var i GitlabMergeRequest
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.ProjectBindingID,
-		&i.GitlabProjectID,
-		&i.MrIid,
-		&i.Title,
-		&i.Description,
-		&i.State,
-		&i.WebUrl,
-		&i.SourceBranch,
-		&i.TargetBranch,
-		&i.AuthorUsername,
-		&i.AuthorAvatarUrl,
-		&i.Sha,
-		&i.MergeCommitSha,
-		&i.DetailedMergeStatus,
-		&i.HasConflicts,
-		&i.Additions,
-		&i.Deletions,
-		&i.ChangedFiles,
-		&i.MrCreatedAt,
-		&i.MrUpdatedAt,
-		&i.MergedAt,
-		&i.ClosedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.Reviewers,
-		&i.Assignees,
-		&i.Labels,
-		&i.LastRefreshedAt,
-		&i.LastRefreshError,
-		&i.ConflictSha,
-		&i.SourceProjectID,
-		&i.SourceProjectPath,
-		&i.PipelineSyncAt,
-		&i.PipelineSyncError,
-		&i.WakeupSyncGeneration,
-	)
-	return i, err
-}
-
-const getGitLabMergeRequestForWakeup = `-- name: GetGitLabMergeRequestForWakeup :one
-SELECT mr.id, mr.workspace_id, mr.project_binding_id, mr.gitlab_project_id, mr.mr_iid, mr.title, mr.description, mr.state, mr.web_url, mr.source_branch, mr.target_branch, mr.author_username, mr.author_avatar_url, mr.sha, mr.merge_commit_sha, mr.detailed_merge_status, mr.has_conflicts, mr.additions, mr.deletions, mr.changed_files, mr.mr_created_at, mr.mr_updated_at, mr.merged_at, mr.closed_at, mr.created_at, mr.updated_at, mr.reviewers, mr.assignees, mr.labels, mr.last_refreshed_at, mr.last_refresh_error, mr.conflict_sha, mr.source_project_id, mr.source_project_path, mr.pipeline_sync_at, mr.pipeline_sync_error, mr.wakeup_sync_generation
-FROM gitlab_merge_request mr
-JOIN gitlab_project_binding pb
-  ON pb.id = mr.project_binding_id
- AND pb.workspace_id = mr.workspace_id
-WHERE mr.workspace_id = $1
-  AND pb.connection_id = $2
-  AND pb.path_with_namespace = $3
-  AND mr.mr_iid = $4
-`
-
-type GetGitLabMergeRequestForWakeupParams struct {
+type GetVCSGitLabProjectByConnectionPathParams struct {
 	WorkspaceID       pgtype.UUID `json:"workspace_id"`
 	ConnectionID      pgtype.UUID `json:"connection_id"`
 	PathWithNamespace string      `json:"path_with_namespace"`
-	MrIid             int32       `json:"mr_iid"`
 }
 
-func (q *Queries) GetGitLabMergeRequestForWakeup(ctx context.Context, arg GetGitLabMergeRequestForWakeupParams) (GitlabMergeRequest, error) {
-	row := q.db.QueryRow(ctx, getGitLabMergeRequestForWakeup,
-		arg.WorkspaceID,
-		arg.ConnectionID,
-		arg.PathWithNamespace,
-		arg.MrIid,
-	)
-	var i GitlabMergeRequest
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.ProjectBindingID,
-		&i.GitlabProjectID,
-		&i.MrIid,
-		&i.Title,
-		&i.Description,
-		&i.State,
-		&i.WebUrl,
-		&i.SourceBranch,
-		&i.TargetBranch,
-		&i.AuthorUsername,
-		&i.AuthorAvatarUrl,
-		&i.Sha,
-		&i.MergeCommitSha,
-		&i.DetailedMergeStatus,
-		&i.HasConflicts,
-		&i.Additions,
-		&i.Deletions,
-		&i.ChangedFiles,
-		&i.MrCreatedAt,
-		&i.MrUpdatedAt,
-		&i.MergedAt,
-		&i.ClosedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.Reviewers,
-		&i.Assignees,
-		&i.Labels,
-		&i.LastRefreshedAt,
-		&i.LastRefreshError,
-		&i.ConflictSha,
-		&i.SourceProjectID,
-		&i.SourceProjectPath,
-		&i.PipelineSyncAt,
-		&i.PipelineSyncError,
-		&i.WakeupSyncGeneration,
-	)
-	return i, err
-}
-
-const getGitLabPipelineJobForIssue = `-- name: GetGitLabPipelineJobForIssue :one
-SELECT j.id, j.workspace_id, j.merge_request_id, j.pipeline_id, j.job_id, j.name, j.stage, j.status, j.ref, j.sha, j.web_url, j.started_at, j.finished_at, j.duration_seconds, j.queued_duration_seconds, j.failure_reason, j.allow_failure, j.artifacts_file_name, j.artifacts_file_size, j.artifacts_expire_at, j.trace_summary, j.trace_truncated, j.trace_fetched_at, j.fetched_at, j.created_at, j.updated_at
-FROM gitlab_pipeline_job j
-JOIN issue_gitlab_merge_request imr
-  ON imr.merge_request_id = j.merge_request_id
- AND imr.workspace_id = j.workspace_id
-WHERE imr.issue_id = $1
-  AND j.id = $2
-  AND j.workspace_id = $3
-`
-
-type GetGitLabPipelineJobForIssueParams struct {
-	IssueID     pgtype.UUID `json:"issue_id"`
-	ID          pgtype.UUID `json:"id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) GetGitLabPipelineJobForIssue(ctx context.Context, arg GetGitLabPipelineJobForIssueParams) (GitlabPipelineJob, error) {
-	row := q.db.QueryRow(ctx, getGitLabPipelineJobForIssue, arg.IssueID, arg.ID, arg.WorkspaceID)
-	var i GitlabPipelineJob
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.MergeRequestID,
-		&i.PipelineID,
-		&i.JobID,
-		&i.Name,
-		&i.Stage,
-		&i.Status,
-		&i.Ref,
-		&i.Sha,
-		&i.WebUrl,
-		&i.StartedAt,
-		&i.FinishedAt,
-		&i.DurationSeconds,
-		&i.QueuedDurationSeconds,
-		&i.FailureReason,
-		&i.AllowFailure,
-		&i.ArtifactsFileName,
-		&i.ArtifactsFileSize,
-		&i.ArtifactsExpireAt,
-		&i.TraceSummary,
-		&i.TraceTruncated,
-		&i.TraceFetchedAt,
-		&i.FetchedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const getGitLabProjectBinding = `-- name: GetGitLabProjectBinding :one
-SELECT id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, last_sync_error, created_at, updated_at, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at FROM gitlab_project_binding
-WHERE id = $1 AND workspace_id = $2
-`
-
-type GetGitLabProjectBindingParams struct {
-	ID          pgtype.UUID `json:"id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) GetGitLabProjectBinding(ctx context.Context, arg GetGitLabProjectBindingParams) (GitlabProjectBinding, error) {
-	row := q.db.QueryRow(ctx, getGitLabProjectBinding, arg.ID, arg.WorkspaceID)
-	var i GitlabProjectBinding
+func (q *Queries) GetVCSGitLabProjectByConnectionPath(ctx context.Context, arg GetVCSGitLabProjectByConnectionPathParams) (VcsGitlabProject, error) {
+	row := q.db.QueryRow(ctx, getVCSGitLabProjectByConnectionPath, arg.WorkspaceID, arg.ConnectionID, arg.PathWithNamespace)
+	var i VcsGitlabProject
 	err := row.Scan(
 		&i.ID,
 		&i.WorkspaceID,
@@ -499,860 +249,83 @@ func (q *Queries) GetGitLabProjectBinding(ctx context.Context, arg GetGitLabProj
 		&i.WebUrl,
 		&i.HookID,
 		&i.HookEnabled,
+		&i.LegacyLinkPolicy,
 		&i.LastSyncError,
-		&i.CreatedAt,
-		&i.UpdatedAt,
 		&i.LastRefreshAt,
 		&i.LastRefreshError,
 		&i.LastEventAt,
 		&i.LastEventType,
 		&i.RefreshInProgressAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
-const getIssueGitLabMRCloseAggregate = `-- name: GetIssueGitLabMRCloseAggregate :one
-SELECT
-    COALESCE(SUM(CASE WHEN mr.state IN ('open', 'draft') THEN 1 ELSE 0 END), 0)::bigint AS open_count,
-    COALESCE(SUM(CASE WHEN mr.state = 'merged' AND imr.close_intent THEN 1 ELSE 0 END), 0)::bigint AS merged_with_close_intent_count
-FROM gitlab_merge_request mr
-JOIN issue_gitlab_merge_request imr
-  ON imr.merge_request_id = mr.id
- AND imr.workspace_id = mr.workspace_id
-WHERE imr.workspace_id = $1 AND imr.issue_id = $2
+const getVCSGitLabProjectByConnectionProject = `-- name: GetVCSGitLabProjectByConnectionProject :one
+SELECT id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, legacy_link_policy, last_sync_error, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at, created_at, updated_at FROM vcs_gitlab_project
+WHERE workspace_id = $1 AND connection_id = $2 AND gitlab_project_id = $3
 `
 
-type GetIssueGitLabMRCloseAggregateParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	IssueID     pgtype.UUID `json:"issue_id"`
-}
-
-type GetIssueGitLabMRCloseAggregateRow struct {
-	OpenCount                  int64 `json:"open_count"`
-	MergedWithCloseIntentCount int64 `json:"merged_with_close_intent_count"`
-}
-
-func (q *Queries) GetIssueGitLabMRCloseAggregate(ctx context.Context, arg GetIssueGitLabMRCloseAggregateParams) (GetIssueGitLabMRCloseAggregateRow, error) {
-	row := q.db.QueryRow(ctx, getIssueGitLabMRCloseAggregate, arg.WorkspaceID, arg.IssueID)
-	var i GetIssueGitLabMRCloseAggregateRow
-	err := row.Scan(&i.OpenCount, &i.MergedWithCloseIntentCount)
-	return i, err
-}
-
-const gitLabConnectionHasProjectBindings = `-- name: GitLabConnectionHasProjectBindings :one
-SELECT EXISTS (
-    SELECT 1
-    FROM gitlab_project_binding
-    WHERE workspace_id = $1 AND connection_id = $2
-)
-`
-
-type GitLabConnectionHasProjectBindingsParams struct {
-	WorkspaceID  pgtype.UUID `json:"workspace_id"`
-	ConnectionID pgtype.UUID `json:"connection_id"`
-}
-
-func (q *Queries) GitLabConnectionHasProjectBindings(ctx context.Context, arg GitLabConnectionHasProjectBindingsParams) (bool, error) {
-	row := q.db.QueryRow(ctx, gitLabConnectionHasProjectBindings, arg.WorkspaceID, arg.ConnectionID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
-const linkIssueToGitLabMergeRequest = `-- name: LinkIssueToGitLabMergeRequest :exec
-INSERT INTO issue_gitlab_merge_request (
-    workspace_id, issue_id, merge_request_id, linked_by_type, linked_by_id, close_intent
-) VALUES (
-    $1, $2, $3, $5, $6, $4
-)
-ON CONFLICT (issue_id, merge_request_id) DO UPDATE SET
-    close_intent = CASE
-        WHEN $7 THEN issue_gitlab_merge_request.close_intent
-        ELSE EXCLUDED.close_intent
-    END
-`
-
-type LinkIssueToGitLabMergeRequestParams struct {
-	WorkspaceID         pgtype.UUID `json:"workspace_id"`
-	IssueID             pgtype.UUID `json:"issue_id"`
-	MergeRequestID      pgtype.UUID `json:"merge_request_id"`
-	CloseIntent         bool        `json:"close_intent"`
-	LinkedByType        pgtype.Text `json:"linked_by_type"`
-	LinkedByID          pgtype.UUID `json:"linked_by_id"`
-	PreserveCloseIntent bool        `json:"preserve_close_intent"`
-}
-
-func (q *Queries) LinkIssueToGitLabMergeRequest(ctx context.Context, arg LinkIssueToGitLabMergeRequestParams) error {
-	_, err := q.db.Exec(ctx, linkIssueToGitLabMergeRequest,
-		arg.WorkspaceID,
-		arg.IssueID,
-		arg.MergeRequestID,
-		arg.CloseIntent,
-		arg.LinkedByType,
-		arg.LinkedByID,
-		arg.PreserveCloseIntent,
-	)
-	return err
-}
-
-const listGitLabConnectionsByWorkspace = `-- name: ListGitLabConnectionsByWorkspace :many
-SELECT id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted FROM gitlab_connection
-WHERE workspace_id = $1
-ORDER BY created_at ASC, id ASC
-`
-
-func (q *Queries) ListGitLabConnectionsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) ([]GitlabConnection, error) {
-	rows, err := q.db.Query(ctx, listGitLabConnectionsByWorkspace, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabConnection{}
-	for rows.Next() {
-		var i GitlabConnection
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.BaseUrl,
-			&i.Host,
-			&i.ConnectedByID,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.AccessTokenEncrypted,
-			&i.WebhookSecretEncrypted,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabMRDiscussions = `-- name: ListGitLabMRDiscussions :many
-SELECT id, workspace_id, merge_request_id, gitlab_discussion_id, individual_note, resolved, discussion_created_at, discussion_updated_at, fetched_at, created_at, updated_at FROM gitlab_mr_discussion
-WHERE workspace_id = $1 AND merge_request_id = $2
-ORDER BY COALESCE(discussion_updated_at, discussion_created_at, updated_at) DESC, id ASC
-`
-
-type ListGitLabMRDiscussionsParams struct {
-	WorkspaceID    pgtype.UUID `json:"workspace_id"`
-	MergeRequestID pgtype.UUID `json:"merge_request_id"`
-}
-
-func (q *Queries) ListGitLabMRDiscussions(ctx context.Context, arg ListGitLabMRDiscussionsParams) ([]GitlabMrDiscussion, error) {
-	rows, err := q.db.Query(ctx, listGitLabMRDiscussions, arg.WorkspaceID, arg.MergeRequestID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabMrDiscussion{}
-	for rows.Next() {
-		var i GitlabMrDiscussion
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.MergeRequestID,
-			&i.GitlabDiscussionID,
-			&i.IndividualNote,
-			&i.Resolved,
-			&i.DiscussionCreatedAt,
-			&i.DiscussionUpdatedAt,
-			&i.FetchedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabMRNotes = `-- name: ListGitLabMRNotes :many
-SELECT id, workspace_id, discussion_id, merge_request_id, gitlab_note_id, author_username, author_avatar_url, body, system, resolved, resolvable, note_created_at, note_updated_at, created_at, updated_at FROM gitlab_mr_note
-WHERE workspace_id = $1 AND merge_request_id = $2
-ORDER BY COALESCE(note_created_at, created_at) ASC, id ASC
-`
-
-type ListGitLabMRNotesParams struct {
-	WorkspaceID    pgtype.UUID `json:"workspace_id"`
-	MergeRequestID pgtype.UUID `json:"merge_request_id"`
-}
-
-func (q *Queries) ListGitLabMRNotes(ctx context.Context, arg ListGitLabMRNotesParams) ([]GitlabMrNote, error) {
-	rows, err := q.db.Query(ctx, listGitLabMRNotes, arg.WorkspaceID, arg.MergeRequestID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabMrNote{}
-	for rows.Next() {
-		var i GitlabMrNote
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.DiscussionID,
-			&i.MergeRequestID,
-			&i.GitlabNoteID,
-			&i.AuthorUsername,
-			&i.AuthorAvatarUrl,
-			&i.Body,
-			&i.System,
-			&i.Resolved,
-			&i.Resolvable,
-			&i.NoteCreatedAt,
-			&i.NoteUpdatedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabMRPipelinesByMR = `-- name: ListGitLabMRPipelinesByMR :many
-SELECT merge_request_id, pipeline_id, sha, ref, status, web_url, pipeline_updated_at, created_at, updated_at, pipeline_project_id FROM gitlab_mr_pipeline
-WHERE merge_request_id = $1
-ORDER BY pipeline_updated_at DESC, pipeline_id DESC
-`
-
-func (q *Queries) ListGitLabMRPipelinesByMR(ctx context.Context, mergeRequestID pgtype.UUID) ([]GitlabMrPipeline, error) {
-	rows, err := q.db.Query(ctx, listGitLabMRPipelinesByMR, mergeRequestID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabMrPipeline{}
-	for rows.Next() {
-		var i GitlabMrPipeline
-		if err := rows.Scan(
-			&i.MergeRequestID,
-			&i.PipelineID,
-			&i.Sha,
-			&i.Ref,
-			&i.Status,
-			&i.WebUrl,
-			&i.PipelineUpdatedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.PipelineProjectID,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabMergeRequestsByIssue = `-- name: ListGitLabMergeRequestsByIssue :many
-WITH issue_mrs AS (
-    SELECT mr.id, mr.sha
-    FROM gitlab_merge_request mr
-    JOIN issue_gitlab_merge_request imr
-      ON imr.merge_request_id = mr.id
-     AND imr.workspace_id = mr.workspace_id
-    WHERE imr.workspace_id = $1
-      AND imr.issue_id = $2
-),
-latest_pipeline AS (
-    SELECT DISTINCT ON (p.merge_request_id)
-        p.merge_request_id, p.status, p.web_url
-    FROM gitlab_mr_pipeline p
-    JOIN issue_mrs im ON im.id = p.merge_request_id
-    WHERE p.sha = im.sha AND im.sha <> ''
-    ORDER BY p.merge_request_id, p.pipeline_updated_at DESC, p.pipeline_id DESC
-)
-SELECT
-    mr.id, mr.workspace_id, mr.project_binding_id, mr.gitlab_project_id, mr.mr_iid, mr.title, mr.description, mr.state, mr.web_url, mr.source_branch, mr.target_branch, mr.author_username, mr.author_avatar_url, mr.sha, mr.merge_commit_sha, mr.detailed_merge_status, mr.has_conflicts, mr.additions, mr.deletions, mr.changed_files, mr.mr_created_at, mr.mr_updated_at, mr.merged_at, mr.closed_at, mr.created_at, mr.updated_at, mr.reviewers, mr.assignees, mr.labels, mr.last_refreshed_at, mr.last_refresh_error, mr.conflict_sha, mr.source_project_id, mr.source_project_path, mr.pipeline_sync_at, mr.pipeline_sync_error, mr.wakeup_sync_generation,
-    pb.path_with_namespace,
-    lp.status AS pipeline_status,
-    lp.web_url AS pipeline_url
-FROM gitlab_merge_request mr
-JOIN issue_gitlab_merge_request imr
-  ON imr.merge_request_id = mr.id
- AND imr.workspace_id = mr.workspace_id
-JOIN gitlab_project_binding pb
-  ON pb.id = mr.project_binding_id
- AND pb.workspace_id = mr.workspace_id
-LEFT JOIN latest_pipeline lp ON lp.merge_request_id = mr.id
-WHERE imr.workspace_id = $1
-  AND imr.issue_id = $2
-ORDER BY mr.mr_created_at DESC, mr.id ASC
-`
-
-type ListGitLabMergeRequestsByIssueParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	IssueID     pgtype.UUID `json:"issue_id"`
-}
-
-type ListGitLabMergeRequestsByIssueRow struct {
-	ID                   pgtype.UUID        `json:"id"`
-	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
-	ProjectBindingID     pgtype.UUID        `json:"project_binding_id"`
-	GitlabProjectID      int64              `json:"gitlab_project_id"`
-	MrIid                int32              `json:"mr_iid"`
-	Title                string             `json:"title"`
-	Description          pgtype.Text        `json:"description"`
-	State                string             `json:"state"`
-	WebUrl               string             `json:"web_url"`
-	SourceBranch         pgtype.Text        `json:"source_branch"`
-	TargetBranch         pgtype.Text        `json:"target_branch"`
-	AuthorUsername       pgtype.Text        `json:"author_username"`
-	AuthorAvatarUrl      pgtype.Text        `json:"author_avatar_url"`
-	Sha                  string             `json:"sha"`
-	MergeCommitSha       pgtype.Text        `json:"merge_commit_sha"`
-	DetailedMergeStatus  pgtype.Text        `json:"detailed_merge_status"`
-	HasConflicts         pgtype.Bool        `json:"has_conflicts"`
-	Additions            int32              `json:"additions"`
-	Deletions            int32              `json:"deletions"`
-	ChangedFiles         int32              `json:"changed_files"`
-	MrCreatedAt          pgtype.Timestamptz `json:"mr_created_at"`
-	MrUpdatedAt          pgtype.Timestamptz `json:"mr_updated_at"`
-	MergedAt             pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
-	Reviewers            []byte             `json:"reviewers"`
-	Assignees            []byte             `json:"assignees"`
-	Labels               []byte             `json:"labels"`
-	LastRefreshedAt      pgtype.Timestamptz `json:"last_refreshed_at"`
-	LastRefreshError     pgtype.Text        `json:"last_refresh_error"`
-	ConflictSha          string             `json:"conflict_sha"`
-	SourceProjectID      pgtype.Int8        `json:"source_project_id"`
-	SourceProjectPath    pgtype.Text        `json:"source_project_path"`
-	PipelineSyncAt       pgtype.Timestamptz `json:"pipeline_sync_at"`
-	PipelineSyncError    pgtype.Text        `json:"pipeline_sync_error"`
-	WakeupSyncGeneration int64              `json:"wakeup_sync_generation"`
-	PathWithNamespace    string             `json:"path_with_namespace"`
-	PipelineStatus       pgtype.Text        `json:"pipeline_status"`
-	PipelineUrl          pgtype.Text        `json:"pipeline_url"`
-}
-
-func (q *Queries) ListGitLabMergeRequestsByIssue(ctx context.Context, arg ListGitLabMergeRequestsByIssueParams) ([]ListGitLabMergeRequestsByIssueRow, error) {
-	rows, err := q.db.Query(ctx, listGitLabMergeRequestsByIssue, arg.WorkspaceID, arg.IssueID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListGitLabMergeRequestsByIssueRow{}
-	for rows.Next() {
-		var i ListGitLabMergeRequestsByIssueRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.ProjectBindingID,
-			&i.GitlabProjectID,
-			&i.MrIid,
-			&i.Title,
-			&i.Description,
-			&i.State,
-			&i.WebUrl,
-			&i.SourceBranch,
-			&i.TargetBranch,
-			&i.AuthorUsername,
-			&i.AuthorAvatarUrl,
-			&i.Sha,
-			&i.MergeCommitSha,
-			&i.DetailedMergeStatus,
-			&i.HasConflicts,
-			&i.Additions,
-			&i.Deletions,
-			&i.ChangedFiles,
-			&i.MrCreatedAt,
-			&i.MrUpdatedAt,
-			&i.MergedAt,
-			&i.ClosedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.Reviewers,
-			&i.Assignees,
-			&i.Labels,
-			&i.LastRefreshedAt,
-			&i.LastRefreshError,
-			&i.ConflictSha,
-			&i.SourceProjectID,
-			&i.SourceProjectPath,
-			&i.PipelineSyncAt,
-			&i.PipelineSyncError,
-			&i.WakeupSyncGeneration,
-			&i.PathWithNamespace,
-			&i.PipelineStatus,
-			&i.PipelineUrl,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabMergeRequestsByProjectBinding = `-- name: ListGitLabMergeRequestsByProjectBinding :many
-SELECT id, workspace_id, project_binding_id, gitlab_project_id, mr_iid, title, description, state, web_url, source_branch, target_branch, author_username, author_avatar_url, sha, merge_commit_sha, detailed_merge_status, has_conflicts, additions, deletions, changed_files, mr_created_at, mr_updated_at, merged_at, closed_at, created_at, updated_at, reviewers, assignees, labels, last_refreshed_at, last_refresh_error, conflict_sha, source_project_id, source_project_path, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM gitlab_merge_request
-WHERE workspace_id = $1 AND project_binding_id = $2
-ORDER BY mr_updated_at DESC, id ASC
-LIMIT $3
-`
-
-type ListGitLabMergeRequestsByProjectBindingParams struct {
-	WorkspaceID      pgtype.UUID `json:"workspace_id"`
-	ProjectBindingID pgtype.UUID `json:"project_binding_id"`
-	Limit            int32       `json:"limit"`
-}
-
-func (q *Queries) ListGitLabMergeRequestsByProjectBinding(ctx context.Context, arg ListGitLabMergeRequestsByProjectBindingParams) ([]GitlabMergeRequest, error) {
-	rows, err := q.db.Query(ctx, listGitLabMergeRequestsByProjectBinding, arg.WorkspaceID, arg.ProjectBindingID, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabMergeRequest{}
-	for rows.Next() {
-		var i GitlabMergeRequest
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.ProjectBindingID,
-			&i.GitlabProjectID,
-			&i.MrIid,
-			&i.Title,
-			&i.Description,
-			&i.State,
-			&i.WebUrl,
-			&i.SourceBranch,
-			&i.TargetBranch,
-			&i.AuthorUsername,
-			&i.AuthorAvatarUrl,
-			&i.Sha,
-			&i.MergeCommitSha,
-			&i.DetailedMergeStatus,
-			&i.HasConflicts,
-			&i.Additions,
-			&i.Deletions,
-			&i.ChangedFiles,
-			&i.MrCreatedAt,
-			&i.MrUpdatedAt,
-			&i.MergedAt,
-			&i.ClosedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.Reviewers,
-			&i.Assignees,
-			&i.Labels,
-			&i.LastRefreshedAt,
-			&i.LastRefreshError,
-			&i.ConflictSha,
-			&i.SourceProjectID,
-			&i.SourceProjectPath,
-			&i.PipelineSyncAt,
-			&i.PipelineSyncError,
-			&i.WakeupSyncGeneration,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabMergeRequestsByProjectBindingSHA = `-- name: ListGitLabMergeRequestsByProjectBindingSHA :many
-SELECT id, workspace_id, project_binding_id, gitlab_project_id, mr_iid, title, description, state, web_url, source_branch, target_branch, author_username, author_avatar_url, sha, merge_commit_sha, detailed_merge_status, has_conflicts, additions, deletions, changed_files, mr_created_at, mr_updated_at, merged_at, closed_at, created_at, updated_at, reviewers, assignees, labels, last_refreshed_at, last_refresh_error, conflict_sha, source_project_id, source_project_path, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation FROM gitlab_merge_request
-WHERE workspace_id = $1 AND project_binding_id = $2 AND sha = $3
-ORDER BY mr_updated_at DESC, id ASC
-`
-
-type ListGitLabMergeRequestsByProjectBindingSHAParams struct {
-	WorkspaceID      pgtype.UUID `json:"workspace_id"`
-	ProjectBindingID pgtype.UUID `json:"project_binding_id"`
-	Sha              string      `json:"sha"`
-}
-
-func (q *Queries) ListGitLabMergeRequestsByProjectBindingSHA(ctx context.Context, arg ListGitLabMergeRequestsByProjectBindingSHAParams) ([]GitlabMergeRequest, error) {
-	rows, err := q.db.Query(ctx, listGitLabMergeRequestsByProjectBindingSHA, arg.WorkspaceID, arg.ProjectBindingID, arg.Sha)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabMergeRequest{}
-	for rows.Next() {
-		var i GitlabMergeRequest
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.ProjectBindingID,
-			&i.GitlabProjectID,
-			&i.MrIid,
-			&i.Title,
-			&i.Description,
-			&i.State,
-			&i.WebUrl,
-			&i.SourceBranch,
-			&i.TargetBranch,
-			&i.AuthorUsername,
-			&i.AuthorAvatarUrl,
-			&i.Sha,
-			&i.MergeCommitSha,
-			&i.DetailedMergeStatus,
-			&i.HasConflicts,
-			&i.Additions,
-			&i.Deletions,
-			&i.ChangedFiles,
-			&i.MrCreatedAt,
-			&i.MrUpdatedAt,
-			&i.MergedAt,
-			&i.ClosedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.Reviewers,
-			&i.Assignees,
-			&i.Labels,
-			&i.LastRefreshedAt,
-			&i.LastRefreshError,
-			&i.ConflictSha,
-			&i.SourceProjectID,
-			&i.SourceProjectPath,
-			&i.PipelineSyncAt,
-			&i.PipelineSyncError,
-			&i.WakeupSyncGeneration,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabMergeRequestsBySourceProjectHeadForBaseURL = `-- name: ListGitLabMergeRequestsBySourceProjectHeadForBaseURL :many
-SELECT mr.id, mr.workspace_id, mr.project_binding_id, mr.gitlab_project_id, mr.mr_iid, mr.title, mr.description, mr.state, mr.web_url, mr.source_branch, mr.target_branch, mr.author_username, mr.author_avatar_url, mr.sha, mr.merge_commit_sha, mr.detailed_merge_status, mr.has_conflicts, mr.additions, mr.deletions, mr.changed_files, mr.mr_created_at, mr.mr_updated_at, mr.merged_at, mr.closed_at, mr.created_at, mr.updated_at, mr.reviewers, mr.assignees, mr.labels, mr.last_refreshed_at, mr.last_refresh_error, mr.conflict_sha, mr.source_project_id, mr.source_project_path, mr.pipeline_sync_at, mr.pipeline_sync_error, mr.wakeup_sync_generation
-FROM gitlab_merge_request mr
-JOIN gitlab_project_binding pb
-  ON pb.id = mr.project_binding_id
- AND pb.workspace_id = mr.workspace_id
-JOIN gitlab_connection gc
-  ON gc.id = pb.connection_id
- AND gc.workspace_id = pb.workspace_id
-WHERE gc.base_url = $1
-  AND gc.access_token_encrypted = ''
-  AND gc.webhook_secret_encrypted = ''
-  AND mr.source_project_id = $2
-  AND mr.sha = $3
-  AND mr.sha <> ''
-ORDER BY mr.mr_updated_at DESC, mr.id ASC
-`
-
-type ListGitLabMergeRequestsBySourceProjectHeadForBaseURLParams struct {
-	BaseUrl         string      `json:"base_url"`
-	SourceProjectID pgtype.Int8 `json:"source_project_id"`
-	Sha             string      `json:"sha"`
-}
-
-// Keep the legacy source-project lookup scoped to environment-backed connections.
-func (q *Queries) ListGitLabMergeRequestsBySourceProjectHeadForBaseURL(ctx context.Context, arg ListGitLabMergeRequestsBySourceProjectHeadForBaseURLParams) ([]GitlabMergeRequest, error) {
-	rows, err := q.db.Query(ctx, listGitLabMergeRequestsBySourceProjectHeadForBaseURL, arg.BaseUrl, arg.SourceProjectID, arg.Sha)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabMergeRequest{}
-	for rows.Next() {
-		var i GitlabMergeRequest
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.ProjectBindingID,
-			&i.GitlabProjectID,
-			&i.MrIid,
-			&i.Title,
-			&i.Description,
-			&i.State,
-			&i.WebUrl,
-			&i.SourceBranch,
-			&i.TargetBranch,
-			&i.AuthorUsername,
-			&i.AuthorAvatarUrl,
-			&i.Sha,
-			&i.MergeCommitSha,
-			&i.DetailedMergeStatus,
-			&i.HasConflicts,
-			&i.Additions,
-			&i.Deletions,
-			&i.ChangedFiles,
-			&i.MrCreatedAt,
-			&i.MrUpdatedAt,
-			&i.MergedAt,
-			&i.ClosedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.Reviewers,
-			&i.Assignees,
-			&i.Labels,
-			&i.LastRefreshedAt,
-			&i.LastRefreshError,
-			&i.ConflictSha,
-			&i.SourceProjectID,
-			&i.SourceProjectPath,
-			&i.PipelineSyncAt,
-			&i.PipelineSyncError,
-			&i.WakeupSyncGeneration,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabMergeRequestsBySourceProjectHeadForConnection = `-- name: ListGitLabMergeRequestsBySourceProjectHeadForConnection :many
-SELECT mr.id, mr.workspace_id, mr.project_binding_id, mr.gitlab_project_id, mr.mr_iid, mr.title, mr.description, mr.state, mr.web_url, mr.source_branch, mr.target_branch, mr.author_username, mr.author_avatar_url, mr.sha, mr.merge_commit_sha, mr.detailed_merge_status, mr.has_conflicts, mr.additions, mr.deletions, mr.changed_files, mr.mr_created_at, mr.mr_updated_at, mr.merged_at, mr.closed_at, mr.created_at, mr.updated_at, mr.reviewers, mr.assignees, mr.labels, mr.last_refreshed_at, mr.last_refresh_error, mr.conflict_sha, mr.source_project_id, mr.source_project_path, mr.pipeline_sync_at, mr.pipeline_sync_error, mr.wakeup_sync_generation
-FROM gitlab_merge_request mr
-JOIN gitlab_project_binding pb
-  ON pb.id = mr.project_binding_id
- AND pb.workspace_id = mr.workspace_id
-WHERE pb.connection_id = $1
-  AND mr.source_project_id = $2
-  AND mr.sha = $3
-  AND mr.sha <> ''
-ORDER BY mr.mr_updated_at DESC, mr.id ASC
-`
-
-type ListGitLabMergeRequestsBySourceProjectHeadForConnectionParams struct {
-	ConnectionID    pgtype.UUID `json:"connection_id"`
-	SourceProjectID pgtype.Int8 `json:"source_project_id"`
-	Sha             string      `json:"sha"`
-}
-
-func (q *Queries) ListGitLabMergeRequestsBySourceProjectHeadForConnection(ctx context.Context, arg ListGitLabMergeRequestsBySourceProjectHeadForConnectionParams) ([]GitlabMergeRequest, error) {
-	rows, err := q.db.Query(ctx, listGitLabMergeRequestsBySourceProjectHeadForConnection, arg.ConnectionID, arg.SourceProjectID, arg.Sha)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabMergeRequest{}
-	for rows.Next() {
-		var i GitlabMergeRequest
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.ProjectBindingID,
-			&i.GitlabProjectID,
-			&i.MrIid,
-			&i.Title,
-			&i.Description,
-			&i.State,
-			&i.WebUrl,
-			&i.SourceBranch,
-			&i.TargetBranch,
-			&i.AuthorUsername,
-			&i.AuthorAvatarUrl,
-			&i.Sha,
-			&i.MergeCommitSha,
-			&i.DetailedMergeStatus,
-			&i.HasConflicts,
-			&i.Additions,
-			&i.Deletions,
-			&i.ChangedFiles,
-			&i.MrCreatedAt,
-			&i.MrUpdatedAt,
-			&i.MergedAt,
-			&i.ClosedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.Reviewers,
-			&i.Assignees,
-			&i.Labels,
-			&i.LastRefreshedAt,
-			&i.LastRefreshError,
-			&i.ConflictSha,
-			&i.SourceProjectID,
-			&i.SourceProjectPath,
-			&i.PipelineSyncAt,
-			&i.PipelineSyncError,
-			&i.WakeupSyncGeneration,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabPipelineJobsByMR = `-- name: ListGitLabPipelineJobsByMR :many
-SELECT id, workspace_id, merge_request_id, pipeline_id, job_id, name, stage, status, ref, sha, web_url, started_at, finished_at, duration_seconds, queued_duration_seconds, failure_reason, allow_failure, artifacts_file_name, artifacts_file_size, artifacts_expire_at, trace_summary, trace_truncated, trace_fetched_at, fetched_at, created_at, updated_at FROM gitlab_pipeline_job
-WHERE workspace_id = $1 AND merge_request_id = $2
-ORDER BY pipeline_id DESC, stage ASC NULLS LAST, job_id ASC
-`
-
-type ListGitLabPipelineJobsByMRParams struct {
-	WorkspaceID    pgtype.UUID `json:"workspace_id"`
-	MergeRequestID pgtype.UUID `json:"merge_request_id"`
-}
-
-func (q *Queries) ListGitLabPipelineJobsByMR(ctx context.Context, arg ListGitLabPipelineJobsByMRParams) ([]GitlabPipelineJob, error) {
-	rows, err := q.db.Query(ctx, listGitLabPipelineJobsByMR, arg.WorkspaceID, arg.MergeRequestID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabPipelineJob{}
-	for rows.Next() {
-		var i GitlabPipelineJob
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.MergeRequestID,
-			&i.PipelineID,
-			&i.JobID,
-			&i.Name,
-			&i.Stage,
-			&i.Status,
-			&i.Ref,
-			&i.Sha,
-			&i.WebUrl,
-			&i.StartedAt,
-			&i.FinishedAt,
-			&i.DurationSeconds,
-			&i.QueuedDurationSeconds,
-			&i.FailureReason,
-			&i.AllowFailure,
-			&i.ArtifactsFileName,
-			&i.ArtifactsFileSize,
-			&i.ArtifactsExpireAt,
-			&i.TraceSummary,
-			&i.TraceTruncated,
-			&i.TraceFetchedAt,
-			&i.FetchedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabProjectBindingsByBaseURLAndProjectID = `-- name: ListGitLabProjectBindingsByBaseURLAndProjectID :many
-SELECT pb.id, pb.workspace_id, pb.connection_id, pb.gitlab_project_id, pb.path_with_namespace, pb.web_url, pb.hook_id, pb.hook_enabled, pb.last_sync_error, pb.created_at, pb.updated_at, pb.last_refresh_at, pb.last_refresh_error, pb.last_event_at, pb.last_event_type, pb.refresh_in_progress_at FROM gitlab_project_binding pb
-JOIN gitlab_connection gc
-  ON gc.id = pb.connection_id
- AND gc.workspace_id = pb.workspace_id
-WHERE gc.base_url = $1 AND pb.gitlab_project_id = $2
-  AND gc.access_token_encrypted = ''
-  AND gc.webhook_secret_encrypted = ''
-ORDER BY pb.created_at ASC, pb.id ASC
-`
-
-type ListGitLabProjectBindingsByBaseURLAndProjectIDParams struct {
-	BaseUrl         string `json:"base_url"`
-	GitlabProjectID int64  `json:"gitlab_project_id"`
-}
-
-// The unscoped legacy webhook uses deployment credentials; exclude per-instance connections.
-func (q *Queries) ListGitLabProjectBindingsByBaseURLAndProjectID(ctx context.Context, arg ListGitLabProjectBindingsByBaseURLAndProjectIDParams) ([]GitlabProjectBinding, error) {
-	rows, err := q.db.Query(ctx, listGitLabProjectBindingsByBaseURLAndProjectID, arg.BaseUrl, arg.GitlabProjectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabProjectBinding{}
-	for rows.Next() {
-		var i GitlabProjectBinding
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.ConnectionID,
-			&i.GitlabProjectID,
-			&i.PathWithNamespace,
-			&i.WebUrl,
-			&i.HookID,
-			&i.HookEnabled,
-			&i.LastSyncError,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.LastRefreshAt,
-			&i.LastRefreshError,
-			&i.LastEventAt,
-			&i.LastEventType,
-			&i.RefreshInProgressAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listGitLabProjectBindingsByConnectionAndProjectID = `-- name: ListGitLabProjectBindingsByConnectionAndProjectID :many
-SELECT id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, last_sync_error, created_at, updated_at, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at FROM gitlab_project_binding
-WHERE connection_id = $1 AND gitlab_project_id = $2
-ORDER BY created_at ASC, id ASC
-`
-
-type ListGitLabProjectBindingsByConnectionAndProjectIDParams struct {
+type GetVCSGitLabProjectByConnectionProjectParams struct {
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
 	ConnectionID    pgtype.UUID `json:"connection_id"`
 	GitlabProjectID int64       `json:"gitlab_project_id"`
 }
 
-func (q *Queries) ListGitLabProjectBindingsByConnectionAndProjectID(ctx context.Context, arg ListGitLabProjectBindingsByConnectionAndProjectIDParams) ([]GitlabProjectBinding, error) {
-	rows, err := q.db.Query(ctx, listGitLabProjectBindingsByConnectionAndProjectID, arg.ConnectionID, arg.GitlabProjectID)
+func (q *Queries) GetVCSGitLabProjectByConnectionProject(ctx context.Context, arg GetVCSGitLabProjectByConnectionProjectParams) (VcsGitlabProject, error) {
+	row := q.db.QueryRow(ctx, getVCSGitLabProjectByConnectionProject, arg.WorkspaceID, arg.ConnectionID, arg.GitlabProjectID)
+	var i VcsGitlabProject
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ConnectionID,
+		&i.GitlabProjectID,
+		&i.PathWithNamespace,
+		&i.WebUrl,
+		&i.HookID,
+		&i.HookEnabled,
+		&i.LegacyLinkPolicy,
+		&i.LastSyncError,
+		&i.LastRefreshAt,
+		&i.LastRefreshError,
+		&i.LastEventAt,
+		&i.LastEventType,
+		&i.RefreshInProgressAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listGitLabMigrationDeliveriesByID = `-- name: ListGitLabMigrationDeliveriesByID :many
+SELECT delivery_id, workspace_id, connection_id, scope_type, scope_id, scope_path, hook_id, event_type, received_at, payload, reconciled_at, reconciliation_note FROM vcs_gitlab_migration_delivery
+WHERE delivery_id = $1 AND reconciled_at IS NULL
+ORDER BY received_at, workspace_id, connection_id, scope_type, scope_id, hook_id
+`
+
+func (q *Queries) ListGitLabMigrationDeliveriesByID(ctx context.Context, deliveryID string) ([]VcsGitlabMigrationDelivery, error) {
+	rows, err := q.db.Query(ctx, listGitLabMigrationDeliveriesByID, deliveryID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []GitlabProjectBinding{}
+	items := []VcsGitlabMigrationDelivery{}
 	for rows.Next() {
-		var i GitlabProjectBinding
+		var i VcsGitlabMigrationDelivery
 		if err := rows.Scan(
-			&i.ID,
+			&i.DeliveryID,
 			&i.WorkspaceID,
 			&i.ConnectionID,
-			&i.GitlabProjectID,
-			&i.PathWithNamespace,
-			&i.WebUrl,
+			&i.ScopeType,
+			&i.ScopeID,
+			&i.ScopePath,
 			&i.HookID,
-			&i.HookEnabled,
-			&i.LastSyncError,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.LastRefreshAt,
-			&i.LastRefreshError,
-			&i.LastEventAt,
-			&i.LastEventType,
-			&i.RefreshInProgressAt,
+			&i.EventType,
+			&i.ReceivedAt,
+			&i.Payload,
+			&i.ReconciledAt,
+			&i.ReconciliationNote,
 		); err != nil {
 			return nil, err
 		}
@@ -1364,133 +337,34 @@ func (q *Queries) ListGitLabProjectBindingsByConnectionAndProjectID(ctx context.
 	return items, nil
 }
 
-const listGitLabProjectBindingsByWorkspace = `-- name: ListGitLabProjectBindingsByWorkspace :many
-SELECT id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, last_sync_error, created_at, updated_at, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at FROM gitlab_project_binding
-WHERE workspace_id = $1
-ORDER BY path_with_namespace ASC, id ASC
+const markGitLabMigrationDeliveryReconciled = `-- name: MarkGitLabMigrationDeliveryReconciled :execrows
+UPDATE vcs_gitlab_migration_delivery
+SET reconciled_at = now(), reconciliation_note = $7
+WHERE delivery_id = $1 AND workspace_id = $2 AND connection_id = $3
+  AND scope_type = $4 AND scope_id = $5 AND hook_id = $6
+  AND reconciled_at IS NULL
+  AND payload IS NOT NULL
 `
 
-func (q *Queries) ListGitLabProjectBindingsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) ([]GitlabProjectBinding, error) {
-	rows, err := q.db.Query(ctx, listGitLabProjectBindingsByWorkspace, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GitlabProjectBinding{}
-	for rows.Next() {
-		var i GitlabProjectBinding
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.ConnectionID,
-			&i.GitlabProjectID,
-			&i.PathWithNamespace,
-			&i.WebUrl,
-			&i.HookID,
-			&i.HookEnabled,
-			&i.LastSyncError,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.LastRefreshAt,
-			&i.LastRefreshError,
-			&i.LastEventAt,
-			&i.LastEventType,
-			&i.RefreshInProgressAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+type MarkGitLabMigrationDeliveryReconciledParams struct {
+	DeliveryID         string      `json:"delivery_id"`
+	WorkspaceID        pgtype.UUID `json:"workspace_id"`
+	ConnectionID       pgtype.UUID `json:"connection_id"`
+	ScopeType          string      `json:"scope_type"`
+	ScopeID            string      `json:"scope_id"`
+	HookID             int64       `json:"hook_id"`
+	ReconciliationNote pgtype.Text `json:"reconciliation_note"`
 }
 
-const listIssueIDsForGitLabMergeRequest = `-- name: ListIssueIDsForGitLabMergeRequest :many
-SELECT issue_id FROM issue_gitlab_merge_request
-WHERE workspace_id = $1 AND merge_request_id = $2
-ORDER BY issue_id ASC
-`
-
-type ListIssueIDsForGitLabMergeRequestParams struct {
-	WorkspaceID    pgtype.UUID `json:"workspace_id"`
-	MergeRequestID pgtype.UUID `json:"merge_request_id"`
-}
-
-func (q *Queries) ListIssueIDsForGitLabMergeRequest(ctx context.Context, arg ListIssueIDsForGitLabMergeRequestParams) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, listIssueIDsForGitLabMergeRequest, arg.WorkspaceID, arg.MergeRequestID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []pgtype.UUID{}
-	for rows.Next() {
-		var issue_id pgtype.UUID
-		if err := rows.Scan(&issue_id); err != nil {
-			return nil, err
-		}
-		items = append(items, issue_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const lockGitLabMergeRequestWakeupSync = `-- name: LockGitLabMergeRequestWakeupSync :one
-SELECT id FROM gitlab_merge_request
-WHERE id = $1
-  AND workspace_id = $2
-  AND wakeup_sync_generation = $3
-  AND sha = $4
-FOR UPDATE
-`
-
-type LockGitLabMergeRequestWakeupSyncParams struct {
-	ID                   pgtype.UUID `json:"id"`
-	WorkspaceID          pgtype.UUID `json:"workspace_id"`
-	WakeupSyncGeneration int64       `json:"wakeup_sync_generation"`
-	Sha                  string      `json:"sha"`
-}
-
-func (q *Queries) LockGitLabMergeRequestWakeupSync(ctx context.Context, arg LockGitLabMergeRequestWakeupSyncParams) (pgtype.UUID, error) {
-	row := q.db.QueryRow(ctx, lockGitLabMergeRequestWakeupSync,
-		arg.ID,
+func (q *Queries) MarkGitLabMigrationDeliveryReconciled(ctx context.Context, arg MarkGitLabMigrationDeliveryReconciledParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markGitLabMigrationDeliveryReconciled,
+		arg.DeliveryID,
 		arg.WorkspaceID,
-		arg.WakeupSyncGeneration,
-		arg.Sha,
-	)
-	var id pgtype.UUID
-	err := row.Scan(&id)
-	return id, err
-}
-
-const markGitLabMergeRequestPipelineSync = `-- name: MarkGitLabMergeRequestPipelineSync :execrows
-UPDATE gitlab_merge_request
-SET pipeline_sync_at = now(),
-    pipeline_sync_error = $3,
-    updated_at = now()
-WHERE id = $1 AND workspace_id = $2
-  AND wakeup_sync_generation = $4
-  AND sha = $5
-`
-
-type MarkGitLabMergeRequestPipelineSyncParams struct {
-	ID                   pgtype.UUID `json:"id"`
-	WorkspaceID          pgtype.UUID `json:"workspace_id"`
-	PipelineSyncError    pgtype.Text `json:"pipeline_sync_error"`
-	WakeupSyncGeneration int64       `json:"wakeup_sync_generation"`
-	Sha                  string      `json:"sha"`
-}
-
-func (q *Queries) MarkGitLabMergeRequestPipelineSync(ctx context.Context, arg MarkGitLabMergeRequestPipelineSyncParams) (int64, error) {
-	result, err := q.db.Exec(ctx, markGitLabMergeRequestPipelineSync,
-		arg.ID,
-		arg.WorkspaceID,
-		arg.PipelineSyncError,
-		arg.WakeupSyncGeneration,
-		arg.Sha,
+		arg.ConnectionID,
+		arg.ScopeType,
+		arg.ScopeID,
+		arg.HookID,
+		arg.ReconciliationNote,
 	)
 	if err != nil {
 		return 0, err
@@ -1498,965 +372,77 @@ func (q *Queries) MarkGitLabMergeRequestPipelineSync(ctx context.Context, arg Ma
 	return result.RowsAffected(), nil
 }
 
-const markGitLabMergeRequestPipelineSyncSuccess = `-- name: MarkGitLabMergeRequestPipelineSyncSuccess :execrows
-UPDATE gitlab_merge_request
-SET pipeline_sync_at = now(),
-    pipeline_sync_error = NULL,
-    updated_at = now()
-WHERE id = $1 AND workspace_id = $2
-  AND wakeup_sync_generation = $3
-  AND sha = $4
-`
-
-type MarkGitLabMergeRequestPipelineSyncSuccessParams struct {
-	ID                   pgtype.UUID `json:"id"`
-	WorkspaceID          pgtype.UUID `json:"workspace_id"`
-	WakeupSyncGeneration int64       `json:"wakeup_sync_generation"`
-	Sha                  string      `json:"sha"`
-}
-
-func (q *Queries) MarkGitLabMergeRequestPipelineSyncSuccess(ctx context.Context, arg MarkGitLabMergeRequestPipelineSyncSuccessParams) (int64, error) {
-	result, err := q.db.Exec(ctx, markGitLabMergeRequestPipelineSyncSuccess,
-		arg.ID,
-		arg.WorkspaceID,
-		arg.WakeupSyncGeneration,
-		arg.Sha,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const markGitLabMergeRequestRefreshError = `-- name: MarkGitLabMergeRequestRefreshError :execrows
-UPDATE gitlab_merge_request
-SET last_refreshed_at = now(),
-    last_refresh_error = $3,
-    updated_at = now()
-WHERE id = $1 AND workspace_id = $2
-  AND wakeup_sync_generation = $4
-`
-
-type MarkGitLabMergeRequestRefreshErrorParams struct {
-	ID                   pgtype.UUID `json:"id"`
-	WorkspaceID          pgtype.UUID `json:"workspace_id"`
-	LastRefreshError     pgtype.Text `json:"last_refresh_error"`
-	WakeupSyncGeneration int64       `json:"wakeup_sync_generation"`
-}
-
-func (q *Queries) MarkGitLabMergeRequestRefreshError(ctx context.Context, arg MarkGitLabMergeRequestRefreshErrorParams) (int64, error) {
-	result, err := q.db.Exec(ctx, markGitLabMergeRequestRefreshError,
-		arg.ID,
-		arg.WorkspaceID,
-		arg.LastRefreshError,
-		arg.WakeupSyncGeneration,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const markGitLabProjectBindingEvent = `-- name: MarkGitLabProjectBindingEvent :exec
-UPDATE gitlab_project_binding
-SET last_event_at = now(),
-    last_event_type = $3,
-    updated_at = now()
+const markVCSGitLabProjectEvent = `-- name: MarkVCSGitLabProjectEvent :exec
+UPDATE vcs_gitlab_project
+SET last_event_at = now(), last_event_type = $3, updated_at = now()
 WHERE id = $1 AND workspace_id = $2
 `
 
-type MarkGitLabProjectBindingEventParams struct {
+type MarkVCSGitLabProjectEventParams struct {
 	ID            pgtype.UUID `json:"id"`
 	WorkspaceID   pgtype.UUID `json:"workspace_id"`
 	LastEventType pgtype.Text `json:"last_event_type"`
 }
 
-func (q *Queries) MarkGitLabProjectBindingEvent(ctx context.Context, arg MarkGitLabProjectBindingEventParams) error {
-	_, err := q.db.Exec(ctx, markGitLabProjectBindingEvent, arg.ID, arg.WorkspaceID, arg.LastEventType)
+func (q *Queries) MarkVCSGitLabProjectEvent(ctx context.Context, arg MarkVCSGitLabProjectEventParams) error {
+	_, err := q.db.Exec(ctx, markVCSGitLabProjectEvent, arg.ID, arg.WorkspaceID, arg.LastEventType)
 	return err
 }
 
-const markGitLabProjectRefreshFinished = `-- name: MarkGitLabProjectRefreshFinished :exec
-UPDATE gitlab_project_binding
-SET last_refresh_at = now(),
-    refresh_in_progress_at = NULL,
-    last_refresh_error = $3,
-    updated_at = now()
-WHERE id = $1 AND workspace_id = $2
+const resolveGitLabMigrationID = `-- name: ResolveGitLabMigrationID :one
+SELECT unified_id FROM vcs_gitlab_migration_id_map
+WHERE workspace_id = $1 AND entity_kind = $2 AND legacy_id = $3
 `
 
-type MarkGitLabProjectRefreshFinishedParams struct {
-	ID               pgtype.UUID `json:"id"`
-	WorkspaceID      pgtype.UUID `json:"workspace_id"`
-	LastRefreshError pgtype.Text `json:"last_refresh_error"`
-}
-
-func (q *Queries) MarkGitLabProjectRefreshFinished(ctx context.Context, arg MarkGitLabProjectRefreshFinishedParams) error {
-	_, err := q.db.Exec(ctx, markGitLabProjectRefreshFinished, arg.ID, arg.WorkspaceID, arg.LastRefreshError)
-	return err
-}
-
-const markGitLabProjectRefreshStarted = `-- name: MarkGitLabProjectRefreshStarted :exec
-UPDATE gitlab_project_binding
-SET refresh_in_progress_at = now(),
-    last_refresh_error = NULL,
-    updated_at = now()
-WHERE id = $1 AND workspace_id = $2
-`
-
-type MarkGitLabProjectRefreshStartedParams struct {
-	ID          pgtype.UUID `json:"id"`
+type ResolveGitLabMigrationIDParams struct {
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	EntityKind  string      `json:"entity_kind"`
+	LegacyID    pgtype.UUID `json:"legacy_id"`
 }
 
-func (q *Queries) MarkGitLabProjectRefreshStarted(ctx context.Context, arg MarkGitLabProjectRefreshStartedParams) error {
-	_, err := q.db.Exec(ctx, markGitLabProjectRefreshStarted, arg.ID, arg.WorkspaceID)
-	return err
+func (q *Queries) ResolveGitLabMigrationID(ctx context.Context, arg ResolveGitLabMigrationIDParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, resolveGitLabMigrationID, arg.WorkspaceID, arg.EntityKind, arg.LegacyID)
+	var unified_id pgtype.UUID
+	err := row.Scan(&unified_id)
+	return unified_id, err
 }
 
-const storeGitLabConnectionCredentials = `-- name: StoreGitLabConnectionCredentials :one
-UPDATE gitlab_connection
-SET access_token_encrypted = $3,
-    webhook_secret_encrypted = CASE
-        WHEN webhook_secret_encrypted = '' THEN $4
-        ELSE webhook_secret_encrypted
-    END,
-    updated_at = now()
-WHERE id = $1 AND workspace_id = $2
-RETURNING gitlab_connection.id, gitlab_connection.workspace_id, gitlab_connection.base_url, gitlab_connection.host, gitlab_connection.connected_by_id, gitlab_connection.created_at, gitlab_connection.updated_at, gitlab_connection.access_token_encrypted, gitlab_connection.webhook_secret_encrypted,
-          (webhook_secret_encrypted = $4) AS webhook_secret_created
-`
-
-type StoreGitLabConnectionCredentialsParams struct {
-	ID                     pgtype.UUID `json:"id"`
-	WorkspaceID            pgtype.UUID `json:"workspace_id"`
-	AccessTokenEncrypted   string      `json:"access_token_encrypted"`
-	WebhookSecretEncrypted string      `json:"webhook_secret_encrypted"`
-}
-
-type StoreGitLabConnectionCredentialsRow struct {
-	ID                     pgtype.UUID        `json:"id"`
-	WorkspaceID            pgtype.UUID        `json:"workspace_id"`
-	BaseUrl                string             `json:"base_url"`
-	Host                   string             `json:"host"`
-	ConnectedByID          pgtype.UUID        `json:"connected_by_id"`
-	CreatedAt              pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
-	AccessTokenEncrypted   string             `json:"access_token_encrypted"`
-	WebhookSecretEncrypted string             `json:"webhook_secret_encrypted"`
-	WebhookSecretCreated   bool               `json:"webhook_secret_created"`
-}
-
-func (q *Queries) StoreGitLabConnectionCredentials(ctx context.Context, arg StoreGitLabConnectionCredentialsParams) (StoreGitLabConnectionCredentialsRow, error) {
-	row := q.db.QueryRow(ctx, storeGitLabConnectionCredentials,
-		arg.ID,
-		arg.WorkspaceID,
-		arg.AccessTokenEncrypted,
-		arg.WebhookSecretEncrypted,
-	)
-	var i StoreGitLabConnectionCredentialsRow
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.BaseUrl,
-		&i.Host,
-		&i.ConnectedByID,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.AccessTokenEncrypted,
-		&i.WebhookSecretEncrypted,
-		&i.WebhookSecretCreated,
-	)
-	return i, err
-}
-
-const updateGitLabMergeRequestEnrichment = `-- name: UpdateGitLabMergeRequestEnrichment :one
-UPDATE gitlab_merge_request
-SET title = $3,
-    description = $15,
-    state = $4,
-    web_url = $5,
-    source_branch = $16,
-    target_branch = $17,
-    author_username = $18,
-    author_avatar_url = $19,
-    sha = $6,
-    merge_commit_sha = $20,
-    detailed_merge_status = $21,
-    has_conflicts = $22,
-    conflict_sha = COALESCE($23, ''),
-    source_project_id = $24,
-    source_project_path = $25,
-    additions = $7,
-    deletions = $8,
-    changed_files = $9,
-    reviewers = $10,
-    assignees = $11,
-    labels = $12,
-    mr_updated_at = $13,
-    merged_at = $26,
-    closed_at = $27,
-    last_refreshed_at = now(),
-    last_refresh_error = NULL,
-    pipeline_sync_at = now(),
-    pipeline_sync_error = 'pipeline refresh pending',
-    updated_at = now()
-WHERE id = $1 AND workspace_id = $2
-  AND mr_updated_at <= $13
-  AND wakeup_sync_generation = $14
-RETURNING id, workspace_id, project_binding_id, gitlab_project_id, mr_iid, title, description, state, web_url, source_branch, target_branch, author_username, author_avatar_url, sha, merge_commit_sha, detailed_merge_status, has_conflicts, additions, deletions, changed_files, mr_created_at, mr_updated_at, merged_at, closed_at, created_at, updated_at, reviewers, assignees, labels, last_refreshed_at, last_refresh_error, conflict_sha, source_project_id, source_project_path, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation
-`
-
-type UpdateGitLabMergeRequestEnrichmentParams struct {
-	ID                   pgtype.UUID        `json:"id"`
-	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
-	Title                string             `json:"title"`
-	State                string             `json:"state"`
-	WebUrl               string             `json:"web_url"`
-	Sha                  string             `json:"sha"`
-	Additions            int32              `json:"additions"`
-	Deletions            int32              `json:"deletions"`
-	ChangedFiles         int32              `json:"changed_files"`
-	Reviewers            []byte             `json:"reviewers"`
-	Assignees            []byte             `json:"assignees"`
-	Labels               []byte             `json:"labels"`
-	MrUpdatedAt          pgtype.Timestamptz `json:"mr_updated_at"`
-	WakeupSyncGeneration int64              `json:"wakeup_sync_generation"`
-	Description          pgtype.Text        `json:"description"`
-	SourceBranch         pgtype.Text        `json:"source_branch"`
-	TargetBranch         pgtype.Text        `json:"target_branch"`
-	AuthorUsername       pgtype.Text        `json:"author_username"`
-	AuthorAvatarUrl      pgtype.Text        `json:"author_avatar_url"`
-	MergeCommitSha       pgtype.Text        `json:"merge_commit_sha"`
-	DetailedMergeStatus  pgtype.Text        `json:"detailed_merge_status"`
-	HasConflicts         pgtype.Bool        `json:"has_conflicts"`
-	ConflictSha          pgtype.Text        `json:"conflict_sha"`
-	SourceProjectID      pgtype.Int8        `json:"source_project_id"`
-	SourceProjectPath    pgtype.Text        `json:"source_project_path"`
-	MergedAt             pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
-}
-
-func (q *Queries) UpdateGitLabMergeRequestEnrichment(ctx context.Context, arg UpdateGitLabMergeRequestEnrichmentParams) (GitlabMergeRequest, error) {
-	row := q.db.QueryRow(ctx, updateGitLabMergeRequestEnrichment,
-		arg.ID,
-		arg.WorkspaceID,
-		arg.Title,
-		arg.State,
-		arg.WebUrl,
-		arg.Sha,
-		arg.Additions,
-		arg.Deletions,
-		arg.ChangedFiles,
-		arg.Reviewers,
-		arg.Assignees,
-		arg.Labels,
-		arg.MrUpdatedAt,
-		arg.WakeupSyncGeneration,
-		arg.Description,
-		arg.SourceBranch,
-		arg.TargetBranch,
-		arg.AuthorUsername,
-		arg.AuthorAvatarUrl,
-		arg.MergeCommitSha,
-		arg.DetailedMergeStatus,
-		arg.HasConflicts,
-		arg.ConflictSha,
-		arg.SourceProjectID,
-		arg.SourceProjectPath,
-		arg.MergedAt,
-		arg.ClosedAt,
-	)
-	var i GitlabMergeRequest
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.ProjectBindingID,
-		&i.GitlabProjectID,
-		&i.MrIid,
-		&i.Title,
-		&i.Description,
-		&i.State,
-		&i.WebUrl,
-		&i.SourceBranch,
-		&i.TargetBranch,
-		&i.AuthorUsername,
-		&i.AuthorAvatarUrl,
-		&i.Sha,
-		&i.MergeCommitSha,
-		&i.DetailedMergeStatus,
-		&i.HasConflicts,
-		&i.Additions,
-		&i.Deletions,
-		&i.ChangedFiles,
-		&i.MrCreatedAt,
-		&i.MrUpdatedAt,
-		&i.MergedAt,
-		&i.ClosedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.Reviewers,
-		&i.Assignees,
-		&i.Labels,
-		&i.LastRefreshedAt,
-		&i.LastRefreshError,
-		&i.ConflictSha,
-		&i.SourceProjectID,
-		&i.SourceProjectPath,
-		&i.PipelineSyncAt,
-		&i.PipelineSyncError,
-		&i.WakeupSyncGeneration,
-	)
-	return i, err
-}
-
-const updateGitLabPipelineJobTraceSummary = `-- name: UpdateGitLabPipelineJobTraceSummary :exec
-UPDATE gitlab_pipeline_job
-SET trace_summary = $3,
-    trace_truncated = $4,
-    trace_fetched_at = now(),
-    updated_at = now()
-WHERE id = $1 AND workspace_id = $2
-`
-
-type UpdateGitLabPipelineJobTraceSummaryParams struct {
-	ID             pgtype.UUID `json:"id"`
-	WorkspaceID    pgtype.UUID `json:"workspace_id"`
-	TraceSummary   pgtype.Text `json:"trace_summary"`
-	TraceTruncated bool        `json:"trace_truncated"`
-}
-
-func (q *Queries) UpdateGitLabPipelineJobTraceSummary(ctx context.Context, arg UpdateGitLabPipelineJobTraceSummaryParams) error {
-	_, err := q.db.Exec(ctx, updateGitLabPipelineJobTraceSummary,
-		arg.ID,
-		arg.WorkspaceID,
-		arg.TraceSummary,
-		arg.TraceTruncated,
-	)
-	return err
-}
-
-const upsertGitLabConnection = `-- name: UpsertGitLabConnection :one
-INSERT INTO gitlab_connection (
-    workspace_id, base_url, host, connected_by_id
+const upsertVCSGitLabMigrationDelivery = `-- name: UpsertVCSGitLabMigrationDelivery :execrows
+INSERT INTO vcs_gitlab_migration_delivery (
+    delivery_id, workspace_id, connection_id, scope_type, scope_id, scope_path,
+    hook_id, event_type, payload
 ) VALUES (
-    $1, $2, $3, $4
+    $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb
 )
-ON CONFLICT (workspace_id, base_url) DO UPDATE SET
-    connected_by_id = COALESCE(EXCLUDED.connected_by_id, gitlab_connection.connected_by_id),
-    updated_at = now()
-RETURNING id, workspace_id, base_url, host, connected_by_id, created_at, updated_at, access_token_encrypted, webhook_secret_encrypted
+ON CONFLICT (delivery_id, workspace_id, connection_id, scope_type, scope_id, hook_id) DO NOTHING
 `
 
-type UpsertGitLabConnectionParams struct {
-	WorkspaceID   pgtype.UUID `json:"workspace_id"`
-	BaseUrl       string      `json:"base_url"`
-	Host          string      `json:"host"`
-	ConnectedByID pgtype.UUID `json:"connected_by_id"`
+type UpsertVCSGitLabMigrationDeliveryParams struct {
+	DeliveryID   string      `json:"delivery_id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ConnectionID pgtype.UUID `json:"connection_id"`
+	ScopeType    string      `json:"scope_type"`
+	ScopeID      string      `json:"scope_id"`
+	ScopePath    string      `json:"scope_path"`
+	HookID       int64       `json:"hook_id"`
+	EventType    string      `json:"event_type"`
+	Payload      []byte      `json:"payload"`
 }
 
-// Distinct base URLs may share a host; keep each connection identity stable.
-func (q *Queries) UpsertGitLabConnection(ctx context.Context, arg UpsertGitLabConnectionParams) (GitlabConnection, error) {
-	row := q.db.QueryRow(ctx, upsertGitLabConnection,
-		arg.WorkspaceID,
-		arg.BaseUrl,
-		arg.Host,
-		arg.ConnectedByID,
-	)
-	var i GitlabConnection
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.BaseUrl,
-		&i.Host,
-		&i.ConnectedByID,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.AccessTokenEncrypted,
-		&i.WebhookSecretEncrypted,
-	)
-	return i, err
-}
-
-const upsertGitLabMRApprovalState = `-- name: UpsertGitLabMRApprovalState :one
-INSERT INTO gitlab_mr_approval_state (
-    merge_request_id, workspace_id, approved, approvals_required,
-    approvals_left, approved_by, rules, raw_state, fetched_at
-) VALUES (
-    $1, $2, $3, $6,
-    $7, $4, $5, $8, now()
-)
-ON CONFLICT (merge_request_id) DO UPDATE SET
-    approved = EXCLUDED.approved,
-    approvals_required = EXCLUDED.approvals_required,
-    approvals_left = EXCLUDED.approvals_left,
-    approved_by = EXCLUDED.approved_by,
-    rules = EXCLUDED.rules,
-    raw_state = EXCLUDED.raw_state,
-    fetched_at = now(),
-    updated_at = now()
-RETURNING merge_request_id, workspace_id, approved, approvals_required, approvals_left, approved_by, rules, raw_state, fetched_at, updated_at
-`
-
-type UpsertGitLabMRApprovalStateParams struct {
-	MergeRequestID    pgtype.UUID `json:"merge_request_id"`
-	WorkspaceID       pgtype.UUID `json:"workspace_id"`
-	Approved          bool        `json:"approved"`
-	ApprovedBy        []byte      `json:"approved_by"`
-	Rules             []byte      `json:"rules"`
-	ApprovalsRequired pgtype.Int4 `json:"approvals_required"`
-	ApprovalsLeft     pgtype.Int4 `json:"approvals_left"`
-	RawState          []byte      `json:"raw_state"`
-}
-
-func (q *Queries) UpsertGitLabMRApprovalState(ctx context.Context, arg UpsertGitLabMRApprovalStateParams) (GitlabMrApprovalState, error) {
-	row := q.db.QueryRow(ctx, upsertGitLabMRApprovalState,
-		arg.MergeRequestID,
-		arg.WorkspaceID,
-		arg.Approved,
-		arg.ApprovedBy,
-		arg.Rules,
-		arg.ApprovalsRequired,
-		arg.ApprovalsLeft,
-		arg.RawState,
-	)
-	var i GitlabMrApprovalState
-	err := row.Scan(
-		&i.MergeRequestID,
-		&i.WorkspaceID,
-		&i.Approved,
-		&i.ApprovalsRequired,
-		&i.ApprovalsLeft,
-		&i.ApprovedBy,
-		&i.Rules,
-		&i.RawState,
-		&i.FetchedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const upsertGitLabMRDiscussion = `-- name: UpsertGitLabMRDiscussion :one
-INSERT INTO gitlab_mr_discussion (
-    workspace_id, merge_request_id, gitlab_discussion_id, individual_note,
-    resolved, discussion_created_at, discussion_updated_at, fetched_at
-) VALUES (
-    $1, $2, $3, $4, $5,
-    $6, $7, now()
-)
-ON CONFLICT (merge_request_id, gitlab_discussion_id) DO UPDATE SET
-    individual_note = EXCLUDED.individual_note,
-    resolved = EXCLUDED.resolved,
-    discussion_created_at = EXCLUDED.discussion_created_at,
-    discussion_updated_at = EXCLUDED.discussion_updated_at,
-    fetched_at = now(),
-    updated_at = now()
-RETURNING id, workspace_id, merge_request_id, gitlab_discussion_id, individual_note, resolved, discussion_created_at, discussion_updated_at, fetched_at, created_at, updated_at
-`
-
-type UpsertGitLabMRDiscussionParams struct {
-	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
-	MergeRequestID      pgtype.UUID        `json:"merge_request_id"`
-	GitlabDiscussionID  string             `json:"gitlab_discussion_id"`
-	IndividualNote      bool               `json:"individual_note"`
-	Resolved            pgtype.Bool        `json:"resolved"`
-	DiscussionCreatedAt pgtype.Timestamptz `json:"discussion_created_at"`
-	DiscussionUpdatedAt pgtype.Timestamptz `json:"discussion_updated_at"`
-}
-
-func (q *Queries) UpsertGitLabMRDiscussion(ctx context.Context, arg UpsertGitLabMRDiscussionParams) (GitlabMrDiscussion, error) {
-	row := q.db.QueryRow(ctx, upsertGitLabMRDiscussion,
-		arg.WorkspaceID,
-		arg.MergeRequestID,
-		arg.GitlabDiscussionID,
-		arg.IndividualNote,
-		arg.Resolved,
-		arg.DiscussionCreatedAt,
-		arg.DiscussionUpdatedAt,
-	)
-	var i GitlabMrDiscussion
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.MergeRequestID,
-		&i.GitlabDiscussionID,
-		&i.IndividualNote,
-		&i.Resolved,
-		&i.DiscussionCreatedAt,
-		&i.DiscussionUpdatedAt,
-		&i.FetchedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const upsertGitLabMRNote = `-- name: UpsertGitLabMRNote :one
-INSERT INTO gitlab_mr_note (
-    workspace_id, discussion_id, merge_request_id, gitlab_note_id,
-    author_username, author_avatar_url, body, system, resolved, resolvable,
-    note_created_at, note_updated_at
-) VALUES (
-    $1, $2, $3, $4,
-    $7, $8,
-    $5, $6, $9, $10,
-    $11, $12
-)
-ON CONFLICT (merge_request_id, gitlab_note_id) DO UPDATE SET
-    discussion_id = EXCLUDED.discussion_id,
-    author_username = EXCLUDED.author_username,
-    author_avatar_url = EXCLUDED.author_avatar_url,
-    body = EXCLUDED.body,
-    system = EXCLUDED.system,
-    resolved = EXCLUDED.resolved,
-    resolvable = EXCLUDED.resolvable,
-    note_created_at = EXCLUDED.note_created_at,
-    note_updated_at = EXCLUDED.note_updated_at,
-    updated_at = now()
-RETURNING id, workspace_id, discussion_id, merge_request_id, gitlab_note_id, author_username, author_avatar_url, body, system, resolved, resolvable, note_created_at, note_updated_at, created_at, updated_at
-`
-
-type UpsertGitLabMRNoteParams struct {
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	DiscussionID    pgtype.UUID        `json:"discussion_id"`
-	MergeRequestID  pgtype.UUID        `json:"merge_request_id"`
-	GitlabNoteID    int64              `json:"gitlab_note_id"`
-	Body            string             `json:"body"`
-	System          bool               `json:"system"`
-	AuthorUsername  pgtype.Text        `json:"author_username"`
-	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
-	Resolved        pgtype.Bool        `json:"resolved"`
-	Resolvable      pgtype.Bool        `json:"resolvable"`
-	NoteCreatedAt   pgtype.Timestamptz `json:"note_created_at"`
-	NoteUpdatedAt   pgtype.Timestamptz `json:"note_updated_at"`
-}
-
-func (q *Queries) UpsertGitLabMRNote(ctx context.Context, arg UpsertGitLabMRNoteParams) (GitlabMrNote, error) {
-	row := q.db.QueryRow(ctx, upsertGitLabMRNote,
-		arg.WorkspaceID,
-		arg.DiscussionID,
-		arg.MergeRequestID,
-		arg.GitlabNoteID,
-		arg.Body,
-		arg.System,
-		arg.AuthorUsername,
-		arg.AuthorAvatarUrl,
-		arg.Resolved,
-		arg.Resolvable,
-		arg.NoteCreatedAt,
-		arg.NoteUpdatedAt,
-	)
-	var i GitlabMrNote
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.DiscussionID,
-		&i.MergeRequestID,
-		&i.GitlabNoteID,
-		&i.AuthorUsername,
-		&i.AuthorAvatarUrl,
-		&i.Body,
-		&i.System,
-		&i.Resolved,
-		&i.Resolvable,
-		&i.NoteCreatedAt,
-		&i.NoteUpdatedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const upsertGitLabMRPipeline = `-- name: UpsertGitLabMRPipeline :exec
-INSERT INTO gitlab_mr_pipeline (
-    merge_request_id, pipeline_id, pipeline_project_id, sha, ref, status,
-    web_url, pipeline_updated_at
-)
-SELECT $1::UUID,
-       $2::BIGINT,
-       $3::BIGINT,
-       $4::TEXT,
-       $5::TEXT,
-       $6::TEXT,
-       $7::TEXT,
-       $8::TIMESTAMPTZ
-WHERE EXISTS (
-    SELECT 1
-    FROM gitlab_merge_request mr
-    WHERE mr.id = $1::UUID
-      AND mr.workspace_id = $9::UUID
-      AND mr.wakeup_sync_generation = $10::BIGINT
-      AND mr.sha = $4::TEXT
-)
-ON CONFLICT (merge_request_id, pipeline_project_id, pipeline_id) DO UPDATE SET
-    pipeline_project_id = EXCLUDED.pipeline_project_id,
-    sha = EXCLUDED.sha,
-    ref = EXCLUDED.ref,
-    status = EXCLUDED.status,
-    web_url = EXCLUDED.web_url,
-    pipeline_updated_at = EXCLUDED.pipeline_updated_at,
-    updated_at = now()
-WHERE EXCLUDED.pipeline_updated_at >= gitlab_mr_pipeline.pipeline_updated_at
-  AND EXISTS (
-      SELECT 1
-      FROM gitlab_merge_request mr
-      WHERE mr.id = $1::UUID
-        AND mr.workspace_id = $9::UUID
-        AND mr.wakeup_sync_generation = $10::BIGINT
-        AND mr.sha = $4::TEXT
-  )
-`
-
-type UpsertGitLabMRPipelineParams struct {
-	MergeRequestID       pgtype.UUID        `json:"merge_request_id"`
-	PipelineID           int64              `json:"pipeline_id"`
-	PipelineProjectID    int64              `json:"pipeline_project_id"`
-	Sha                  string             `json:"sha"`
-	Ref                  pgtype.Text        `json:"ref"`
-	Status               string             `json:"status"`
-	WebUrl               pgtype.Text        `json:"web_url"`
-	PipelineUpdatedAt    pgtype.Timestamptz `json:"pipeline_updated_at"`
-	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
-	WakeupSyncGeneration int64              `json:"wakeup_sync_generation"`
-}
-
-func (q *Queries) UpsertGitLabMRPipeline(ctx context.Context, arg UpsertGitLabMRPipelineParams) error {
-	_, err := q.db.Exec(ctx, upsertGitLabMRPipeline,
-		arg.MergeRequestID,
-		arg.PipelineID,
-		arg.PipelineProjectID,
-		arg.Sha,
-		arg.Ref,
-		arg.Status,
-		arg.WebUrl,
-		arg.PipelineUpdatedAt,
-		arg.WorkspaceID,
-		arg.WakeupSyncGeneration,
-	)
-	return err
-}
-
-const upsertGitLabMergeRequest = `-- name: UpsertGitLabMergeRequest :one
-INSERT INTO gitlab_merge_request (
-    workspace_id, project_binding_id, gitlab_project_id, mr_iid,
-    title, description, state, web_url, source_branch, target_branch,
-    author_username, author_avatar_url, sha, merge_commit_sha,
-    detailed_merge_status, has_conflicts, additions, deletions, changed_files,
-    mr_created_at, mr_updated_at, merged_at, closed_at, conflict_sha,
-    source_project_id, source_project_path
-) VALUES (
-    $1, $2, $3, $4,
-    $5, $14, $6, $7,
-    $15, $16,
-    $17, $18,
-    $8, $19,
-    $20, $21,
-    $9, $10, $11, $12, $13,
-    $22, $23, COALESCE($24, ''),
-    $25, $26
-)
-ON CONFLICT (workspace_id, project_binding_id, mr_iid) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    state = EXCLUDED.state,
-    web_url = EXCLUDED.web_url,
-    source_branch = EXCLUDED.source_branch,
-    target_branch = EXCLUDED.target_branch,
-    author_username = EXCLUDED.author_username,
-    author_avatar_url = EXCLUDED.author_avatar_url,
-    sha = EXCLUDED.sha,
-    merge_commit_sha = EXCLUDED.merge_commit_sha,
-    detailed_merge_status = EXCLUDED.detailed_merge_status,
-    has_conflicts = EXCLUDED.has_conflicts,
-    conflict_sha = EXCLUDED.conflict_sha,
-    source_project_id = EXCLUDED.source_project_id,
-    source_project_path = EXCLUDED.source_project_path,
-    additions = EXCLUDED.additions,
-    deletions = EXCLUDED.deletions,
-    changed_files = EXCLUDED.changed_files,
-    mr_updated_at = EXCLUDED.mr_updated_at,
-    merged_at = EXCLUDED.merged_at,
-    closed_at = EXCLUDED.closed_at,
-    updated_at = now()
-WHERE EXCLUDED.mr_updated_at >= gitlab_merge_request.mr_updated_at
-RETURNING id, workspace_id, project_binding_id, gitlab_project_id, mr_iid, title, description, state, web_url, source_branch, target_branch, author_username, author_avatar_url, sha, merge_commit_sha, detailed_merge_status, has_conflicts, additions, deletions, changed_files, mr_created_at, mr_updated_at, merged_at, closed_at, created_at, updated_at, reviewers, assignees, labels, last_refreshed_at, last_refresh_error, conflict_sha, source_project_id, source_project_path, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation
-`
-
-type UpsertGitLabMergeRequestParams struct {
-	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
-	ProjectBindingID    pgtype.UUID        `json:"project_binding_id"`
-	GitlabProjectID     int64              `json:"gitlab_project_id"`
-	MrIid               int32              `json:"mr_iid"`
-	Title               string             `json:"title"`
-	State               string             `json:"state"`
-	WebUrl              string             `json:"web_url"`
-	Sha                 string             `json:"sha"`
-	Additions           int32              `json:"additions"`
-	Deletions           int32              `json:"deletions"`
-	ChangedFiles        int32              `json:"changed_files"`
-	MrCreatedAt         pgtype.Timestamptz `json:"mr_created_at"`
-	MrUpdatedAt         pgtype.Timestamptz `json:"mr_updated_at"`
-	Description         pgtype.Text        `json:"description"`
-	SourceBranch        pgtype.Text        `json:"source_branch"`
-	TargetBranch        pgtype.Text        `json:"target_branch"`
-	AuthorUsername      pgtype.Text        `json:"author_username"`
-	AuthorAvatarUrl     pgtype.Text        `json:"author_avatar_url"`
-	MergeCommitSha      pgtype.Text        `json:"merge_commit_sha"`
-	DetailedMergeStatus pgtype.Text        `json:"detailed_merge_status"`
-	HasConflicts        pgtype.Bool        `json:"has_conflicts"`
-	MergedAt            pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt            pgtype.Timestamptz `json:"closed_at"`
-	ConflictSha         interface{}        `json:"conflict_sha"`
-	SourceProjectID     pgtype.Int8        `json:"source_project_id"`
-	SourceProjectPath   pgtype.Text        `json:"source_project_path"`
-}
-
-func (q *Queries) UpsertGitLabMergeRequest(ctx context.Context, arg UpsertGitLabMergeRequestParams) (GitlabMergeRequest, error) {
-	row := q.db.QueryRow(ctx, upsertGitLabMergeRequest,
-		arg.WorkspaceID,
-		arg.ProjectBindingID,
-		arg.GitlabProjectID,
-		arg.MrIid,
-		arg.Title,
-		arg.State,
-		arg.WebUrl,
-		arg.Sha,
-		arg.Additions,
-		arg.Deletions,
-		arg.ChangedFiles,
-		arg.MrCreatedAt,
-		arg.MrUpdatedAt,
-		arg.Description,
-		arg.SourceBranch,
-		arg.TargetBranch,
-		arg.AuthorUsername,
-		arg.AuthorAvatarUrl,
-		arg.MergeCommitSha,
-		arg.DetailedMergeStatus,
-		arg.HasConflicts,
-		arg.MergedAt,
-		arg.ClosedAt,
-		arg.ConflictSha,
-		arg.SourceProjectID,
-		arg.SourceProjectPath,
-	)
-	var i GitlabMergeRequest
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.ProjectBindingID,
-		&i.GitlabProjectID,
-		&i.MrIid,
-		&i.Title,
-		&i.Description,
-		&i.State,
-		&i.WebUrl,
-		&i.SourceBranch,
-		&i.TargetBranch,
-		&i.AuthorUsername,
-		&i.AuthorAvatarUrl,
-		&i.Sha,
-		&i.MergeCommitSha,
-		&i.DetailedMergeStatus,
-		&i.HasConflicts,
-		&i.Additions,
-		&i.Deletions,
-		&i.ChangedFiles,
-		&i.MrCreatedAt,
-		&i.MrUpdatedAt,
-		&i.MergedAt,
-		&i.ClosedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.Reviewers,
-		&i.Assignees,
-		&i.Labels,
-		&i.LastRefreshedAt,
-		&i.LastRefreshError,
-		&i.ConflictSha,
-		&i.SourceProjectID,
-		&i.SourceProjectPath,
-		&i.PipelineSyncAt,
-		&i.PipelineSyncError,
-		&i.WakeupSyncGeneration,
-	)
-	return i, err
-}
-
-const upsertGitLabPipelineJob = `-- name: UpsertGitLabPipelineJob :one
-INSERT INTO gitlab_pipeline_job (
-    workspace_id, merge_request_id, pipeline_id, job_id, name, stage,
-    status, ref, sha, web_url, started_at, finished_at, duration_seconds,
-    queued_duration_seconds, failure_reason, allow_failure,
-    artifacts_file_name, artifacts_file_size, artifacts_expire_at, fetched_at
-) VALUES (
-    $1, $2, $3, $4, $5, $8,
-    $6, $9, $10, $11,
-    $12, $13,
-    $14, $15,
-    $16, $7,
-    $17, $18,
-    $19, now()
-)
-ON CONFLICT (merge_request_id, job_id) DO UPDATE SET
-    pipeline_id = EXCLUDED.pipeline_id,
-    name = EXCLUDED.name,
-    stage = EXCLUDED.stage,
-    status = EXCLUDED.status,
-    ref = EXCLUDED.ref,
-    sha = EXCLUDED.sha,
-    web_url = EXCLUDED.web_url,
-    started_at = EXCLUDED.started_at,
-    finished_at = EXCLUDED.finished_at,
-    duration_seconds = EXCLUDED.duration_seconds,
-    queued_duration_seconds = EXCLUDED.queued_duration_seconds,
-    failure_reason = EXCLUDED.failure_reason,
-    allow_failure = EXCLUDED.allow_failure,
-    artifacts_file_name = EXCLUDED.artifacts_file_name,
-    artifacts_file_size = EXCLUDED.artifacts_file_size,
-    artifacts_expire_at = EXCLUDED.artifacts_expire_at,
-    fetched_at = now(),
-    updated_at = now()
-RETURNING id, workspace_id, merge_request_id, pipeline_id, job_id, name, stage, status, ref, sha, web_url, started_at, finished_at, duration_seconds, queued_duration_seconds, failure_reason, allow_failure, artifacts_file_name, artifacts_file_size, artifacts_expire_at, trace_summary, trace_truncated, trace_fetched_at, fetched_at, created_at, updated_at
-`
-
-type UpsertGitLabPipelineJobParams struct {
-	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
-	MergeRequestID        pgtype.UUID        `json:"merge_request_id"`
-	PipelineID            int64              `json:"pipeline_id"`
-	JobID                 int64              `json:"job_id"`
-	Name                  string             `json:"name"`
-	Status                string             `json:"status"`
-	AllowFailure          bool               `json:"allow_failure"`
-	Stage                 pgtype.Text        `json:"stage"`
-	Ref                   pgtype.Text        `json:"ref"`
-	Sha                   pgtype.Text        `json:"sha"`
-	WebUrl                pgtype.Text        `json:"web_url"`
-	StartedAt             pgtype.Timestamptz `json:"started_at"`
-	FinishedAt            pgtype.Timestamptz `json:"finished_at"`
-	DurationSeconds       pgtype.Float8      `json:"duration_seconds"`
-	QueuedDurationSeconds pgtype.Float8      `json:"queued_duration_seconds"`
-	FailureReason         pgtype.Text        `json:"failure_reason"`
-	ArtifactsFileName     pgtype.Text        `json:"artifacts_file_name"`
-	ArtifactsFileSize     pgtype.Int8        `json:"artifacts_file_size"`
-	ArtifactsExpireAt     pgtype.Timestamptz `json:"artifacts_expire_at"`
-}
-
-func (q *Queries) UpsertGitLabPipelineJob(ctx context.Context, arg UpsertGitLabPipelineJobParams) (GitlabPipelineJob, error) {
-	row := q.db.QueryRow(ctx, upsertGitLabPipelineJob,
-		arg.WorkspaceID,
-		arg.MergeRequestID,
-		arg.PipelineID,
-		arg.JobID,
-		arg.Name,
-		arg.Status,
-		arg.AllowFailure,
-		arg.Stage,
-		arg.Ref,
-		arg.Sha,
-		arg.WebUrl,
-		arg.StartedAt,
-		arg.FinishedAt,
-		arg.DurationSeconds,
-		arg.QueuedDurationSeconds,
-		arg.FailureReason,
-		arg.ArtifactsFileName,
-		arg.ArtifactsFileSize,
-		arg.ArtifactsExpireAt,
-	)
-	var i GitlabPipelineJob
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.MergeRequestID,
-		&i.PipelineID,
-		&i.JobID,
-		&i.Name,
-		&i.Stage,
-		&i.Status,
-		&i.Ref,
-		&i.Sha,
-		&i.WebUrl,
-		&i.StartedAt,
-		&i.FinishedAt,
-		&i.DurationSeconds,
-		&i.QueuedDurationSeconds,
-		&i.FailureReason,
-		&i.AllowFailure,
-		&i.ArtifactsFileName,
-		&i.ArtifactsFileSize,
-		&i.ArtifactsExpireAt,
-		&i.TraceSummary,
-		&i.TraceTruncated,
-		&i.TraceFetchedAt,
-		&i.FetchedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const upsertGitLabProjectBinding = `-- name: UpsertGitLabProjectBinding :one
-INSERT INTO gitlab_project_binding (
-    workspace_id, connection_id, gitlab_project_id, path_with_namespace,
-    web_url, hook_id, hook_enabled, last_sync_error
-) VALUES (
-    $1, $2, $3, $4, $5,
-    $7,
-    $6,
-    $8
-)
-ON CONFLICT (workspace_id, connection_id, gitlab_project_id) DO UPDATE SET
-    connection_id = EXCLUDED.connection_id,
-    path_with_namespace = EXCLUDED.path_with_namespace,
-    web_url = EXCLUDED.web_url,
-    hook_id = COALESCE(EXCLUDED.hook_id, gitlab_project_binding.hook_id),
-    hook_enabled = EXCLUDED.hook_enabled,
-    last_sync_error = EXCLUDED.last_sync_error,
-    updated_at = now()
-RETURNING id, workspace_id, connection_id, gitlab_project_id, path_with_namespace, web_url, hook_id, hook_enabled, last_sync_error, created_at, updated_at, last_refresh_at, last_refresh_error, last_event_at, last_event_type, refresh_in_progress_at
-`
-
-type UpsertGitLabProjectBindingParams struct {
-	WorkspaceID       pgtype.UUID `json:"workspace_id"`
-	ConnectionID      pgtype.UUID `json:"connection_id"`
-	GitlabProjectID   int64       `json:"gitlab_project_id"`
-	PathWithNamespace string      `json:"path_with_namespace"`
-	WebUrl            string      `json:"web_url"`
-	HookEnabled       bool        `json:"hook_enabled"`
-	HookID            pgtype.Int8 `json:"hook_id"`
-	LastSyncError     pgtype.Text `json:"last_sync_error"`
-}
-
-func (q *Queries) UpsertGitLabProjectBinding(ctx context.Context, arg UpsertGitLabProjectBindingParams) (GitlabProjectBinding, error) {
-	row := q.db.QueryRow(ctx, upsertGitLabProjectBinding,
+func (q *Queries) UpsertVCSGitLabMigrationDelivery(ctx context.Context, arg UpsertVCSGitLabMigrationDeliveryParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertVCSGitLabMigrationDelivery,
+		arg.DeliveryID,
 		arg.WorkspaceID,
 		arg.ConnectionID,
-		arg.GitlabProjectID,
-		arg.PathWithNamespace,
-		arg.WebUrl,
-		arg.HookEnabled,
+		arg.ScopeType,
+		arg.ScopeID,
+		arg.ScopePath,
 		arg.HookID,
-		arg.LastSyncError,
+		arg.EventType,
+		arg.Payload,
 	)
-	var i GitlabProjectBinding
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.ConnectionID,
-		&i.GitlabProjectID,
-		&i.PathWithNamespace,
-		&i.WebUrl,
-		&i.HookID,
-		&i.HookEnabled,
-		&i.LastSyncError,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.LastRefreshAt,
-		&i.LastRefreshError,
-		&i.LastEventAt,
-		&i.LastEventType,
-		&i.RefreshInProgressAt,
-	)
-	return i, err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

@@ -253,7 +253,7 @@ multica chat wakeup list
 
 条件包括 `--until-issue` 搭配 `--state` 或 `--status`、`--until-children-done` 搭配可选的 `--stage`、`--until-pr`、`--until-run`，以及 `--until-reply` 搭配可选的 `--from <user-id>`。GitHub PR 条件使用当前工作区已镜像的 PR，格式为 `owner/repo#N[:merged|closed|checks]`。`checks` 等待当前 head 的检查结束，成功或失败都算结束。只有服务端能从 GitHub 读取 CI 状态时才能创建 GitHub 的 `checks` 条件；自托管服务端需要配置 `GITHUB_APP_ID` 和 `GITHUB_APP_PRIVATE_KEY`（见 [GitHub 集成](/github-integration)）。创建时已经结束的检查结果会作为基线，不会立即唤醒智能体。
 
-GitLab MR 先用 `multica chat wakeup connections` 查看连接，再使用 `--until-pr group/subgroup/project#N[:merged|closed|checks] --gitlab-connection <connection-id>`。项目须已镜像到当前工作区；连接用于指定 GitLab 实例，支持多级群组路径。
+GitLab MR 先用 `multica chat wakeup connections` 查看连接，再使用 `--until-pr group/subgroup/project#N[:merged|closed|checks] --gitlab-connection <connection-id>`。项目须已镜像到当前工作区；连接用于指定 GitLab 实例，支持多级群组路径。该 MR 无需关联到任务；连接 ID 与完整项目路径共同确定目标。`merged` 等待 MR 合并；`closed` 适用于已关闭或已合并的 MR；`checks` 等待当前 head 对应的 Pipeline 结束，成功或失败都算结束。创建或更新时已结束的结果会作为基线，不会立即触发；状态暂不可用或对应旧 head 时，会继续等待并显示原因。
 
 用 `list`、`get <id>` 查看记录，`cancel <id>` 取消唤醒。定期检查运行中，`checkin <id> --note "..."` 记录进展但不发送回复；目标达成后用 `finish <id>` 结束检查。到期的最后一次运行必须汇报，不能静默签到。
 

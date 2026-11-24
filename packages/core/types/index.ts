@@ -264,12 +264,8 @@ export type {
   GitHubConnectResponse,
 } from "./github";
 export type {
-  CreateGitLabConnectionRequest,
-  CreateGitLabConnectionResponse,
   CreateGitLabProjectRequest,
   CreateGitLabProjectResponse,
-  GitLabConfigResponse,
-  GitLabConnection,
   GitLabJobTraceResponse,
   GitLabMergeRequestDetailsResponse,
   GitLabMergeRequest,
@@ -283,7 +279,7 @@ export type {
   GitLabProjectRefreshResponse,
   GitLabProjectBinding,
   GitLabUserRef,
-  ListGitLabMergeRequestsResponse,
+  ListGitLabProjectsResponse,
 } from "./gitlab";
 export type {
   DeclaredEnvironment,

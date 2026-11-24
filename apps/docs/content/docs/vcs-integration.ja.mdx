@@ -1,6 +1,6 @@
 ---
 title: セルフホスト Git ホスティング
-description: ワークスペースごとにセルフホストの Forgejo、Gitea、GitLab インスタンスを接続し、ブランチ名かタイトルにタスク番号を含む、または本文で終了キーワードの直後にタスク番号を置いた Pull Request / Merge Request を対応するタスクへ自動的に紐づけ、マージ時にワークスペースが選んだステータスへ移動して CI ステータスを表示します。
+description: ワークスペースごとの単一のセルフホスト VCS 入口から Forgejo、Gitea、GitLab を接続します。1 つのワークスペースで複数の GitLab インスタンスとプロジェクトを管理し、MR の関連付け、現在の head の CI 表示、プロジェクト Webhook の管理を行えます。
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -11,12 +11,14 @@ import { Tab, Tabs } from "fumadocs-ui/components/tabs";
 **セルフホスト版 Multica 専用です。** この連携は Multica を自分でデプロイしている場合のみ利用でき、Multica Cloud では提供されません。セルフホストするのは、通常は Multica から社内ネットワークの Git インスタンスにアクセスするためです。サーバー側で `MULTICA_VCS_INTEGRATION_ENABLED=true` を有効にし、`MULTICA_VCS_SECRET_KEY` を設定する必要があります。設定するまで、**設定 → コード** にこの行は表示されません。
 </Callout>
 
-Multica はワークスペースごとにセルフホストの Git ホスティング、Forgejo、Gitea、GitLab のいずれかへ接続します。接続後、ブランチ名かタイトルにタスク番号（例: `MUL-123`）を含む Pull Request（GitLab では Merge Request）、または本文で終了キーワードの直後にタスク番号を置いた PR は、対応する[タスク](/issues)へ自動的に紐づけられ、タスクサイドバーの **Pull requests** に表示されます。タスクに紐づく PR がすべてマージされると、タスクはワークスペースが選んだステータス（既定は「完了」）へ移動します。head commit の CI はカード上のチェックバーとして表示されます。
+Multica は **設定 → コード → Code hosting** にあるワークスペース単位の **セルフホスト Git** 入口から Forgejo、Gitea、GitLab に接続します。1 つのワークスペースで複数の GitLab インスタンスを接続し、それぞれに複数のプロジェクトを追加できます。別のワークスペースが同じ GitLab インスタンスに接続しても、接続、トークン、プロジェクト一覧は個別です。
 
-これらの Git ホスティングは GitHub と並行して利用でき、1 つのワークスペースで複数を接続できます。
+ブランチ名またはタイトルにタスク番号（例: `MUL-123`）を含む Pull Request（GitLab では Merge Request）、または本文で終了キーワードの直後にその番号を置いた PR は、対応する[タスク](/issues)へ自動的に紐づき、タスクサイドバーの **Pull requests** に表示されます。関連する PR がすべてマージされると、タスクはワークスペースが選んだステータス（既定は「完了」）へ移動します。カードには現在の head の CI 状態が表示されます。
+
+ワークスペースのオーナーと管理者が接続とプロジェクトを管理します。メンバーが読めるのは、ワークスペースで許可された GitLab プロジェクトと MR だけです。認証情報とプロジェクトアクセス権がワークスペース間で共有されることはありません。
 
 <Callout type="info">
-GitHub と異なり、これらの Git ホスティングには App モデルがありません。各ワークスペースが独自のインスタンス URL とアクセストークンを保存し、リポジトリまたは組織へ Webhook を登録します。トークンと Webhook secret はどちらも暗号化して保存されます。
+GitLab には App モデルがありません。各ワークスペースが独自のインスタンス URL とアクセストークンを保存し、その接続の下に GitLab プロジェクトを追加します。トークンと Webhook secret は暗号化して保存されます。
 </Callout>
 
 ## 前提条件（サーバー）
@@ -47,24 +49,24 @@ MULTICA_VCS_SECRET_KEY=<base64 32 バイト鍵>
 
 <Steps>
 <Step>
-Git ホスティング側で、リポジトリの読み取り権限を持つアクセストークンを作成します。
+Git ホスティング側で、対象リポジトリを読み取れるアクセストークンを作成します。
 
-- **Forgejo / Gitea**: 設定 → アプリケーション。
-- **GitLab**: `read_api` 権限を持つ個人（またはグループ/プロジェクト）アクセストークン。
+- **Forgejo / Gitea**: 設定 → アプリケーションでアプリトークンを作成します。
+- **GitLab**: `read_api` スコープの個人、グループ、またはプロジェクトアクセストークンでプロジェクトと MR を読み取れます。Multica にプロジェクト Webhook を作成・更新させるには、`api` スコープと、そのプロジェクトの Webhook を管理できる GitLab ロール（通常は Maintainer または Owner）が必要です。`read_api` だけのトークンでは Hook を管理できません。
 </Step>
 <Step>
-Multica で **設定 → コード**を開き、**セルフホスト Git** の行で **接続** をクリックします。
+Multica で **設定 → コード → Code hosting** を開き、**セルフホスト Git** から接続します。GitLab 接続はこのワークスペースに属します。同じインスタンスを使う場合も、別のワークスペースでは個別に接続を作成してください。
 </Step>
 <Step>
-**プロバイダー**を選択し、インスタンス URL（例: `https://forgejo.example.com`）とアクセストークンを入力して **接続**をクリックします。Multica は保存前に、そのトークンでインスタンスへアクセスして検証します。
+プロバイダーを選び、インスタンスのベース URL（サブパスがあれば含める）とアクセストークンを入力します。Multica は保存前にトークンを検証します。GitLab では、完全な group/subgroup/project パスまたはプロジェクト URL を使って接続にプロジェクトを追加します。
 </Step>
 <Step>
-接続後に表示される **Webhook URL** と **Webhook secret** をコピーします。
+GitLab プロジェクトを追加すると、Multica はプロジェクト Webhook の作成を試みます。各プロジェクトの Hook 状態とエラー理由を確認してください。Multica が管理できない場合は、権限を持つ GitLab 管理者が表示された URL と secret を使って手動で設定します。Forgejo/Gitea では、以下の手順に従って Multica が表示する Webhook URL と secret を登録します。
 </Step>
 </Steps>
 
 <Callout type="warn">
-Webhook secret は一度しか表示されません。ページを離れる前にコピーしてください。同じインスタンスへ再接続すると、トークンと secret がローテーションされます。
+アクセストークンと Webhook secret は認証情報として扱ってください。Multica が Webhook secret を表示したら保存してください。通常の API レスポンスやログには含まれません。
 </Callout>
 
 ### プライベート CA を使うインスタンス
@@ -90,31 +92,101 @@ Webhook secret は一度しか表示されません。ページを離れる前�
 </Tab>
 <Tab value="GitLab" id="gitlab">
 
+Multica から GitLab プロジェクトを追加すると、**Merge request events**、**Pipeline events**、**Job events**、**Comments**（GitLab の Note イベント）を含むプロジェクト Webhook の作成を試みます。作成や更新に失敗した場合、プロジェクトに Hook の状態と理由が表示されます。表示された URL と secret を使って手動で登録できます。
+
 設定 → Webhooks:
 
-- **URL**: Webhook URL。
-- **Secret token**: Webhook secret（`X-Gitlab-Token` として送信され、文字列をそのまま比較）。
-- **トリガー**: **Merge request events** を有効にし、CI をミラーするには **Pipeline events** も有効化。
+- **URL**: GitLab 接続に対応する Webhook URL。
+- **Secret token**: 対応する Webhook secret。
+- **トリガー**: **Merge request events**、**Pipeline events**、**Job events**、**Comments** を有効にします。
+
+`read_api` は読み取り専用で、プロジェクト Webhook を作成・変更できません。自動管理には `api` スコープと、そのプロジェクトの Hook を管理できる GitLab ロール（Administrator、Maintainer、Owner）が必要です。グループ Hook の管理には GitLab 管理者またはグループ Owner、System Hook の管理には GitLab インスタンス管理者が必要です。権限がない場合は、該当する管理者が手動で設定し、検証してください。
 
 </Tab>
 </Tabs>
 
-GitLab 管理者はインスタンス全体の [System Hook](https://docs.gitlab.com/administration/system_hooks/) も設定できます。同じ URL とシークレットを使い、**Merge request events** を有効にします。Multica が処理するのは、このワークスペースの**設定 → コード → リポジトリ**に登録され、接続先の GitLab インスタンスに属し、接続用トークンで読み取れるリポジトリの MR イベントだけです。それ以外のシステムイベントは無視されます。リポジトリには HTTPS または SSH のクローン URL を使えます。プロジェクトごとのフック登録は不要になりますが、GitLab 管理者による設定が必要です。System Hook は Pipeline イベントを送らないため、CI 状態が必要ならプロジェクトまたはグループの Pipeline Webhook を残してください。両方を併用できます。応答 `202` は受信の確認であり、タスクの関連付けや状態変更を保証しません。接続前にマージされた MR がさかのぼって処理されることもありません。
-
-Multica は保存済みの secret で各 delivery を検証するため、一致する secret がない Webhook は拒否されます。
+GitLab 管理者はインスタンス全体の [System Hook](https://docs.gitlab.com/administration/system_hooks/) を設定し、merge request イベントを有効にできます。System Hook だけで Pipeline、Job、Note イベントをカバーできるとは限りません。実際の配信を確認し、不足する必須イベントは project/group Hook で補ってください。Multica が処理するのは、このワークスペースの GitLab プロジェクト接続に明示され、接続先インスタンスに属し、接続トークンで読み取れるプロジェクトのイベントだけです。System Hook によって他のプロジェクトやワークスペースへのアクセスが広がることはありません。適用可能な Hook の組み合わせで各プロジェクトに必要なイベント全体がカバーされていることを確認し、すべての Hook 種別が四種類すべてを配信すると想定しないでください。すべての delivery は保存済み secret で認証されます。
 
 ## ミラーされる内容
 
-- **Pull / Merge Request** — open、closed、merged、draft の状態、作成者、ブランチ、および Git ホスティングが提供する場合は diff 統計。
-- **タスクの紐づけ** — タイトルまたはブランチの番号、および本文で終了キーワードの直後に置いた番号で PR をタスクへ紐づけます。本文中の通常の参照では紐づきません。タスクに紐づく PR（GitHub とセルフホストの両方）がすべてマージされると、[GitHub](/github-integration) と同じ設定とルールに従って、ワークスペースが選んだステータスへタスクを移動します。プロバイダーを接続すると、このページにも同じ **PR マージ後のタスクのステータス** 設定が表示されます。
-- **CI** — Forgejo/Gitea の commit status と GitLab pipeline を、head commit の成功/失敗/進行中チェックバーへ集約します。
+- **Pull / Merge Request** — 状態、作成者、ブランチ、diff 統計、承認と承認ルール、ディスカッション、未解決コメント。
+- **タスクの紐づけ** — タイトルまたはブランチのタスク番号で PR を紐づけます。本文中の番号は終了キーワードの直後にある場合だけ紐づき、通常の言及では紐づきません。GitHub とセルフホストの両方で関連 PR がすべてマージされると、[GitHub](/github-integration) と同じ設定・ルールでタスクがワークスペース指定のステータスへ移動します。
+- **CI** — GitLab MR の現在の head に対応する Pipeline と Job の状態を、Forgejo/Gitea の commit status と併せて表示します。不明、古い head、実行中の Pipeline を完了として表示しません。
+- **GitLab の詳細** — Pipeline と Job、範囲を限定した失敗ログの要約、既存のアクセスチェックを通した artifact へのリンクを表示します。完全なログや artifact の内容をデータベースへ複製しません。
+- **Wakeup** — 関連する GitLab MR のマージ、現在の head の CI 完了、またはコンフリクトの検出でタスクを起こせます。チャットでは指定した MR のマージ、クローズ、現在の head の CI 完了を待てます。詳しくは[タスクのウェイクアップ](/issue-wakeups)を参照してください。
+
+タスクの **Refresh** から MR を更新するか、GitLab プロジェクトを更新してそのプロジェクトですでにミラーされている MR を同期します。プロジェクト更新で過去の全 MR が見つかることは保証されません。MR のマージには接続トークンの GitLab 権限が使われ、失敗は明示されます。
 
 ## エージェントによる Pull Request の作成
 
 PR の作成には Multica 側の Git ホスティング設定は不要です。エージェントはランタイムでリポジトリを checkout し、ランタイムホスト自身の Git 認証情報を使ってブランチを push し、PR を作成します。エージェントを特定の Git ホスティングで動かすには、SSH deploy key やホストの Git credential helper に保存したトークンなどを使って、デーモンホストがその Git ホスティングへ認証できるようにし、通常どおりリポジトリ URL を追加してください。任意の Git URL を checkout できるため、プロバイダー固有の設定は必要ありません。
 
-## GitLab プロジェクト接続
+## GitLab 接続とプロジェクト
 
-**設定 → コード** の GitLab セクションでは、ワークスペースのオーナーと管理者が複数の GitLab インスタンスを接続し、それぞれにプロジェクトを追加できます。インスタンス URL と対象プロジェクトにアクセスできるトークンを入力します。サーバーは `MULTICA_VCS_SECRET_KEY` でトークンを暗号化します。
+**設定 → コード → Code hosting → セルフホスト Git** で、ワークスペースのオーナーと管理者は複数の GitLab インスタンスを接続し、それぞれに複数のプロジェクトを追加できます。インスタンスのベース URL はサブパスを含めて完全な形で指定し、プロジェクトパスにはすべての subgroup を含めます。同じインスタンスを別のワークスペースに接続しても、トークンとプロジェクト一覧は個別です。
+任意の `GITLAB_PROXY_URL` を設定すると、GitLab のトークン検証、プロジェクトと Webhook の管理、MR 詳細、wakeup 状態取得を送信プロキシ経由にできます。未設定の場合は直接接続し、他のプロバイダーには影響しません。
 
-Webhook secret はインスタンスの接続時に一度だけ表示されます。プロジェクトの Webhook を手動で設定する場合に備えて保存してください。サーバーの GitLab 設定で登録済みのプロジェクトも引き続き利用できます。
+プロジェクト追加時に Multica はトークンで読み取りを検証し、MR、Pipeline、Job、Note Hook の登録を試みます。Hook の状態と失敗理由は表示されます。`read_api` トークンは GitLab データを読めますが、Hook を作成・変更できません。`api` スコープとプロジェクト Hook を管理できるロールを使うか、GitLab 管理者にプロジェクト、グループ、または System Hook を設定してもらってください。System Hook のイベントにもワークスペースのプロジェクト許可リストとトークンの読み取り確認が適用されます。
+
+プロジェクトを削除すると、そのバインディングは使われなくなります。プロジェクト更新はローカルにミラー済みの MR を更新しますが、すべての過去の MR を見つける保証はありません。
+
+## 既存 GitLab 連携のアップグレード
+
+GitLab の切り替えは通常のデータベース移行ではなく、メンテナンス手順として実施してください。アップグレード前にデータベースと現在のアプリケーションバージョンをバックアップし、`MULTICA_VCS_SECRET_KEY` を保持し、接続、プロジェクト、管理対象 Hook と手動 Hook を一覧化します。関連する GitLab トークンで対象プロジェクトを読み取れることも確認してください。トークンや Webhook secret をログに出力しないでください。
+
+通常のスキーマ移行では統合 VCS テーブルと移行台帳テーブルだけを作成し、旧 GitLab テーブルやデータは削除・書き換えません。移行前に旧アプリケーションと wakeup worker を停止してください。`server/` ディレクトリで `DATABASE_URL` を設定し、旧 GitLab データがある場合は `preflight` の前に `MULTICA_VCS_INTEGRATION_ENABLED=true`、`MULTICA_VCS_SECRET_KEY`、絶対 HTTP(S) の公開 URL（`MULTICA_PUBLIC_URL` または `--public-url URL`）も設定します。次を実行します。
+
+```sh
+go run ./cmd/migrate up
+go run ./cmd/gitlab-vcs-migrate preflight
+```
+
+`preflight` は読み取り専用で、旧認証情報、プロジェクトのマッピング、競合、Hook の一覧を確認します。JSON には秘密情報を表示せず、`legacy_pipelines` を含む件数と指摘事項が出力されます。結果が `no_op: true` なら移行対象の旧 GitLab データがないため、旧認証情報、鍵、Hook の手順を含む切り替えを省略します。セルフホスト VCS を有効にする場合は通常の `MULTICA_VCS_SECRET_KEY` が引き続き必要です。それ以外はすべての指摘を解決してから進め、移行完了まで旧認証情報と復号鍵を保持してください。暗号化済みの旧認証情報が優先されます。対応する保存済み認証情報が暗号化されていない場合のみ、完全一致する旧インスタンス向けの任意フォールバックとして `GITLAB_BASE_URL`、`GITLAB_TOKEN`、`GITLAB_WEBHOOK_SECRET` を使用できます。すべての CLI コマンドに `DATABASE_URL` が必要です。`--public-url URL` は `MULTICA_PUBLIC_URL` の上書きとして指定できます。
+スキーマ移行前に実行する場合、切り替え専用のテーブル、カラム、インデックスのマーカーがすべて存在しないときに限り、`preflight` は `state` を `not_initialized` として報告して続行します。一部のマーカーだけが存在する場合はフェイルクローズします。`status` には引き続き移行状態テーブルと delivery テーブルが必要です。
+
+事前確認に問題がなければ、メンテナンスを開始して旧データを単一トランザクションで取り込みます。
+
+```sh
+go run ./cmd/gitlab-vcs-migrate begin
+go run ./cmd/gitlab-vcs-migrate migrate
+```
+
+`migrate` は事前確認を再実行し、旧テーブルを削除せずに VCS データを単一トランザクションで取り込みます。既存の MR 関連付け、タスク／チャットウェイクアップの対象、CI 基準は同じ MR に紐づいたまま保持され、過去の Pipeline 結果を新しい CI イベントとして扱いません。新しいアプリケーションをメンテナンス状態でデプロイして起動した後、管理対象 Hook を切り替えます。
+
+```sh
+go run ./cmd/gitlab-vcs-migrate switch-hooks
+```
+
+CLI は `MULTICA_PUBLIC_URL` を使ってワークスペース専用 Hook URL を生成します。`--public-url URL` で上書きもできます。手動の project/group/System Hook がない、または更新権限がない場合、この手順は失敗し、サービスをメンテナンス状態に保つ必要があります。GitLab 管理者がツールに表示された正確なワークスペース専用 URL で手動 Hook を設定し、制御された検証イベントを送信した後、切り替えを再実行してください。`read_api` だけでは管理対象 Hook を更新できません。設定済み Hook 全体で各プロジェクトのイベントカバレッジを確認し、System Hook が Pipeline、Job、Note を配信する、または単一の Hook 種別が四種類すべてを配信すると想定しないでください。
+
+単一の GitLab インスタンスについて明示的に承認された一回限りの例外には、`MULTICA_GITLAB_SYSTEM_HOOKS_ATTESTED=https://gitlab.example.com` を指定します（CLI: `--attest-no-legacy-system-hooks-for=https://gitlab.example.com`）。パス、認証情報、query、fragment を含まない完全な HTTPS origin のみを指定し、ポートも含めて完全一致で照合します。そのインスタンスの `GET /hooks` が `403` を返す場合に限り System Hook の棚卸しを省略でき、確認は監査記録と復旧状態に保存され、再試行で再利用されます。`403` は権限エラーであり、System Hook 非対応の証明ではありません。権限を修復するものではなく、他の origin やエラーには適用されません。project/group Hook の棚卸し、実際の配信確認、復旧可能な Hook の保持、ワークスペース分離、メンテナンスゲートは省略できません。一時入力であり、`.env` に永続保存しないでください。
+
+メンテナンス中、署名と認可の検証を通過した GitLab Webhook は受領記録として永続化され、その後 GitLab に再試行させるため意図的に HTTP 503 を返します。記録があっても配信の確認とはなりません。メンテナンス開始時の UTC カットオフを記録し、replay と検証の両方で同じ値を使ってください。`--since` はこの二つのコマンドのみ必須で、有効な RFC3339 UTC 時刻かつ末尾が `Z` でなければなりません。
+
+```sh
+CUTOVER_SINCE="2026-06-12T09:00:00Z" # この切り替えで記録した UTC カットオフに置き換えます。
+go run ./cmd/gitlab-vcs-migrate replay --since "$CUTOVER_SINCE"
+go run ./cmd/gitlab-vcs-migrate verify-hooks --since "$CUTOVER_SINCE"
+```
+
+`replay` は保存済みのメンテナンス中の受領記録を GitLab の権威状態同期経路で処理します。GitLab へイベントを再送するものではなく、保存されなかった配信も復元できません。`verify-hooks` は Hook URL、カットオフ以降に有効化されたイベントの実際の照合済み配信、各プロジェクトの MR、Pipeline、Job、Note の全体カバレッジを検証します。失敗または不足があれば、メンテナンスを維持し、Hook や配信の問題を解決してから同じリリース版とカットオフで再実行してください。検査が保留中の間は最終化しないでください。
+
+検証が成功してから最終化し、移行状態を確認します。
+
+```sh
+go run ./cmd/gitlab-vcs-migrate finalize
+go run ./cmd/gitlab-vcs-migrate status
+```
+
+`status` が `phase: "complete"` かつ `maintenance_mode: false` を返した後にのみ通常の書き込みを再開できます。最終化は移行ロック内ですべての設定済み Hook が検証済みで、すべての受領記録が照合済みであることを確認してから、旧テーブルとロールバック用スナップショットを削除し、受領 payload を消去します。最終化後は `restore` で復元できません。
+
+最終化前に切り替えを中止する場合は、メンテナンス状態を保ち、すべての writer を停止した上でのみ復元してください。
+
+```sh
+go run ./cmd/gitlab-vcs-migrate restore
+go run ./cmd/gitlab-vcs-migrate status
+```
+
+`restore` は各 Hook の記録済みの元の設定と secret を先に戻し、その後、移行前に記録したデータベーススナップショットを復元します。成功後の `status` は `phase: "restored"` を返しますが、`maintenance_mode` は `true` のままです。アプリケーションバイナリやデータベース全体のバックアップは復元しません。リリースの復旧手順では旧アプリケーションの成果物を別途戻します。Hook またはデータベースの復元に失敗すると状態は `restore_blocked` となり、メンテナンスが継続します。その状態または復元結果を確認できない場合はサービスを停止したままにし、旧アプリケーションや writer を起動しないでください。新しい書き込みを全体バックアップで上書きしてはいけません。
+
+最終化後または旧サービスへの復元後は、メンテナンス中に HTTP 503 となったすべての GitLab 配信履歴を確認してください。移行ツールが保持する `recovery_delivery_ids` は保存済み受領記録の特定に役立ちますが、配信履歴全体ではありません。失敗した配信を再送し、回復不能なものは明示的に確認した上で、現在の権威 MR/Pipeline 状態を同期します。データベースのスナップショットや `replay` では、保存されていない、または GitLab から再送できないイベントを復元できません。未確認のイベントは報告し、状態を推測して wakeup を起こさないでください。

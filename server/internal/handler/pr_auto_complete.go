@@ -77,6 +77,10 @@ type prAutoCompleteDecision struct {
 	// PRs the state is about: still open for waiting, closed-unmerged for
 	// not_merged, every linked PR for all_merged.
 	PRs []db.ListIssueLinkedPullRequestStatesRow
+	// CompletionSource is false if the issue has a legacy-provenanced GitLab
+	// link under legacy_link_policy; it must satisfy close-intent semantics
+	// before another provider can complete the issue.
+	CompletionSource bool
 	// IssueDisabled is reported independently of State so the issue menu can
 	// show the right toggle label even when another state wins.
 	IssueDisabled bool
@@ -182,7 +186,14 @@ func (h *Handler) decidePRAutoComplete(ctx context.Context, ws db.Workspace, iss
 	if resolver == nil {
 		resolver = issuestatus.NewResolver(issue.WorkspaceID)
 	}
-	d := prAutoCompleteDecision{IssueDisabled: disabled, Target: h.resolvePRMergeTarget(ctx, ws, resolver)}
+	completionSource := false
+	for _, pr := range prs {
+		completionSource = completionSource || pr.CompletionSource
+	}
+	d := prAutoCompleteDecision{
+		IssueDisabled: disabled, Target: h.resolvePRMergeTarget(ctx, ws, resolver),
+		CompletionSource: completionSource,
+	}
 	if len(prs) == 0 {
 		d.State = prAutoCompleteNone
 		return d, nil
@@ -242,6 +253,66 @@ func (h *Handler) decidePRAutoComplete(ctx context.Context, ws db.Workspace, iss
 	return d, nil
 }
 
+// maybeCompleteLegacyGitLabIssue preserves migrated GitLab close-intent
+// semantics independently from the workspace-configurable native VCS rule.
+// A true return means the legacy rule qualified or failed closed, so callers
+// must not fall through to a different completion policy.
+func (h *Handler) maybeCompleteLegacyGitLabIssue(ctx context.Context, issue db.Issue, workspaceID string) bool {
+	counts, err := h.Queries.GetGitLabVCSIssueCloseAggregate(ctx, db.GetGitLabVCSIssueCloseAggregateParams{
+		WorkspaceID: issue.WorkspaceID,
+		IssueID:     issue.ID,
+	})
+	if err != nil {
+		slog.Warn("gitlab close-intent: aggregate failed", "err", err, "issue_id", uuidToString(issue.ID))
+		return true
+	}
+	if counts.UnmergedCount > 0 || counts.MergedWithCloseIntentCount == 0 {
+		return false
+	}
+
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		slog.Warn("gitlab close-intent: begin failed", "err", err, "issue_id", uuidToString(issue.ID))
+		return true
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+	updated, err := qtx.CompleteIssueFromGitLabCloseIntent(ctx, db.CompleteIssueFromGitLabCloseIntentParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true
+	}
+	var cancelledWakeups []db.AgentTaskQueue
+	if err == nil {
+		cancelledWakeups, err = service.StopClosedIssueWakeups(ctx, qtx, updated)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
+		slog.Warn("gitlab close-intent: status write failed", "err", err, "issue_id", uuidToString(issue.ID))
+		return true
+	}
+	h.broadcastCancelledWakeups(ctx, updated.WorkspaceID, cancelledWakeups)
+	if updated.ParentIssueID.Valid {
+		h.processChildEvents(ctx, updated.ParentIssueID)
+	}
+	prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
+	resp := issueToResponse(updated, prefix)
+	h.fillStatusCategory(ctx, updated.WorkspaceID, projectaccess.Hidden{}, &resp)
+	h.publish(protocol.EventIssueUpdated, workspaceID, "system", "", map[string]any{
+		"issue":          resp,
+		"status_changed": true,
+		"prev_status":    issue.Status,
+		"creator_type":   issue.CreatorType,
+		"creator_id":     uuidToString(issue.CreatorID),
+		"source":         "gitlab_mr_merged",
+	})
+	return true
+}
+
 // maybeAutoCompleteIssue runs the decision for one issue after a PR event and
 // moves it to the workspace's target status when every linked PR is merged.
 // Safe to call for any issue: every guard lives in decidePRAutoComplete, and
@@ -256,6 +327,9 @@ func (h *Handler) maybeAutoCompleteIssue(ctx context.Context, workspaceID, issue
 		}
 		return
 	}
+	if h.maybeCompleteLegacyGitLabIssue(ctx, issue, uuidToString(workspaceID)) {
+		return
+	}
 	ws, err := h.Queries.GetWorkspace(ctx, workspaceID)
 	if err != nil {
 		slog.Warn("pr auto-complete: load workspace failed", "err", err, "workspace_id", uuidToString(workspaceID))
@@ -266,10 +340,9 @@ func (h *Handler) maybeAutoCompleteIssue(ctx context.Context, workspaceID, issue
 		slog.Warn("pr auto-complete: decision failed", "err", err, "issue_id", uuidToString(issueID))
 		return
 	}
-	if d.State != prAutoCompleteAllMerged {
+	if d.State != prAutoCompleteAllMerged || !d.CompletionSource {
 		return
 	}
-
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
 		slog.Warn("pr auto-complete: begin failed", "err", err)
@@ -570,11 +643,15 @@ func (h *Handler) UnlinkIssuePullRequest(w http.ResponseWriter, r *http.Request)
 	}
 	defer tx.Rollback(r.Context())
 	qtx := h.Queries.WithTx(tx)
-	var rows int64
+	var changed bool
 	if pr.github {
-		rows, err = qtx.UnlinkIssueFromPullRequest(r.Context(), db.UnlinkIssueFromPullRequestParams{IssueID: issue.ID, PullRequestID: pr.ID})
+		rows, unlinkErr := qtx.UnlinkIssueFromPullRequest(r.Context(), db.UnlinkIssueFromPullRequestParams{IssueID: issue.ID, PullRequestID: pr.ID})
+		err = unlinkErr
+		changed = rows > 0
 	} else {
-		rows, err = qtx.UnlinkIssueFromVCSPullRequest(r.Context(), db.UnlinkIssueFromVCSPullRequestParams{IssueID: issue.ID, PullRequestID: pr.ID})
+		rows, unlinkErr := qtx.UnlinkIssueFromVCSPullRequest(r.Context(), db.UnlinkIssueFromVCSPullRequestParams{IssueID: issue.ID, PullRequestID: pr.ID})
+		err = unlinkErr
+		changed = rows > 0
 	}
 	if err == nil {
 		err = qtx.ExcludePullRequestFromIssue(r.Context(), db.ExcludePullRequestFromIssueParams{
@@ -593,7 +670,7 @@ func (h *Handler) UnlinkIssuePullRequest(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to unlink pull request")
 		return
 	}
-	if rows > 0 {
+	if changed {
 		// Removing the last unmerged PR can leave only merged ones behind.
 		h.maybeAutoCompleteIssue(r.Context(), issue.WorkspaceID, issue.ID, nil)
 	}

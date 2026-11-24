@@ -35,6 +35,106 @@ func (q *Queries) BeginGitLabVCSPullRequestWakeupSync(ctx context.Context, arg B
 	return wakeup_sync_generation, err
 }
 
+const completeIssueFromGitLabCloseIntent = `-- name: CompleteIssueFromGitLabCloseIntent :one
+UPDATE issue AS i SET
+    status = 'done',
+    duplicate_of_issue_id = NULL,
+    position = (
+        SELECT COALESCE(MIN(target.position), 0) - 1
+        FROM issue AS target
+        WHERE target.workspace_id = i.workspace_id AND target.status = 'done'
+    ),
+    revision = i.revision + 1,
+    last_activity_at = GREATEST(COALESCE(i.last_activity_at, i.updated_at), now()),
+    updated_at = now()
+WHERE i.id = $1
+  AND i.workspace_id = $2
+  AND i.status <> 'done'
+  AND EXISTS (
+      SELECT 1
+      FROM issue_vcs_pull_request ivpr
+      JOIN vcs_pull_request pr ON pr.id = ivpr.pull_request_id
+      WHERE ivpr.issue_id = i.id
+        AND pr.workspace_id = i.workspace_id
+        AND pr.provider = 'gitlab'
+        AND ivpr.gitlab_linked_at IS NOT NULL
+        AND ivpr.gitlab_close_intent
+        AND pr.state = 'merged'
+        AND EXISTS (
+            SELECT 1
+            FROM vcs_gitlab_project gp
+            WHERE gp.workspace_id = i.workspace_id
+              AND gp.connection_id = pr.connection_id
+              AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+              AND gp.legacy_link_policy
+        )
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM issue_pull_request ipr
+      JOIN github_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+      WHERE ipr.issue_id = i.id
+        AND pr.state <> 'merged'
+      UNION ALL
+      SELECT 1
+      FROM issue_vcs_pull_request ivpr
+      JOIN vcs_pull_request pr ON pr.id = ivpr.pull_request_id AND pr.workspace_id = i.workspace_id
+      LEFT JOIN vcs_gitlab_project gp
+        ON gp.workspace_id = pr.workspace_id
+       AND gp.connection_id = pr.connection_id
+       AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+      WHERE ivpr.issue_id = i.id
+        AND (ivpr.vcs_linked OR (pr.provider = 'gitlab' AND gp.legacy_link_policy AND ivpr.gitlab_linked_at IS NOT NULL))
+        AND pr.state <> 'merged'
+  )
+RETURNING i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata, i.stage, i.properties, i.revision, i.last_activity_at, i.triage_state, i.duplicate_of_issue_id, i.requester_user_id, i.description_revision
+`
+
+type CompleteIssueFromGitLabCloseIntentParams struct {
+	IssueID     pgtype.UUID `json:"issue_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) CompleteIssueFromGitLabCloseIntent(ctx context.Context, arg CompleteIssueFromGitLabCloseIntentParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, completeIssueFromGitLabCloseIntent, arg.IssueID, arg.WorkspaceID)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+		&i.Revision,
+		&i.LastActivityAt,
+		&i.TriageState,
+		&i.DuplicateOfIssueID,
+		&i.RequesterUserID,
+		&i.DescriptionRevision,
+	)
+	return i, err
+}
+
 const deleteVCSConnection = `-- name: DeleteVCSConnection :exec
 WITH target AS (
     SELECT vcs_connection.id FROM vcs_connection WHERE vcs_connection.id = $1 AND vcs_connection.workspace_id = $2
@@ -142,6 +242,52 @@ func (q *Queries) FindVCSPullRequestByURL(ctx context.Context, arg FindVCSPullRe
 	return i, err
 }
 
+const getGitLabVCSIssueCloseAggregate = `-- name: GetGitLabVCSIssueCloseAggregate :one
+WITH linked_prs AS (
+    SELECT pr.state, FALSE AS legacy_gitlab, FALSE AS close_intent
+    FROM issue_pull_request ipr
+    JOIN issue i ON i.id = ipr.issue_id
+    JOIN github_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+    WHERE i.workspace_id = $1
+      AND i.id = $2
+    UNION ALL
+    SELECT pr.state,
+           (pr.provider = 'gitlab' AND ivpr.gitlab_linked_at IS NOT NULL AND COALESCE(gp.legacy_link_policy, FALSE)),
+           COALESCE(ivpr.gitlab_close_intent, FALSE)
+    FROM issue_vcs_pull_request ivpr
+    JOIN issue i ON i.id = ivpr.issue_id
+    JOIN vcs_pull_request pr ON pr.id = ivpr.pull_request_id AND pr.workspace_id = i.workspace_id
+    LEFT JOIN vcs_gitlab_project gp
+      ON gp.workspace_id = pr.workspace_id
+     AND gp.connection_id = pr.connection_id
+     AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+    WHERE i.workspace_id = $1
+      AND i.id = $2
+      AND (ivpr.vcs_linked OR (pr.provider = 'gitlab' AND gp.legacy_link_policy AND ivpr.gitlab_linked_at IS NOT NULL))
+)
+SELECT
+    COUNT(*) FILTER (WHERE state <> 'merged')::bigint AS unmerged_count,
+    COUNT(*) FILTER (WHERE legacy_gitlab AND state = 'merged' AND close_intent)::bigint AS merged_with_close_intent_count
+FROM linked_prs
+`
+
+type GetGitLabVCSIssueCloseAggregateParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	IssueID     pgtype.UUID `json:"issue_id"`
+}
+
+type GetGitLabVCSIssueCloseAggregateRow struct {
+	UnmergedCount              int64 `json:"unmerged_count"`
+	MergedWithCloseIntentCount int64 `json:"merged_with_close_intent_count"`
+}
+
+func (q *Queries) GetGitLabVCSIssueCloseAggregate(ctx context.Context, arg GetGitLabVCSIssueCloseAggregateParams) (GetGitLabVCSIssueCloseAggregateRow, error) {
+	row := q.db.QueryRow(ctx, getGitLabVCSIssueCloseAggregate, arg.WorkspaceID, arg.IssueID)
+	var i GetGitLabVCSIssueCloseAggregateRow
+	err := row.Scan(&i.UnmergedCount, &i.MergedWithCloseIntentCount)
+	return i, err
+}
+
 const getVCSConnectionByID = `-- name: GetVCSConnectionByID :one
 SELECT id, workspace_id, provider, instance_url, account_login, access_token_encrypted, webhook_secret_encrypted, connected_by_id, created_at, updated_at FROM vcs_connection
 WHERE id = $1
@@ -159,6 +305,47 @@ func (q *Queries) GetVCSConnectionByID(ctx context.Context, id pgtype.UUID) (Vcs
 		&i.AccessTokenEncrypted,
 		&i.WebhookSecretEncrypted,
 		&i.ConnectedByID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getVCSGitLabPipelineByMRIdentity = `-- name: GetVCSGitLabPipelineByMRIdentity :one
+SELECT workspace_id, connection_id, pull_request_id, pipeline_id, pipeline_project_id, pipeline_project_path, sha, ref, status, web_url, pipeline_updated_at, created_at, updated_at FROM vcs_gitlab_pipeline
+WHERE workspace_id = $1
+  AND pull_request_id = $2
+  AND pipeline_project_path = $3
+  AND pipeline_id = $4
+`
+
+type GetVCSGitLabPipelineByMRIdentityParams struct {
+	WorkspaceID         pgtype.UUID `json:"workspace_id"`
+	PullRequestID       pgtype.UUID `json:"pull_request_id"`
+	PipelineProjectPath string      `json:"pipeline_project_path"`
+	PipelineID          int64       `json:"pipeline_id"`
+}
+
+func (q *Queries) GetVCSGitLabPipelineByMRIdentity(ctx context.Context, arg GetVCSGitLabPipelineByMRIdentityParams) (VcsGitlabPipeline, error) {
+	row := q.db.QueryRow(ctx, getVCSGitLabPipelineByMRIdentity,
+		arg.WorkspaceID,
+		arg.PullRequestID,
+		arg.PipelineProjectPath,
+		arg.PipelineID,
+	)
+	var i VcsGitlabPipeline
+	err := row.Scan(
+		&i.WorkspaceID,
+		&i.ConnectionID,
+		&i.PullRequestID,
+		&i.PipelineID,
+		&i.PipelineProjectID,
+		&i.PipelineProjectPath,
+		&i.Sha,
+		&i.Ref,
+		&i.Status,
+		&i.WebUrl,
+		&i.PipelineUpdatedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -338,27 +525,173 @@ func (q *Queries) GetVCSPullRequestInWorkspace(ctx context.Context, arg GetVCSPu
 	return i, err
 }
 
+const isGitLabMRNoteEventDuplicate = `-- name: IsGitLabMRNoteEventDuplicate :one
+SELECT EXISTS (
+    SELECT 1
+    FROM gitlab_mr_note note
+    JOIN vcs_pull_request pr ON pr.id = note.vcs_pull_request_id
+    WHERE pr.id = $1
+      AND pr.workspace_id = $2
+      AND pr.provider = 'gitlab'
+      AND note.gitlab_note_id = $3
+      AND note.body = $4
+      AND note.note_updated_at IS NOT DISTINCT FROM $5
+)::boolean AS duplicate
+`
+
+type IsGitLabMRNoteEventDuplicateParams struct {
+	PullRequestID pgtype.UUID        `json:"pull_request_id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	NoteID        int64              `json:"note_id"`
+	NoteBody      string             `json:"note_body"`
+	NoteUpdatedAt pgtype.Timestamptz `json:"note_updated_at"`
+}
+
+func (q *Queries) IsGitLabMRNoteEventDuplicate(ctx context.Context, arg IsGitLabMRNoteEventDuplicateParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isGitLabMRNoteEventDuplicate,
+		arg.PullRequestID,
+		arg.WorkspaceID,
+		arg.NoteID,
+		arg.NoteBody,
+		arg.NoteUpdatedAt,
+	)
+	var duplicate bool
+	err := row.Scan(&duplicate)
+	return duplicate, err
+}
+
+const isGitLabPipelineJobEventDuplicate = `-- name: IsGitLabPipelineJobEventDuplicate :one
+SELECT EXISTS (
+    SELECT 1
+    FROM gitlab_pipeline_job job
+    JOIN vcs_pull_request pr ON pr.id = job.vcs_pull_request_id
+    WHERE pr.id = $1
+      AND pr.workspace_id = $2
+      AND pr.provider = 'gitlab'
+      AND job.workspace_id = pr.workspace_id
+      AND job.job_id = $3
+      AND job.pipeline_id = $4
+      AND job.name = $5
+      AND job.stage IS NOT DISTINCT FROM $6
+      AND job.status = $7
+      AND job.ref IS NOT DISTINCT FROM $8
+      AND job.sha IS NOT DISTINCT FROM $9
+      AND job.started_at IS NOT DISTINCT FROM $10
+      AND job.finished_at IS NOT DISTINCT FROM $11
+      AND job.failure_reason IS NOT DISTINCT FROM $12
+      AND job.allow_failure = $13
+)::boolean AS duplicate
+`
+
+type IsGitLabPipelineJobEventDuplicateParams struct {
+	PullRequestID pgtype.UUID        `json:"pull_request_id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	JobID         int64              `json:"job_id"`
+	PipelineID    int64              `json:"pipeline_id"`
+	Name          string             `json:"name"`
+	Stage         pgtype.Text        `json:"stage"`
+	Status        string             `json:"status"`
+	Ref           pgtype.Text        `json:"ref"`
+	Sha           pgtype.Text        `json:"sha"`
+	StartedAt     pgtype.Timestamptz `json:"started_at"`
+	FinishedAt    pgtype.Timestamptz `json:"finished_at"`
+	FailureReason pgtype.Text        `json:"failure_reason"`
+	AllowFailure  bool               `json:"allow_failure"`
+}
+
+func (q *Queries) IsGitLabPipelineJobEventDuplicate(ctx context.Context, arg IsGitLabPipelineJobEventDuplicateParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isGitLabPipelineJobEventDuplicate,
+		arg.PullRequestID,
+		arg.WorkspaceID,
+		arg.JobID,
+		arg.PipelineID,
+		arg.Name,
+		arg.Stage,
+		arg.Status,
+		arg.Ref,
+		arg.Sha,
+		arg.StartedAt,
+		arg.FinishedAt,
+		arg.FailureReason,
+		arg.AllowFailure,
+	)
+	var duplicate bool
+	err := row.Scan(&duplicate)
+	return duplicate, err
+}
+
+const linkGitLabIssueToVCSPullRequest = `-- name: LinkGitLabIssueToVCSPullRequest :execrows
+INSERT INTO issue_vcs_pull_request (
+    issue_id, pull_request_id, linked_by_type, linked_by_id, vcs_linked,
+    gitlab_close_intent, gitlab_linked_by_type, gitlab_linked_by_id, gitlab_linked_at
+)
+SELECT i.id, pr.id, NULL, NULL, FALSE,
+    $1, 'system', NULL, now()
+FROM issue i
+JOIN vcs_pull_request pr ON pr.id = $2 AND pr.workspace_id = i.workspace_id AND pr.provider = 'gitlab'
+WHERE i.id = $3
+ON CONFLICT (issue_id, pull_request_id) DO UPDATE SET
+    gitlab_close_intent = CASE WHEN $4
+        THEN issue_vcs_pull_request.gitlab_close_intent ELSE EXCLUDED.gitlab_close_intent END,
+    gitlab_linked_by_type = COALESCE(issue_vcs_pull_request.gitlab_linked_by_type, EXCLUDED.gitlab_linked_by_type),
+    gitlab_linked_by_id = COALESCE(issue_vcs_pull_request.gitlab_linked_by_id, EXCLUDED.gitlab_linked_by_id),
+    gitlab_linked_at = COALESCE(issue_vcs_pull_request.gitlab_linked_at, EXCLUDED.gitlab_linked_at)
+WHERE (CASE WHEN $4
+        THEN issue_vcs_pull_request.gitlab_close_intent ELSE EXCLUDED.gitlab_close_intent END)
+        IS DISTINCT FROM issue_vcs_pull_request.gitlab_close_intent
+   OR issue_vcs_pull_request.gitlab_linked_at IS NULL
+`
+
+type LinkGitLabIssueToVCSPullRequestParams struct {
+	GitlabCloseIntent   bool        `json:"gitlab_close_intent"`
+	PullRequestID       pgtype.UUID `json:"pull_request_id"`
+	IssueID             pgtype.UUID `json:"issue_id"`
+	PreserveCloseIntent bool        `json:"preserve_close_intent"`
+}
+
+// Legacy-policy GitLab links carry close-intent provenance independently from
+// official VCS links; an existing official link remains independently linked.
+func (q *Queries) LinkGitLabIssueToVCSPullRequest(ctx context.Context, arg LinkGitLabIssueToVCSPullRequestParams) (int64, error) {
+	result, err := q.db.Exec(ctx, linkGitLabIssueToVCSPullRequest,
+		arg.GitlabCloseIntent,
+		arg.PullRequestID,
+		arg.IssueID,
+		arg.PreserveCloseIntent,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const linkIssueToVCSPullRequest = `-- name: LinkIssueToVCSPullRequest :execrows
 
 INSERT INTO issue_vcs_pull_request (
-    issue_id, pull_request_id, linked_by_type, linked_by_id
-) VALUES (
-    $1, $2, 'system', NULL
+    issue_id, pull_request_id, linked_by_type, linked_by_id, vcs_linked
 )
-ON CONFLICT (issue_id, pull_request_id) DO NOTHING
+SELECT i.id, pr.id, 'system', NULL, TRUE
+FROM issue i
+JOIN vcs_pull_request pr ON pr.id = $1 AND pr.workspace_id = i.workspace_id
+WHERE i.id = $2
+ON CONFLICT (issue_id, pull_request_id) DO UPDATE SET
+    linked_by_type = 'system',
+    linked_by_id = NULL,
+    vcs_linked = TRUE
+WHERE NOT issue_vcs_pull_request.vcs_linked
 `
 
 type LinkIssueToVCSPullRequestParams struct {
-	IssueID       pgtype.UUID `json:"issue_id"`
 	PullRequestID pgtype.UUID `json:"pull_request_id"`
+	IssueID       pgtype.UUID `json:"issue_id"`
 }
 
 // =====================
 // Issue ↔ VCS PR link
 // =====================
-// Mirrors LinkIssueToPullRequest: automatic link, 1 only when new.
+// Mirrors LinkIssueToPullRequest: automatic link, 1 only when new. The issue
+// and canonical PR must belong to the same workspace.
 func (q *Queries) LinkIssueToVCSPullRequest(ctx context.Context, arg LinkIssueToVCSPullRequestParams) (int64, error) {
-	result, err := q.db.Exec(ctx, linkIssueToVCSPullRequest, arg.IssueID, arg.PullRequestID)
+	result, err := q.db.Exec(ctx, linkIssueToVCSPullRequest, arg.PullRequestID, arg.IssueID)
 	if err != nil {
 		return 0, err
 	}
@@ -367,34 +700,72 @@ func (q *Queries) LinkIssueToVCSPullRequest(ctx context.Context, arg LinkIssueTo
 
 const linkIssueToVCSPullRequestManually = `-- name: LinkIssueToVCSPullRequestManually :execrows
 INSERT INTO issue_vcs_pull_request (
-    issue_id, pull_request_id, linked_by_type, linked_by_id
-) VALUES (
-    $1, $2, 'member', $3
+    issue_id, pull_request_id, linked_by_type, linked_by_id, vcs_linked
 )
+SELECT i.id, pr.id, 'member', $1, TRUE
+FROM issue i
+JOIN vcs_pull_request pr ON pr.id = $2 AND pr.workspace_id = i.workspace_id
+WHERE i.id = $3
 ON CONFLICT (issue_id, pull_request_id) DO UPDATE SET
     linked_by_type = 'member',
-    linked_by_id = EXCLUDED.linked_by_id
+    linked_by_id = EXCLUDED.linked_by_id,
+    vcs_linked = TRUE
 WHERE issue_vcs_pull_request.linked_by_type IS DISTINCT FROM 'member'
+   OR NOT issue_vcs_pull_request.vcs_linked
 `
 
 type LinkIssueToVCSPullRequestManuallyParams struct {
-	IssueID       pgtype.UUID `json:"issue_id"`
-	PullRequestID pgtype.UUID `json:"pull_request_id"`
 	LinkedByID    pgtype.UUID `json:"linked_by_id"`
+	PullRequestID pgtype.UUID `json:"pull_request_id"`
+	IssueID       pgtype.UUID `json:"issue_id"`
 }
 
 func (q *Queries) LinkIssueToVCSPullRequestManually(ctx context.Context, arg LinkIssueToVCSPullRequestManuallyParams) (int64, error) {
-	result, err := q.db.Exec(ctx, linkIssueToVCSPullRequestManually, arg.IssueID, arg.PullRequestID, arg.LinkedByID)
+	result, err := q.db.Exec(ctx, linkIssueToVCSPullRequestManually, arg.LinkedByID, arg.PullRequestID, arg.IssueID)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
 }
 
+const listAutoLinkedGitLabIssueIDsForVCSPullRequest = `-- name: ListAutoLinkedGitLabIssueIDsForVCSPullRequest :many
+SELECT ipr.issue_id
+FROM issue_vcs_pull_request ipr
+JOIN issue i ON i.id = ipr.issue_id
+JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+WHERE ipr.pull_request_id = $1
+  AND ipr.gitlab_linked_at IS NOT NULL
+  AND COALESCE(ipr.gitlab_linked_by_type, 'system') <> 'member'
+`
+
+func (q *Queries) ListAutoLinkedGitLabIssueIDsForVCSPullRequest(ctx context.Context, pullRequestID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listAutoLinkedGitLabIssueIDsForVCSPullRequest, pullRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var issue_id pgtype.UUID
+		if err := rows.Scan(&issue_id); err != nil {
+			return nil, err
+		}
+		items = append(items, issue_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAutoLinkedIssueIDsForVCSPullRequest = `-- name: ListAutoLinkedIssueIDsForVCSPullRequest :many
-SELECT issue_id FROM issue_vcs_pull_request
-WHERE pull_request_id = $1
-  AND COALESCE(linked_by_type, 'system') <> 'member'
+SELECT ipr.issue_id
+FROM issue_vcs_pull_request ipr
+JOIN issue i ON i.id = ipr.issue_id
+JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+WHERE ipr.pull_request_id = $1
+  AND ipr.vcs_linked
+  AND COALESCE(ipr.linked_by_type, 'system') <> 'member'
 `
 
 func (q *Queries) ListAutoLinkedIssueIDsForVCSPullRequest(ctx context.Context, pullRequestID pgtype.UUID) ([]pgtype.UUID, error) {
@@ -421,6 +792,7 @@ const listIssueIDsForVCSPRHead = `-- name: ListIssueIDsForVCSPRHead :many
 SELECT DISTINCT ipr.issue_id
 FROM vcs_pull_request pr
 JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
 WHERE pr.connection_id = $1 AND pr.head_sha = $2 AND pr.head_sha <> ''
 `
 
@@ -452,8 +824,11 @@ func (q *Queries) ListIssueIDsForVCSPRHead(ctx context.Context, arg ListIssueIDs
 }
 
 const listIssueIDsForVCSPullRequest = `-- name: ListIssueIDsForVCSPullRequest :many
-SELECT issue_id FROM issue_vcs_pull_request
-WHERE pull_request_id = $1
+SELECT ipr.issue_id
+FROM issue_vcs_pull_request ipr
+JOIN issue i ON i.id = ipr.issue_id
+JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+WHERE ipr.pull_request_id = $1
 `
 
 func (q *Queries) ListIssueIDsForVCSPullRequest(ctx context.Context, pullRequestID pgtype.UUID) ([]pgtype.UUID, error) {
@@ -718,21 +1093,39 @@ func (q *Queries) ListVCSGitLabPullRequestsBySourceProjectHead(ctx context.Conte
 }
 
 const listVCSPullRequestsByIssue = `-- name: ListVCSPullRequestsByIssue :many
-WITH checks AS (
-    SELECT
-        pr.id AS pr_id,
-        COUNT(*)::bigint AS total,
-        SUM(CASE WHEN cs.state = 'failed'  THEN 1 ELSE 0 END)::bigint AS failed,
-        SUM(CASE WHEN cs.state = 'passed'  THEN 1 ELSE 0 END)::bigint AS passed,
-        SUM(CASE WHEN cs.state = 'pending' THEN 1 ELSE 0 END)::bigint AS pending
+WITH current_checks AS (
+    SELECT pr.id AS pr_id, cs.state
     FROM vcs_pull_request pr
     JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+    JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
     JOIN vcs_commit_status cs
-        ON cs.connection_id = pr.connection_id
-       AND cs.sha = pr.head_sha
-       AND pr.head_sha <> ''
-    WHERE ipr.issue_id = $1
-    GROUP BY pr.id
+      ON cs.connection_id = pr.connection_id
+     AND cs.sha = pr.head_sha
+     AND pr.head_sha <> ''
+    WHERE i.id = $1
+    UNION ALL
+    SELECT pr.id AS pr_id, pipeline.status AS state
+    FROM vcs_pull_request pr
+    JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+    JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
+    JOIN vcs_gitlab_pipeline pipeline
+      ON pipeline.workspace_id = pr.workspace_id
+     AND pipeline.connection_id = pr.connection_id
+     AND pipeline.pull_request_id = pr.id
+     AND pipeline.sha = pr.head_sha
+    WHERE i.id = $1
+      AND pr.provider = 'gitlab'
+      AND pr.head_sha <> ''
+),
+checks AS (
+    SELECT
+        pr_id,
+        COUNT(*)::bigint AS total,
+        COUNT(*) FILTER (WHERE state = 'failed')::bigint AS failed,
+        COUNT(*) FILTER (WHERE state = 'passed')::bigint AS passed,
+        COUNT(*) FILTER (WHERE state = 'pending')::bigint AS pending
+    FROM current_checks
+    GROUP BY pr_id
 )
 SELECT
     pr.id, pr.workspace_id, pr.connection_id, pr.provider, pr.repo_owner, pr.repo_name, pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.head_sha, pr.author_login, pr.author_avatar_url, pr.merged_at, pr.closed_at, pr.pr_created_at, pr.pr_updated_at, pr.additions, pr.deletions, pr.changed_files, pr.created_at, pr.updated_at, pr.has_conflicts, pr.conflict_head_sha, pr.source_project_id, pr.source_project_path, pr.status_sync_at, pr.status_sync_error, pr.pipeline_sync_at, pr.pipeline_sync_error, pr.wakeup_sync_generation,
@@ -743,8 +1136,9 @@ SELECT
     COALESCE(c.pending, 0)::bigint AS checks_pending
 FROM vcs_pull_request pr
 JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
 LEFT JOIN checks c ON c.pr_id = pr.id
-WHERE ipr.issue_id = $1
+WHERE i.id = $1
 ORDER BY pr.pr_created_at DESC
 `
 
@@ -788,11 +1182,8 @@ type ListVCSPullRequestsByIssueRow struct {
 	ChecksPending        int64              `json:"checks_pending"`
 }
 
-// Aggregates each PR's commit statuses for its CURRENT head sha into
-// passed/failed/pending counts. vcs_commit_status holds one row per
-// (connection, sha, context) with a normalized state, so a count by state is
-// correct. Statuses for an old head sha stay stored but are excluded by the
-// head_sha join, so a stale run can't pollute the bar.
+// Aggregates current-head commit statuses and GitLab Pipelines into check counts.
+// Old-head rows stay stored but cannot pollute the current PR card.
 func (q *Queries) ListVCSPullRequestsByIssue(ctx context.Context, issueID pgtype.UUID) ([]ListVCSPullRequestsByIssueRow, error) {
 	rows, err := q.db.Query(ctx, listVCSPullRequestsByIssue, issueID)
 	if err != nil {
@@ -1006,9 +1397,73 @@ func (q *Queries) RotateVCSConnectionWebhookSecret(ctx context.Context, arg Rota
 	return i, err
 }
 
-const unlinkIssueFromVCSPullRequest = `-- name: UnlinkIssueFromVCSPullRequest :execrows
-DELETE FROM issue_vcs_pull_request
-WHERE issue_id = $1 AND pull_request_id = $2
+const unlinkGitLabIssueFromVCSPullRequest = `-- name: UnlinkGitLabIssueFromVCSPullRequest :one
+WITH cleared_legacy_provenance AS (
+    UPDATE issue_vcs_pull_request ipr
+    SET gitlab_close_intent = FALSE,
+        gitlab_linked_by_type = NULL,
+        gitlab_linked_by_id = NULL,
+        gitlab_linked_at = NULL
+    WHERE ipr.issue_id = $1 AND ipr.pull_request_id = $2
+      AND ipr.vcs_linked AND ipr.gitlab_linked_at IS NOT NULL
+      AND EXISTS (
+          SELECT 1 FROM issue i
+          JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+          WHERE i.id = ipr.issue_id
+      )
+    RETURNING 1
+), deleted_legacy_only_links AS (
+    DELETE FROM issue_vcs_pull_request ipr
+    WHERE ipr.issue_id = $1 AND ipr.pull_request_id = $2
+      AND NOT ipr.vcs_linked AND ipr.gitlab_linked_at IS NOT NULL
+      AND EXISTS (
+          SELECT 1 FROM issue i
+          JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+          WHERE i.id = ipr.issue_id
+      )
+    RETURNING 1
+)
+SELECT (SELECT count(*) FROM cleared_legacy_provenance)
+     + (SELECT count(*) FROM deleted_legacy_only_links)
+`
+
+type UnlinkGitLabIssueFromVCSPullRequestParams struct {
+	IssueID       pgtype.UUID `json:"issue_id"`
+	PullRequestID pgtype.UUID `json:"pull_request_id"`
+}
+
+func (q *Queries) UnlinkGitLabIssueFromVCSPullRequest(ctx context.Context, arg UnlinkGitLabIssueFromVCSPullRequestParams) (int32, error) {
+	row := q.db.QueryRow(ctx, unlinkGitLabIssueFromVCSPullRequest, arg.IssueID, arg.PullRequestID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const unlinkIssueFromVCSPullRequest = `-- name: UnlinkIssueFromVCSPullRequest :one
+WITH preserved_gitlab_links AS (
+    UPDATE issue_vcs_pull_request ipr
+    SET vcs_linked = FALSE, linked_by_type = NULL, linked_by_id = NULL
+    WHERE ipr.issue_id = $1 AND ipr.pull_request_id = $2
+      AND ipr.vcs_linked AND ipr.gitlab_linked_at IS NOT NULL
+      AND EXISTS (
+          SELECT 1 FROM issue i
+          JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+          WHERE i.id = ipr.issue_id
+      )
+    RETURNING 1
+), deleted_vcs_links AS (
+    DELETE FROM issue_vcs_pull_request ipr
+    WHERE ipr.issue_id = $1 AND ipr.pull_request_id = $2
+      AND ipr.vcs_linked AND ipr.gitlab_linked_at IS NULL
+      AND EXISTS (
+          SELECT 1 FROM issue i
+          JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+          WHERE i.id = ipr.issue_id
+      )
+    RETURNING 1
+)
+SELECT (SELECT count(*) FROM preserved_gitlab_links)
+     + (SELECT count(*) FROM deleted_vcs_links)
 `
 
 type UnlinkIssueFromVCSPullRequestParams struct {
@@ -1016,12 +1471,11 @@ type UnlinkIssueFromVCSPullRequestParams struct {
 	PullRequestID pgtype.UUID `json:"pull_request_id"`
 }
 
-func (q *Queries) UnlinkIssueFromVCSPullRequest(ctx context.Context, arg UnlinkIssueFromVCSPullRequestParams) (int64, error) {
-	result, err := q.db.Exec(ctx, unlinkIssueFromVCSPullRequest, arg.IssueID, arg.PullRequestID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) UnlinkIssueFromVCSPullRequest(ctx context.Context, arg UnlinkIssueFromVCSPullRequestParams) (int32, error) {
+	row := q.db.QueryRow(ctx, unlinkIssueFromVCSPullRequest, arg.IssueID, arg.PullRequestID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const updateGitLabVCSPullRequestWakeupState = `-- name: UpdateGitLabVCSPullRequestWakeupState :execrows
@@ -1275,6 +1729,7 @@ ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     source_project_id = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.source_project_id ELSE vcs_pull_request.source_project_id END,
     source_project_path = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.source_project_path ELSE vcs_pull_request.source_project_path END,
     updated_at        = now()
+WHERE EXCLUDED.provider <> 'gitlab' OR EXCLUDED.pr_updated_at > vcs_pull_request.pr_updated_at
 RETURNING id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, has_conflicts, conflict_head_sha, source_project_id, source_project_path, status_sync_at, status_sync_error, pipeline_sync_at, pipeline_sync_error, wakeup_sync_generation
 `
 

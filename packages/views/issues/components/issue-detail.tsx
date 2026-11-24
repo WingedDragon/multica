@@ -143,7 +143,6 @@ import {
 } from "./deliverables/deliverable-details";
 import { collectDeliverableFiles, deliverableInventoryFromAttachments, mergeDeliverableSources } from "@multica/core/attachments/deliverables";
 import { AttachmentVersionsProvider } from "./deliverables/attachment-versions";
-import { issueGitLabMergeRequestsOptions } from "@multica/core/gitlab";
 import {
   OpenDeliverableOnLoad,
   useCopyDeliverableLink,
@@ -1508,9 +1507,6 @@ export function IssueDetail({ issueId, onDelete, inbox, defaultSidebarOpen = tru
   useEffect(() => setSidebarSubIssuesExpanded(false), [id]);
   const [pullRequestsOpen, setPullRequestsOpen] = useState(true);
   const githubSettings = useGitHubSettings();
-  const { data: gitlabMergeRequestsData } = useQuery(issueGitLabMergeRequestsOptions(id));
-  const hasGitLabMergeRequests = (gitlabMergeRequestsData?.merge_requests.length ?? 0) > 0;
-  const showPullRequestsSection = githubSettings.prSidebar || hasGitLabMergeRequests;
   const pluginsEnabled = useFeatureEnabled(PLUGINS_V1_FLAG, false);
 
   // Per-issue, per-session set of optional properties currently visible in
@@ -3621,8 +3617,7 @@ export function IssueDetail({ issueId, onDelete, inbox, defaultSidebarOpen = tru
       </div>
     ),
     duplicates: <IssueDuplicatesSection issueId={issue.id} />,
-    // Pull requests — show GitHub PRs when enabled, and keep linked GitLab
-    // merge requests visible even when GitHub PRs are disabled.
+    // Pull requests — a unified provider list, with GitHub gated by workspace settings.
     pull_requests: (
       <PullRequestsSection
         issueId={id}
@@ -3630,7 +3625,6 @@ export function IssueDetail({ issueId, onDelete, inbox, defaultSidebarOpen = tru
         open={pullRequestsOpen}
         onOpenChange={setPullRequestsOpen}
         includeGitHub={githubSettings.prSidebar}
-        hasGitLabMergeRequests={hasGitLabMergeRequests}
       />
     ),
     // Environments the issue's runs left running, and the "+" that starts one.
@@ -3703,7 +3697,7 @@ export function IssueDetail({ issueId, onDelete, inbox, defaultSidebarOpen = tru
         (section) =>
           guest
             ? GUEST_SIDEBAR_SECTIONS.has(section)
-            : (section !== "pull_requests" || showPullRequestsSection) && (section !== "plugins" || pluginsEnabled),
+            : section !== "plugins" || pluginsEnabled,
       )}
     />
   );

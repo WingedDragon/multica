@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"slices"
 	"testing"
 )
@@ -76,5 +77,20 @@ func TestShutdownSequence_SkipsTheStepsADeploymentDoesNotHave(t *testing.T) {
 
 	if want := []string{"http", "cancel", "pprof"}; !slices.Equal(ran, want) {
 		t.Fatalf("shutdown order = %v, want %v", ran, want)
+	}
+}
+
+func TestShutdownSequence_ReportsIncompleteRelayDrainWithoutFailingNormalShutdown(t *testing.T) {
+	var ran []string
+	shutdownSequence{
+		StopOutboundRelay: func() {
+			reportRelayDrainError(errors.New("test-only incomplete drain"))
+			ran = append(ran, "relay")
+		},
+		CancelWorkers: func() { ran = append(ran, "cancel") },
+	}.run()
+
+	if want := []string{"relay", "cancel"}; !slices.Equal(ran, want) {
+		t.Fatalf("shutdown steps after reported relay drain failure = %v, want %v", ran, want)
 	}
 }

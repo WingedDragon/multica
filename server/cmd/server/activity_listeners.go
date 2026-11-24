@@ -23,6 +23,9 @@ func registerActivityListeners(bus *events.Bus, queries *db.Queries) {
 
 	// issue:created — record "created" activity
 	bus.Subscribe(protocol.EventIssueCreated, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -53,6 +56,9 @@ func registerActivityListeners(bus *events.Bus, queries *db.Queries) {
 
 	// issue:updated — record specific changes as separate activities
 	bus.Subscribe(protocol.EventIssueUpdated, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -295,6 +301,9 @@ func registerActivityListeners(bus *events.Bus, queries *db.Queries) {
 
 // handleTaskActivity records an activity for task:completed or task:failed events.
 func handleTaskActivity(ctx context.Context, bus *events.Bus, queries *db.Queries, e events.Event, action string) {
+	if !vcsMigrationReady(ctx, queries) {
+		return
+	}
 	payload, ok := e.Payload.(map[string]any)
 	if !ok {
 		return

@@ -34,7 +34,6 @@ import {
   ChatSessionSchema,
   PrioritizeQueuedChatTaskResponseSchema,
   CreateFeedbackResponseSchema,
-  CreateGitLabConnectionResponseSchema,
   CreateGitLabProjectResponseSchema,
   DuplicateIssueErrorBodySchema,
   EMPTY_CHAT_DRAFT_RESTORES,
@@ -43,21 +42,19 @@ import {
   EMPTY_PRIORITIZE_QUEUED_CHAT_TASK_RESPONSE,
   EMPTY_CREATE_FEEDBACK_RESPONSE,
   EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
-  EMPTY_GITLAB_CONFIG_RESPONSE,
+  EMPTY_LIST_GITLAB_PROJECTS_RESPONSE,
   EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
   EMPTY_INBOX_ITEMS,
   EMPTY_INBOX_UNREAD_SUMMARY,
   EMPTY_SNOOZED_INBOX,
   EMPTY_SEARCH_PROJECTS_RESPONSE,
-  EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
   EMPTY_USER,
-  GitLabConfigResponseSchema,
   GitLabMergeRequestDetailsResponseSchema,
   InboxItemListSchema,
   InboxUnreadSummarySchema,
   SnoozedInboxListSchema,
   IssueTriggerPreviewSchema,
-  ListGitLabMergeRequestsResponseSchema,
+  ListGitLabProjectsResponseSchema,
   ListIssuesResponseSchema,
   ListPropertiesResponseSchema,
   MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
@@ -1084,216 +1081,61 @@ describe("CreateFeedbackResponseSchema", () => {
 });
 
 describe("GitLab API schemas", () => {
-  it("parses multiple connections while defaulting missing legacy fields", () => {
-    const parsed = GitLabConfigResponseSchema.parse({
-      configured: false,
-      access_token: "glpat-private-token",
-      can_manage: true,
-      credential_storage_configured: true,
-      connections: [
-        {
-          id: "connection-1",
-          workspace_id: "workspace-1",
-          base_url: "https://gitlab.example.com",
-          host: "gitlab.example.com",
-          server_configured: true,
-          webhook_url:
-            "https://app.example.com/api/webhooks/gitlab/connection-1",
-          webhook_path: "/api/webhooks/gitlab/connection-1",
-          access_token: "glpat-private-token",
-        },
-      ],
-      projects: [
-        {
-          id: "binding-1",
-          workspace_id: "workspace-1",
-          connection_id: "connection-1",
-          gitlab_project_id: 42,
-          path_with_namespace: "team/project",
-          web_url: "https://gitlab.example.com/team/project",
-          hook_enabled: true,
-          created_at: "2026-07-01T00:00:00Z",
-        },
-      ],
-    });
-
-    expect(parsed.connections[0]?.host).toBe("gitlab.example.com");
-    expect(parsed.connections[0]?.server_configured).toBe(true);
-    expect(parsed.connections[0]?.webhook_url).toBe(
-      "https://app.example.com/api/webhooks/gitlab/connection-1",
-    );
-    expect(parsed.connections[0]?.webhook_path).toBe(
-      "/api/webhooks/gitlab/connection-1",
-    );
-    expect(parsed.projects[0]?.connection_id).toBe("connection-1");
-    expect(parsed.credential_storage_configured).toBe(true);
-    expect(parsed.connections[0]).not.toHaveProperty("access_token");
-    expect(parsed).not.toHaveProperty("access_token");
-
-    const legacy = GitLabConfigResponseSchema.parse({ configured: true, projects: [] });
-    expect(legacy.connections).toEqual([]);
-    expect(legacy.credential_storage_configured).toBe(false);
-    const olderWithConnection = GitLabConfigResponseSchema.parse({
-      configured: false,
-      connections: [
-        {
-          id: "old-connection",
-          workspace_id: "workspace-1",
-          base_url: "https://gitlab.example.com",
-          host: "gitlab.example.com",
-        },
-      ],
-    });
-    expect(olderWithConnection.connections[0]?.server_configured).toBeUndefined();
-  });
-
-  it("parses one-time webhook data, strips tokens, and allows absent reconnect secrets", () => {
-    const connection = {
-      id: "connection-1",
+  it("parses workspace-scoped project bindings with hook and refresh state", () => {
+    const project = {
+      id: "binding-1",
       workspace_id: "workspace-1",
-      base_url: "https://gitlab.example.com",
-      host: "gitlab.example.com",
+      connection_id: "connection-1",
+      gitlab_project_id: 42,
+      path_with_namespace: "team/platform/service",
+      web_url: "https://gitlab.example.com/team/platform/service",
+      hook_id: 1001,
+      hook_enabled: false,
+      last_sync_error: "Webhook permissions missing",
+      last_refresh_at: "2026-07-01T00:00:00Z",
+      last_refresh_error: "Refresh access denied",
+      created_at: "2026-07-01T00:00:00Z",
     };
-    const response = {
-      connection: { ...connection, access_token: "glpat-private-token" },
-      webhook_secret: "one-time-secret",
-      webhook_url: "https://app.example.com/api/gitlab/webhook/connection-1",
-      webhook_path: "/api/gitlab/webhook/connection-1",
-      access_token: "glpat-private-token",
-    };
-
-    expect(CreateGitLabConnectionResponseSchema.parse(response)).toEqual({
-      connection,
-      webhook_secret: "one-time-secret",
-      webhook_url: "https://app.example.com/api/gitlab/webhook/connection-1",
-      webhook_path: "/api/gitlab/webhook/connection-1",
+    const parsed = ListGitLabProjectsResponseSchema.parse({
+      projects: [project],
+      future_field: true,
     });
 
-    const reconnect = {
-      connection,
-      webhook_url: "https://app.example.com/api/gitlab/webhook/connection-1",
-      webhook_path: "/api/gitlab/webhook/connection-1",
-    };
-    expect(CreateGitLabConnectionResponseSchema.parse(reconnect)).toEqual(
-      reconnect,
-    );
+    expect(parsed.projects).toEqual([project]);
   });
 
-  it("rejects malformed GitLab connection create responses", () => {
+  it("falls back for malformed project lists", () => {
     expect(
-      CreateGitLabConnectionResponseSchema.safeParse({
-        connection: { id: "connection-1" },
-      }).success,
-    ).toBe(false);
-  });
-
-  it("accepts config responses with future fields", () => {
-    const parsed = GitLabConfigResponseSchema.parse({
-      configured: true,
-      can_manage: true,
-      base_url: "https://gitlab.example.com",
-      manual_webhook_url: "https://app.example.com/gitlab/webhook",
-      projects: [
-        {
-          id: "binding-1",
-          workspace_id: "workspace-1",
-          gitlab_project_id: 42,
-          path_with_namespace: "team/project",
-          web_url: "https://gitlab.example.com/team/project",
-          hook_id: 1001,
-          hook_enabled: true,
-          last_sync_error: null,
-          created_at: "2026-07-01T00:00:00Z",
-          future_field: "kept",
-        },
-      ],
-      future_top_level: true,
-    });
-
-    expect(parsed.projects[0]?.path_with_namespace).toBe("team/project");
-    expect(parsed.projects[0]?.future_field).toBe("kept");
-  });
-
-  it("falls back for malformed config responses", () => {
-    const parsed = parseWithFallback(
-      { configured: "yes", projects: "nope" },
-      GitLabConfigResponseSchema,
-      EMPTY_GITLAB_CONFIG_RESPONSE,
-      { endpoint: "GET /api/workspaces/:id/gitlab/config" },
-    );
-
-    expect(parsed).toEqual(EMPTY_GITLAB_CONFIG_RESPONSE);
+      parseWithFallback(
+        { projects: "nope" },
+        ListGitLabProjectsResponseSchema,
+        EMPTY_LIST_GITLAB_PROJECTS_RESPONSE,
+        { endpoint: "GET /api/workspaces/:id/vcs/gitlab/projects" },
+      ),
+    ).toBe(EMPTY_LIST_GITLAB_PROJECTS_RESPONSE);
   });
 
   it("falls back for malformed create project responses", () => {
-    const parsed = parseWithFallback(
-      {
-        project: {
-          id: "binding-1",
-          workspace_id: "workspace-1",
-          gitlab_project_id: "42",
-          path_with_namespace: "team/project",
-          web_url: "https://gitlab.example.com/team/project",
-          hook_enabled: true,
-          created_at: "2026-07-01T00:00:00Z",
-        },
-      },
-      CreateGitLabProjectResponseSchema,
-      EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
-      { endpoint: "POST /api/workspaces/:id/gitlab/projects" },
-    );
-
-    expect(parsed).toEqual(EMPTY_CREATE_GITLAB_PROJECT_RESPONSE);
-  });
-
-  it("accepts merge request responses with future state/status values", () => {
-    const parsed = ListGitLabMergeRequestsResponseSchema.parse({
-      merge_requests: [
+    expect(
+      parseWithFallback(
         {
-          id: "mr-1",
-          workspace_id: "workspace-1",
-          project_path: "team/project",
-          gitlab_project_id: 42,
-          iid: 7,
-          title: "Add GitLab integration",
-          state: "locked",
-          web_url: "https://gitlab.example.com/team/project/-/merge_requests/7",
-          source_branch: "feature",
-          target_branch: "main",
-          author_username: "ada",
-          author_avatar_url: null,
-          sha: "abc123",
-          detailed_merge_status: "checking",
-          has_conflicts: false,
-          pipeline_status: "skipped",
-          pipeline_url: null,
-          additions: 10,
-          deletions: 2,
-          changed_files: 3,
-          merged_at: null,
-          closed_at: null,
-          mr_created_at: "2026-07-01T00:00:00Z",
-          mr_updated_at: "2026-07-01T00:00:00Z",
-          future_field: "kept",
+          project: {
+            id: "binding-1",
+            workspace_id: "workspace-1",
+            connection_id: "connection-1",
+            gitlab_project_id: "42",
+            path_with_namespace: "team/project",
+            web_url: "https://gitlab.example.com/team/project",
+            hook_enabled: true,
+            created_at: "2026-07-01T00:00:00Z",
+          },
         },
-      ],
-    });
-
-    expect(parsed.merge_requests[0]?.state).toBe("locked");
-    expect(parsed.merge_requests[0]?.pipeline_status).toBe("skipped");
+        CreateGitLabProjectResponseSchema,
+        EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
+        { endpoint: "POST /api/workspaces/:id/vcs/gitlab/projects" },
+      ),
+    ).toEqual(EMPTY_CREATE_GITLAB_PROJECT_RESPONSE);
   });
-
-  it("falls back for malformed merge request responses", () => {
-    const parsed = parseWithFallback(
-      { merge_requests: [{ id: "mr-1", iid: "7" }] },
-      ListGitLabMergeRequestsResponseSchema,
-      EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
-      { endpoint: "GET /api/issues/:id/gitlab/merge-requests" },
-    );
-
-    expect(parsed).toEqual(EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE);
-  });
-
   it("accepts merge request detail responses with future fields", () => {
     const parsed = GitLabMergeRequestDetailsResponseSchema.parse({
       merge_request: {
@@ -1390,7 +1232,7 @@ describe("GitLab API schemas", () => {
       { merge_request: { id: "mr-1", iid: "7" }, jobs: "nope" },
       GitLabMergeRequestDetailsResponseSchema,
       EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
-      { endpoint: "GET /api/issues/:id/gitlab/merge-requests/:mrId/details" },
+      { endpoint: "GET /api/issues/:issueId/vcs/pull-requests/:prId/gitlab" },
     );
 
     expect(parsed).toEqual(EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE);

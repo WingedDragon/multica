@@ -41,29 +41,26 @@ export function PullRequestsSection({
   open,
   onOpenChange,
   includeGitHub = true,
-  hasGitLabMergeRequests = false,
 }: {
   issueId: string;
   identifier: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** GitLab merge requests stay listed when the workspace turns GitHub PRs off. */
+  /** GitHub PRs follow this setting; other VCS providers remain visible. */
   includeGitHub?: boolean;
-  hasGitLabMergeRequests?: boolean;
 }) {
   const { t } = useT("issues");
-  const { data, isLoading, isError } = useQuery({
-    ...issuePullRequestsOptions(issueId),
-    enabled: includeGitHub && !!issueId,
-  });
-  // Older backends have no link / auto-complete endpoints; keep the header
-  // actions hidden until the server says it supports them. With GitHub PRs off
-  // the section lists GitLab merge requests only, so its GitHub-only count and
-  // actions stay out of the header.
+  const { data, isLoading, isError } = useQuery(issuePullRequestsOptions(issueId));
+  const pullRequests = data?.pull_requests ?? [];
   const supported = includeGitHub && !!data?.auto_complete;
-  const count = includeGitHub ? data?.pull_requests.length ?? 0 : 0;
+  const count = includeGitHub
+    ? pullRequests.filter((pr) => (pr.provider ?? "github") === "github").length
+    : 0;
+  const hasOtherProviderPRs = pullRequests.some(
+    (pr) => (pr.provider ?? "github") !== "github",
+  );
 
-  if (includeGitHub && !isLoading && !isError && count === 0 && !supported && !hasGitLabMergeRequests) return null;
+  if (!isLoading && !isError && count === 0 && !supported && !hasOtherProviderPRs) return null;
 
   return (
     <div>
@@ -72,13 +69,13 @@ export function PullRequestsSection({
         open={open}
         onOpenChange={onOpenChange}
         count={count}
-        collapsible={!includeGitHub || count > 0 || isLoading || isError || supported || hasGitLabMergeRequests}
+        collapsible={count > 0 || isLoading || isError || supported || hasOtherProviderPRs}
         actions={supported ? <>
           <LinkPullRequestPopover issueId={issueId} identifier={identifier} onLinked={() => onOpenChange(true)} />
           <AutoCompleteMenu issueId={issueId} disabled={data?.auto_complete?.issue_disabled ?? false} workspaceEnabled={data?.auto_complete?.workspace_enabled ?? true} />
         </> : undefined}
       />
-      {open && (!includeGitHub || count > 0 || isLoading || isError || supported || hasGitLabMergeRequests) && (
+      {open && (count > 0 || isLoading || isError || supported || hasOtherProviderPRs) && (
         <div className="px-2">
           <PullRequestList issueId={issueId} identifier={identifier} includeGitHub={includeGitHub} />
         </div>

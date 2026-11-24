@@ -103,29 +103,45 @@ ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     source_project_id = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.source_project_id ELSE vcs_pull_request.source_project_id END,
     source_project_path = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.source_project_path ELSE vcs_pull_request.source_project_path END,
     updated_at        = now()
+WHERE EXCLUDED.provider <> 'gitlab' OR EXCLUDED.pr_updated_at > vcs_pull_request.pr_updated_at
 RETURNING *;
 
 -- name: ListVCSPullRequestsByIssue :many
--- Aggregates each PR's commit statuses for its CURRENT head sha into
--- passed/failed/pending counts. vcs_commit_status holds one row per
--- (connection, sha, context) with a normalized state, so a count by state is
--- correct. Statuses for an old head sha stay stored but are excluded by the
--- head_sha join, so a stale run can't pollute the bar.
-WITH checks AS (
-    SELECT
-        pr.id AS pr_id,
-        COUNT(*)::bigint AS total,
-        SUM(CASE WHEN cs.state = 'failed'  THEN 1 ELSE 0 END)::bigint AS failed,
-        SUM(CASE WHEN cs.state = 'passed'  THEN 1 ELSE 0 END)::bigint AS passed,
-        SUM(CASE WHEN cs.state = 'pending' THEN 1 ELSE 0 END)::bigint AS pending
+-- Aggregates current-head commit statuses and GitLab Pipelines into check counts.
+-- Old-head rows stay stored but cannot pollute the current PR card.
+WITH current_checks AS (
+    SELECT pr.id AS pr_id, cs.state
     FROM vcs_pull_request pr
     JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+    JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
     JOIN vcs_commit_status cs
-        ON cs.connection_id = pr.connection_id
-       AND cs.sha = pr.head_sha
-       AND pr.head_sha <> ''
-    WHERE ipr.issue_id = sqlc.arg('issue_id')
-    GROUP BY pr.id
+      ON cs.connection_id = pr.connection_id
+     AND cs.sha = pr.head_sha
+     AND pr.head_sha <> ''
+    WHERE i.id = sqlc.arg('issue_id')
+    UNION ALL
+    SELECT pr.id AS pr_id, pipeline.status AS state
+    FROM vcs_pull_request pr
+    JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+    JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
+    JOIN vcs_gitlab_pipeline pipeline
+      ON pipeline.workspace_id = pr.workspace_id
+     AND pipeline.connection_id = pr.connection_id
+     AND pipeline.pull_request_id = pr.id
+     AND pipeline.sha = pr.head_sha
+    WHERE i.id = sqlc.arg('issue_id')
+      AND pr.provider = 'gitlab'
+      AND pr.head_sha <> ''
+),
+checks AS (
+    SELECT
+        pr_id,
+        COUNT(*)::bigint AS total,
+        COUNT(*) FILTER (WHERE state = 'failed')::bigint AS failed,
+        COUNT(*) FILTER (WHERE state = 'passed')::bigint AS passed,
+        COUNT(*) FILTER (WHERE state = 'pending')::bigint AS pending
+    FROM current_checks
+    GROUP BY pr_id
 )
 SELECT
     pr.*,
@@ -136,8 +152,9 @@ SELECT
     COALESCE(c.pending, 0)::bigint AS checks_pending
 FROM vcs_pull_request pr
 JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
 LEFT JOIN checks c ON c.pr_id = pr.id
-WHERE ipr.issue_id = sqlc.arg('issue_id')
+WHERE i.id = sqlc.arg('issue_id')
 ORDER BY pr.pr_created_at DESC;
 
 -- =====================
@@ -166,6 +183,7 @@ WHERE EXCLUDED.updated_at >= vcs_commit_status.updated_at;
 SELECT DISTINCT ipr.issue_id
 FROM vcs_pull_request pr
 JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
 WHERE pr.connection_id = $1 AND pr.head_sha = $2 AND pr.head_sha <> '';
 
 -- =====================
@@ -173,37 +191,220 @@ WHERE pr.connection_id = $1 AND pr.head_sha = $2 AND pr.head_sha <> '';
 -- =====================
 
 -- name: LinkIssueToVCSPullRequest :execrows
--- Mirrors LinkIssueToPullRequest: automatic link, 1 only when new.
+-- Mirrors LinkIssueToPullRequest: automatic link, 1 only when new. The issue
+-- and canonical PR must belong to the same workspace.
 INSERT INTO issue_vcs_pull_request (
-    issue_id, pull_request_id, linked_by_type, linked_by_id
-) VALUES (
-    $1, $2, 'system', NULL
+    issue_id, pull_request_id, linked_by_type, linked_by_id, vcs_linked
 )
-ON CONFLICT (issue_id, pull_request_id) DO NOTHING;
+SELECT i.id, pr.id, 'system', NULL, TRUE
+FROM issue i
+JOIN vcs_pull_request pr ON pr.id = sqlc.arg('pull_request_id') AND pr.workspace_id = i.workspace_id
+WHERE i.id = sqlc.arg('issue_id')
+ON CONFLICT (issue_id, pull_request_id) DO UPDATE SET
+    linked_by_type = 'system',
+    linked_by_id = NULL,
+    vcs_linked = TRUE
+WHERE NOT issue_vcs_pull_request.vcs_linked;
+
+-- name: LinkGitLabIssueToVCSPullRequest :execrows
+-- Legacy-policy GitLab links carry close-intent provenance independently from
+-- official VCS links; an existing official link remains independently linked.
+INSERT INTO issue_vcs_pull_request (
+    issue_id, pull_request_id, linked_by_type, linked_by_id, vcs_linked,
+    gitlab_close_intent, gitlab_linked_by_type, gitlab_linked_by_id, gitlab_linked_at
+)
+SELECT i.id, pr.id, NULL, NULL, FALSE,
+    sqlc.arg('gitlab_close_intent'), 'system', NULL, now()
+FROM issue i
+JOIN vcs_pull_request pr ON pr.id = sqlc.arg('pull_request_id') AND pr.workspace_id = i.workspace_id AND pr.provider = 'gitlab'
+WHERE i.id = sqlc.arg('issue_id')
+ON CONFLICT (issue_id, pull_request_id) DO UPDATE SET
+    gitlab_close_intent = CASE WHEN sqlc.arg('preserve_close_intent')
+        THEN issue_vcs_pull_request.gitlab_close_intent ELSE EXCLUDED.gitlab_close_intent END,
+    gitlab_linked_by_type = COALESCE(issue_vcs_pull_request.gitlab_linked_by_type, EXCLUDED.gitlab_linked_by_type),
+    gitlab_linked_by_id = COALESCE(issue_vcs_pull_request.gitlab_linked_by_id, EXCLUDED.gitlab_linked_by_id),
+    gitlab_linked_at = COALESCE(issue_vcs_pull_request.gitlab_linked_at, EXCLUDED.gitlab_linked_at)
+WHERE (CASE WHEN sqlc.arg('preserve_close_intent')
+        THEN issue_vcs_pull_request.gitlab_close_intent ELSE EXCLUDED.gitlab_close_intent END)
+        IS DISTINCT FROM issue_vcs_pull_request.gitlab_close_intent
+   OR issue_vcs_pull_request.gitlab_linked_at IS NULL;
 
 -- name: LinkIssueToVCSPullRequestManually :execrows
 INSERT INTO issue_vcs_pull_request (
-    issue_id, pull_request_id, linked_by_type, linked_by_id
-) VALUES (
-    $1, $2, 'member', sqlc.narg('linked_by_id')
+    issue_id, pull_request_id, linked_by_type, linked_by_id, vcs_linked
 )
+SELECT i.id, pr.id, 'member', sqlc.narg('linked_by_id'), TRUE
+FROM issue i
+JOIN vcs_pull_request pr ON pr.id = sqlc.arg('pull_request_id') AND pr.workspace_id = i.workspace_id
+WHERE i.id = sqlc.arg('issue_id')
 ON CONFLICT (issue_id, pull_request_id) DO UPDATE SET
     linked_by_type = 'member',
-    linked_by_id = EXCLUDED.linked_by_id
-WHERE issue_vcs_pull_request.linked_by_type IS DISTINCT FROM 'member';
+    linked_by_id = EXCLUDED.linked_by_id,
+    vcs_linked = TRUE
+WHERE issue_vcs_pull_request.linked_by_type IS DISTINCT FROM 'member'
+   OR NOT issue_vcs_pull_request.vcs_linked;
 
 -- name: ListIssueIDsForVCSPullRequest :many
-SELECT issue_id FROM issue_vcs_pull_request
-WHERE pull_request_id = $1;
+SELECT ipr.issue_id
+FROM issue_vcs_pull_request ipr
+JOIN issue i ON i.id = ipr.issue_id
+JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+WHERE ipr.pull_request_id = $1;
 
 -- name: ListAutoLinkedIssueIDsForVCSPullRequest :many
-SELECT issue_id FROM issue_vcs_pull_request
-WHERE pull_request_id = $1
-  AND COALESCE(linked_by_type, 'system') <> 'member';
+SELECT ipr.issue_id
+FROM issue_vcs_pull_request ipr
+JOIN issue i ON i.id = ipr.issue_id
+JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+WHERE ipr.pull_request_id = $1
+  AND ipr.vcs_linked
+  AND COALESCE(ipr.linked_by_type, 'system') <> 'member';
 
--- name: UnlinkIssueFromVCSPullRequest :execrows
-DELETE FROM issue_vcs_pull_request
-WHERE issue_id = $1 AND pull_request_id = $2;
+-- name: UnlinkIssueFromVCSPullRequest :one
+WITH preserved_gitlab_links AS (
+    UPDATE issue_vcs_pull_request ipr
+    SET vcs_linked = FALSE, linked_by_type = NULL, linked_by_id = NULL
+    WHERE ipr.issue_id = $1 AND ipr.pull_request_id = $2
+      AND ipr.vcs_linked AND ipr.gitlab_linked_at IS NOT NULL
+      AND EXISTS (
+          SELECT 1 FROM issue i
+          JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+          WHERE i.id = ipr.issue_id
+      )
+    RETURNING 1
+), deleted_vcs_links AS (
+    DELETE FROM issue_vcs_pull_request ipr
+    WHERE ipr.issue_id = $1 AND ipr.pull_request_id = $2
+      AND ipr.vcs_linked AND ipr.gitlab_linked_at IS NULL
+      AND EXISTS (
+          SELECT 1 FROM issue i
+          JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+          WHERE i.id = ipr.issue_id
+      )
+    RETURNING 1
+)
+SELECT (SELECT count(*) FROM preserved_gitlab_links)
+     + (SELECT count(*) FROM deleted_vcs_links);
+
+-- name: ListAutoLinkedGitLabIssueIDsForVCSPullRequest :many
+SELECT ipr.issue_id
+FROM issue_vcs_pull_request ipr
+JOIN issue i ON i.id = ipr.issue_id
+JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+WHERE ipr.pull_request_id = $1
+  AND ipr.gitlab_linked_at IS NOT NULL
+  AND COALESCE(ipr.gitlab_linked_by_type, 'system') <> 'member';
+
+-- name: UnlinkGitLabIssueFromVCSPullRequest :one
+WITH cleared_legacy_provenance AS (
+    UPDATE issue_vcs_pull_request ipr
+    SET gitlab_close_intent = FALSE,
+        gitlab_linked_by_type = NULL,
+        gitlab_linked_by_id = NULL,
+        gitlab_linked_at = NULL
+    WHERE ipr.issue_id = $1 AND ipr.pull_request_id = $2
+      AND ipr.vcs_linked AND ipr.gitlab_linked_at IS NOT NULL
+      AND EXISTS (
+          SELECT 1 FROM issue i
+          JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+          WHERE i.id = ipr.issue_id
+      )
+    RETURNING 1
+), deleted_legacy_only_links AS (
+    DELETE FROM issue_vcs_pull_request ipr
+    WHERE ipr.issue_id = $1 AND ipr.pull_request_id = $2
+      AND NOT ipr.vcs_linked AND ipr.gitlab_linked_at IS NOT NULL
+      AND EXISTS (
+          SELECT 1 FROM issue i
+          JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+          WHERE i.id = ipr.issue_id
+      )
+    RETURNING 1
+)
+SELECT (SELECT count(*) FROM cleared_legacy_provenance)
+     + (SELECT count(*) FROM deleted_legacy_only_links);
+
+-- name: GetGitLabVCSIssueCloseAggregate :one
+WITH linked_prs AS (
+    SELECT pr.state, FALSE AS legacy_gitlab, FALSE AS close_intent
+    FROM issue_pull_request ipr
+    JOIN issue i ON i.id = ipr.issue_id
+    JOIN github_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+    WHERE i.workspace_id = sqlc.arg('workspace_id')
+      AND i.id = sqlc.arg('issue_id')
+    UNION ALL
+    SELECT pr.state,
+           (pr.provider = 'gitlab' AND ivpr.gitlab_linked_at IS NOT NULL AND COALESCE(gp.legacy_link_policy, FALSE)),
+           COALESCE(ivpr.gitlab_close_intent, FALSE)
+    FROM issue_vcs_pull_request ivpr
+    JOIN issue i ON i.id = ivpr.issue_id
+    JOIN vcs_pull_request pr ON pr.id = ivpr.pull_request_id AND pr.workspace_id = i.workspace_id
+    LEFT JOIN vcs_gitlab_project gp
+      ON gp.workspace_id = pr.workspace_id
+     AND gp.connection_id = pr.connection_id
+     AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+    WHERE i.workspace_id = sqlc.arg('workspace_id')
+      AND i.id = sqlc.arg('issue_id')
+      AND (ivpr.vcs_linked OR (pr.provider = 'gitlab' AND gp.legacy_link_policy AND ivpr.gitlab_linked_at IS NOT NULL))
+)
+SELECT
+    COUNT(*) FILTER (WHERE state <> 'merged')::bigint AS unmerged_count,
+    COUNT(*) FILTER (WHERE legacy_gitlab AND state = 'merged' AND close_intent)::bigint AS merged_with_close_intent_count
+FROM linked_prs;
+
+-- name: CompleteIssueFromGitLabCloseIntent :one
+UPDATE issue AS i SET
+    status = 'done',
+    duplicate_of_issue_id = NULL,
+    position = (
+        SELECT COALESCE(MIN(target.position), 0) - 1
+        FROM issue AS target
+        WHERE target.workspace_id = i.workspace_id AND target.status = 'done'
+    ),
+    revision = i.revision + 1,
+    last_activity_at = GREATEST(COALESCE(i.last_activity_at, i.updated_at), now()),
+    updated_at = now()
+WHERE i.id = sqlc.arg('issue_id')
+  AND i.workspace_id = sqlc.arg('workspace_id')
+  AND i.status <> 'done'
+  AND EXISTS (
+      SELECT 1
+      FROM issue_vcs_pull_request ivpr
+      JOIN vcs_pull_request pr ON pr.id = ivpr.pull_request_id
+      WHERE ivpr.issue_id = i.id
+        AND pr.workspace_id = i.workspace_id
+        AND pr.provider = 'gitlab'
+        AND ivpr.gitlab_linked_at IS NOT NULL
+        AND ivpr.gitlab_close_intent
+        AND pr.state = 'merged'
+        AND EXISTS (
+            SELECT 1
+            FROM vcs_gitlab_project gp
+            WHERE gp.workspace_id = i.workspace_id
+              AND gp.connection_id = pr.connection_id
+              AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+              AND gp.legacy_link_policy
+        )
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM issue_pull_request ipr
+      JOIN github_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+      WHERE ipr.issue_id = i.id
+        AND pr.state <> 'merged'
+      UNION ALL
+      SELECT 1
+      FROM issue_vcs_pull_request ivpr
+      JOIN vcs_pull_request pr ON pr.id = ivpr.pull_request_id AND pr.workspace_id = i.workspace_id
+      LEFT JOIN vcs_gitlab_project gp
+        ON gp.workspace_id = pr.workspace_id
+       AND gp.connection_id = pr.connection_id
+       AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+      WHERE ivpr.issue_id = i.id
+        AND (ivpr.vcs_linked OR (pr.provider = 'gitlab' AND gp.legacy_link_policy AND ivpr.gitlab_linked_at IS NOT NULL))
+        AND pr.state <> 'merged'
+  )
+RETURNING i.*;
 
 -- name: GetVCSPullRequestByKey :one
 -- The stored row before a webhook upsert, so the handler can tell a merge
@@ -336,6 +537,48 @@ ON CONFLICT (pull_request_id, pipeline_project_path, pipeline_id) DO UPDATE SET
     pipeline_updated_at = EXCLUDED.pipeline_updated_at,
     updated_at = now()
 WHERE EXCLUDED.pipeline_updated_at >= vcs_gitlab_pipeline.pipeline_updated_at;
+
+-- name: GetVCSGitLabPipelineByMRIdentity :one
+SELECT * FROM vcs_gitlab_pipeline
+WHERE workspace_id = $1
+  AND pull_request_id = $2
+  AND pipeline_project_path = $3
+  AND pipeline_id = $4;
+
+-- name: IsGitLabPipelineJobEventDuplicate :one
+SELECT EXISTS (
+    SELECT 1
+    FROM gitlab_pipeline_job job
+    JOIN vcs_pull_request pr ON pr.id = job.vcs_pull_request_id
+    WHERE pr.id = sqlc.arg('pull_request_id')
+      AND pr.workspace_id = sqlc.arg('workspace_id')
+      AND pr.provider = 'gitlab'
+      AND job.workspace_id = pr.workspace_id
+      AND job.job_id = sqlc.arg('job_id')
+      AND job.pipeline_id = sqlc.arg('pipeline_id')
+      AND job.name = sqlc.arg('name')
+      AND job.stage IS NOT DISTINCT FROM sqlc.narg('stage')
+      AND job.status = sqlc.arg('status')
+      AND job.ref IS NOT DISTINCT FROM sqlc.narg('ref')
+      AND job.sha IS NOT DISTINCT FROM sqlc.narg('sha')
+      AND job.started_at IS NOT DISTINCT FROM sqlc.narg('started_at')
+      AND job.finished_at IS NOT DISTINCT FROM sqlc.narg('finished_at')
+      AND job.failure_reason IS NOT DISTINCT FROM sqlc.narg('failure_reason')
+      AND job.allow_failure = sqlc.arg('allow_failure')
+)::boolean AS duplicate;
+
+-- name: IsGitLabMRNoteEventDuplicate :one
+SELECT EXISTS (
+    SELECT 1
+    FROM gitlab_mr_note note
+    JOIN vcs_pull_request pr ON pr.id = note.vcs_pull_request_id
+    WHERE pr.id = sqlc.arg('pull_request_id')
+      AND pr.workspace_id = sqlc.arg('workspace_id')
+      AND pr.provider = 'gitlab'
+      AND note.gitlab_note_id = sqlc.arg('note_id')
+      AND note.body = sqlc.arg('note_body')
+      AND note.note_updated_at IS NOT DISTINCT FROM sqlc.narg('note_updated_at')
+)::boolean AS duplicate;
 
 -- name: ListVCSGitLabPipelinesByMR :many
 SELECT * FROM vcs_gitlab_pipeline

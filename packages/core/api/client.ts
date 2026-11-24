@@ -229,15 +229,12 @@ import type {
   ListGitHubInstallationsResponse,
   ListGitHubRepositoriesResponse,
   GitHubConnectResponse,
-  CreateGitLabConnectionRequest,
-  CreateGitLabConnectionResponse,
   CreateGitLabProjectRequest,
   CreateGitLabProjectResponse,
-  GitLabConfigResponse,
   GitLabJobTraceResponse,
   GitLabMergeRequestDetailsResponse,
   GitLabProjectRefreshResponse,
-  ListGitLabMergeRequestsResponse,
+  ListGitLabProjectsResponse,
   ListVCSConnectionsResponse,
   ConnectVCSRequest,
   ConnectVCSResponse,
@@ -592,18 +589,15 @@ import {
   EMPTY_LIST_ISSUE_STATUSES_RESPONSE,
   EMPTY_ISSUE_STATUS_ENTRY,
   EMPTY_RESOURCE_LABELS_RESPONSE,
-  CreateGitLabConnectionResponseSchema,
-  EMPTY_GITLAB_CONFIG_RESPONSE,
   CreateGitLabProjectResponseSchema,
   EMPTY_GITLAB_JOB_TRACE_RESPONSE,
   EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
   EMPTY_GITLAB_PROJECT_REFRESH_RESPONSE,
-  EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
-  GitLabConfigResponseSchema,
+  EMPTY_LIST_GITLAB_PROJECTS_RESPONSE,
   GitLabJobTraceResponseSchema,
   GitLabMergeRequestDetailsResponseSchema,
   GitLabProjectRefreshResponseSchema,
-  ListGitLabMergeRequestsResponseSchema,
+  ListGitLabProjectsResponseSchema,
   GitHubConnectResponseSchema,
   ListGitHubInstallationsResponseSchema,
   ListGitHubRepositoriesResponseSchema,
@@ -6047,135 +6041,127 @@ export class ApiClient {
     );
   }
 
-  // GitLab integration
-  async getGitLabConfig(workspaceId: string): Promise<GitLabConfigResponse> {
-    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/gitlab/config`);
-    return parseWithFallback(raw, GitLabConfigResponseSchema, EMPTY_GITLAB_CONFIG_RESPONSE, {
-      endpoint: "GET /api/workspaces/:id/gitlab/config",
-    });
-  }
-
-  async createGitLabConnection(
-    workspaceId: string,
-    input: CreateGitLabConnectionRequest,
-  ): Promise<CreateGitLabConnectionResponse> {
-    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/gitlab/connections`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-    const parsed = CreateGitLabConnectionResponseSchema.safeParse(raw);
-    if (!parsed.success) {
-      throw new Error(
-        "Malformed response from POST /api/workspaces/:id/gitlab/connections",
-      );
-    }
-    return parsed.data;
+  // GitLab project bindings belong to VCS connections and are listed through
+  // the same workspace-scoped VCS API as the provider connections.
+  async listGitLabProjects(workspaceId: string): Promise<ListGitLabProjectsResponse> {
+    const raw = await this.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/vcs/gitlab/projects`,
+    );
+    return parseWithFallback(
+      raw,
+      ListGitLabProjectsResponseSchema,
+      EMPTY_LIST_GITLAB_PROJECTS_RESPONSE,
+      { endpoint: "GET /api/workspaces/:id/vcs/gitlab/projects" },
+    );
   }
 
   async createGitLabProject(
     workspaceId: string,
     input: CreateGitLabProjectRequest,
   ): Promise<CreateGitLabProjectResponse> {
-    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/gitlab/projects`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
+    const raw = await this.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/vcs/gitlab/projects`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
     return parseWithFallback(
       raw,
       CreateGitLabProjectResponseSchema,
       EMPTY_CREATE_GITLAB_PROJECT_RESPONSE,
-      { endpoint: "POST /api/workspaces/:id/gitlab/projects" },
+      { endpoint: "POST /api/workspaces/:id/vcs/gitlab/projects" },
     );
   }
 
-  async deleteGitLabProject(workspaceId: string, bindingId: string): Promise<void> {
-    await this.fetch(`/api/workspaces/${workspaceId}/gitlab/projects/${bindingId}`, {
-      method: "DELETE",
-    });
+  async deleteGitLabProject(workspaceId: string, projectId: string): Promise<void> {
+    await this.fetch(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/vcs/gitlab/projects/${encodeURIComponent(projectId)}`,
+      { method: "DELETE" },
+    );
   }
 
   async refreshGitLabProject(
     workspaceId: string,
-    bindingId: string,
+    projectId: string,
   ): Promise<GitLabProjectRefreshResponse> {
     const raw = await this.fetch<unknown>(
-      `/api/workspaces/${workspaceId}/gitlab/projects/${bindingId}/refresh`,
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/vcs/gitlab/projects/${encodeURIComponent(projectId)}/refresh`,
       { method: "POST" },
     );
     return parseWithFallback(
       raw,
       GitLabProjectRefreshResponseSchema,
       EMPTY_GITLAB_PROJECT_REFRESH_RESPONSE,
-      { endpoint: "POST /api/workspaces/:id/gitlab/projects/:bindingId/refresh" },
-    );
-  }
-
-  async listIssueGitLabMergeRequests(issueId: string): Promise<ListGitLabMergeRequestsResponse> {
-    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/gitlab/merge-requests`);
-    return parseWithFallback(
-      raw,
-      ListGitLabMergeRequestsResponseSchema,
-      EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE,
-      { endpoint: "GET /api/issues/:id/gitlab/merge-requests" },
+      { endpoint: "POST /api/workspaces/:id/vcs/gitlab/projects/:projectId/refresh" },
     );
   }
 
   async getGitLabMergeRequestDetails(
     issueId: string,
-    mrId: string,
+    prId: string,
   ): Promise<GitLabMergeRequestDetailsResponse> {
     const raw = await this.fetch<unknown>(
-      `/api/issues/${issueId}/gitlab/merge-requests/${mrId}/details`,
+      `/api/issues/${encodeURIComponent(issueId)}/vcs/pull-requests/${encodeURIComponent(prId)}/gitlab`,
     );
     return parseWithFallback(
       raw,
       GitLabMergeRequestDetailsResponseSchema,
       EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
-      { endpoint: "GET /api/issues/:id/gitlab/merge-requests/:mrId/details" },
+      { endpoint: "GET /api/issues/:issueId/vcs/pull-requests/:prId/gitlab" },
     );
   }
 
   async refreshGitLabMergeRequest(
     issueId: string,
-    mrId: string,
+    prId: string,
   ): Promise<GitLabMergeRequestDetailsResponse> {
     const raw = await this.fetch<unknown>(
-      `/api/issues/${issueId}/gitlab/merge-requests/${mrId}/refresh`,
+      `/api/issues/${encodeURIComponent(issueId)}/vcs/pull-requests/${encodeURIComponent(prId)}/gitlab/refresh`,
       { method: "POST" },
     );
     return parseWithFallback(
       raw,
       GitLabMergeRequestDetailsResponseSchema,
       EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
-      { endpoint: "POST /api/issues/:id/gitlab/merge-requests/:mrId/refresh" },
+      { endpoint: "POST /api/issues/:issueId/vcs/pull-requests/:prId/gitlab/refresh" },
     );
   }
 
   async mergeGitLabMergeRequest(
     issueId: string,
-    mrId: string,
+    prId: string,
   ): Promise<GitLabMergeRequestDetailsResponse> {
     const raw = await this.fetch<unknown>(
-      `/api/issues/${issueId}/gitlab/merge-requests/${mrId}/merge`,
+      `/api/issues/${encodeURIComponent(issueId)}/vcs/pull-requests/${encodeURIComponent(prId)}/gitlab/merge`,
       { method: "POST" },
     );
     return parseWithFallback(
       raw,
       GitLabMergeRequestDetailsResponseSchema,
       EMPTY_GITLAB_MERGE_REQUEST_DETAILS_RESPONSE,
-      { endpoint: "POST /api/issues/:id/gitlab/merge-requests/:mrId/merge" },
+      { endpoint: "POST /api/issues/:issueId/vcs/pull-requests/:prId/gitlab/merge" },
     );
   }
 
-  async getGitLabJobTrace(issueId: string, jobId: string): Promise<GitLabJobTraceResponse> {
-    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/gitlab/jobs/${jobId}/trace`);
-    return parseWithFallback(raw, GitLabJobTraceResponseSchema, EMPTY_GITLAB_JOB_TRACE_RESPONSE, {
-      endpoint: "GET /api/issues/:id/gitlab/jobs/:jobId/trace",
-    });
+  async getGitLabJobTrace(
+    issueId: string,
+    prId: string,
+    jobId: string,
+  ): Promise<GitLabJobTraceResponse> {
+    const raw = await this.fetch<unknown>(
+      `/api/issues/${encodeURIComponent(issueId)}/vcs/pull-requests/${encodeURIComponent(prId)}/gitlab/jobs/${encodeURIComponent(jobId)}/trace`,
+    );
+    return parseWithFallback(
+      raw,
+      GitLabJobTraceResponseSchema,
+      EMPTY_GITLAB_JOB_TRACE_RESPONSE,
+      { endpoint: "GET /api/issues/:issueId/vcs/pull-requests/:prId/gitlab/jobs/:jobId/trace" },
+    );
   }
 
-  gitLabJobArtifactsURL(issueId: string, jobId: string): string {
-    return `${this.baseUrl}/api/issues/${encodeURIComponent(issueId)}/gitlab/jobs/${encodeURIComponent(jobId)}/artifacts`;
+  gitLabJobArtifactsURL(issueId: string, prId: string, jobId: string): string {
+    return `${this.baseUrl}/api/issues/${encodeURIComponent(issueId)}/vcs/pull-requests/${encodeURIComponent(prId)}/gitlab/jobs/${encodeURIComponent(jobId)}/artifacts`;
   }
 
   // Lark integration

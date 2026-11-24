@@ -192,63 +192,81 @@ func (s *ChatWakeupService) prepareGitLabChatCondition(ctx context.Context, work
 	return preparation, nil
 }
 
+func resolveGitLabMigrationAliasTx(ctx context.Context, tx pgx.Tx, workspaceID, id pgtype.UUID, entityKind string, required bool) (pgtype.UUID, error) {
+	var unifiedID pgtype.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT unified_id FROM vcs_gitlab_migration_id_map
+		WHERE workspace_id=$1 AND entity_kind=$2 AND legacy_id=$3
+	`, workspaceID, entityKind, id).Scan(&unifiedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if required {
+			return pgtype.UUID{}, badChatCondition(fmt.Sprintf("GitLab legacy %s alias is unavailable in this workspace", entityKind))
+		}
+		return id, nil
+	}
+	return unifiedID, err
+}
+
+func canonicalGitLabWakeupTargetTx(ctx context.Context, tx pgx.Tx, target vcs.GitLabWakeupTarget) (vcs.GitLabWakeupTarget, error) {
+	workspaceID, err := util.ParseUUID(target.WorkspaceID)
+	if err != nil {
+		return vcs.GitLabWakeupTarget{}, badChatCondition("GitLab wakeup workspace is invalid")
+	}
+	connectionID, err := util.ParseUUID(target.ConnectionID)
+	if err != nil {
+		return vcs.GitLabWakeupTarget{}, badChatCondition("GitLab wakeup connection is invalid")
+	}
+	mergeRequestID, err := util.ParseUUID(target.MergeRequestID)
+	if err != nil {
+		return vcs.GitLabWakeupTarget{}, badChatCondition("GitLab wakeup merge request is invalid")
+	}
+	switch target.Source {
+	case vcs.GitLabWakeupSourceWorkspaceConnection:
+		connectionID, err = resolveGitLabMigrationAliasTx(ctx, tx, workspaceID, connectionID, "connection", true)
+		if err != nil {
+			return vcs.GitLabWakeupTarget{}, err
+		}
+		mergeRequestID, err = resolveGitLabMigrationAliasTx(ctx, tx, workspaceID, mergeRequestID, "pull_request", true)
+		if err != nil {
+			return vcs.GitLabWakeupTarget{}, err
+		}
+	case vcs.GitLabWakeupSourceVCSConnection:
+	default:
+		return vcs.GitLabWakeupTarget{}, badChatCondition("GitLab wakeup source is invalid")
+	}
+	target.Source = vcs.GitLabWakeupSourceVCSConnection
+	target.ConnectionID = util.UUIDToString(connectionID)
+	target.MergeRequestID = util.UUIDToString(mergeRequestID)
+	return target, nil
+}
+
 func resolveGitLabChatTarget(ctx context.Context, tx pgx.Tx, workspaceID pgtype.UUID, condition ChatWakeupCondition) (vcs.GitLabWakeupTarget, error) {
 	connectionID, err := util.ParseUUID(condition.ConnectionID)
 	if err != nil {
 		return vcs.GitLabWakeupTarget{}, badChatCondition("GitLab pull_request conditions require a valid connection_id")
 	}
-	var hasVCSConnection, hasWorkspaceConnection bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM vcs_connection
-			WHERE workspace_id=$1 AND id=$2 AND provider='gitlab'
-		)`,
-		workspaceID, connectionID,
-	).Scan(&hasVCSConnection); err != nil {
-		return vcs.GitLabWakeupTarget{}, err
-	}
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM gitlab_connection
-			WHERE workspace_id=$1 AND id=$2
-		)`,
-		workspaceID, connectionID,
-	).Scan(&hasWorkspaceConnection); err != nil {
-		return vcs.GitLabWakeupTarget{}, err
-	}
-	if hasVCSConnection && hasWorkspaceConnection {
-		return vcs.GitLabWakeupTarget{}, badChatCondition("GitLab connection_id is ambiguous in this workspace; choose one connection source")
-	}
-	if !hasVCSConnection && !hasWorkspaceConnection {
-		return vcs.GitLabWakeupTarget{}, badChatCondition("GitLab connection_id was not found in this workspace; run 'multica chat wakeup connections' to list available IDs")
-	}
-
-	var source vcs.GitLabWakeupSource
-	var mergeRequestID, repository string
 	switch {
-	case hasVCSConnection:
-		err = tx.QueryRow(ctx, `
-			SELECT id::text, repo_owner || '/' || repo_name FROM vcs_pull_request
-			WHERE workspace_id=$1 AND connection_id=$2 AND provider='gitlab'
-			  AND lower(repo_owner || '/' || repo_name)=lower($3) AND pr_number=$4
-		`,
-			workspaceID, connectionID, condition.Repo, int32(condition.Number),
-		).Scan(&mergeRequestID, &repository)
-		source = vcs.GitLabWakeupSourceVCSConnection
-	case hasWorkspaceConnection:
-		err = tx.QueryRow(ctx, `
-			SELECT mr.id::text, pb.path_with_namespace FROM gitlab_merge_request mr
-			JOIN gitlab_project_binding pb
-			  ON pb.workspace_id=mr.workspace_id AND pb.id=mr.project_binding_id
-			JOIN gitlab_connection gc
-			  ON gc.workspace_id=pb.workspace_id AND gc.id=pb.connection_id
-			WHERE mr.workspace_id=$1 AND pb.connection_id=$2
-			  AND lower(pb.path_with_namespace)=lower($3) AND mr.mr_iid=$4
-		`,
-			workspaceID, connectionID, condition.Repo, int32(condition.Number),
-		).Scan(&mergeRequestID, &repository)
-		source = vcs.GitLabWakeupSourceWorkspaceConnection
+	case condition.GitLab == nil:
+		connectionID, err = resolveGitLabMigrationAliasTx(ctx, tx, workspaceID, connectionID, "connection", false)
+	case condition.GitLab.Source == vcs.GitLabWakeupSourceWorkspaceConnection:
+		connectionID, err = resolveGitLabMigrationAliasTx(ctx, tx, workspaceID, connectionID, "connection", true)
+	case condition.GitLab.Source == vcs.GitLabWakeupSourceVCSConnection:
+	case condition.GitLab.Source != "":
+		return vcs.GitLabWakeupTarget{}, badChatCondition("GitLab wakeup source is invalid")
 	}
+	if err != nil {
+		return vcs.GitLabWakeupTarget{}, err
+	}
+	var mergeRequestID, repository string
+	err = tx.QueryRow(ctx, `
+		SELECT pr.id::text, pr.repo_owner || '/' || pr.repo_name
+		FROM vcs_connection vc
+		JOIN vcs_pull_request pr
+		  ON pr.workspace_id=vc.workspace_id AND pr.connection_id=vc.id
+		 AND pr.provider='gitlab'
+		WHERE vc.workspace_id=$1 AND vc.id=$2 AND vc.provider='gitlab'
+		  AND lower(pr.repo_owner || '/' || pr.repo_name)=lower($3) AND pr.pr_number=$4
+	`, workspaceID, connectionID, condition.Repo, int32(condition.Number)).Scan(&mergeRequestID, &repository)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return vcs.GitLabWakeupTarget{}, badChatCondition(fmt.Sprintf(
 			"GitLab merge request %s!%d is not mirrored for connection %s; sync the project or choose an available target",
@@ -259,8 +277,8 @@ func resolveGitLabChatTarget(ctx context.Context, tx pgx.Tx, workspaceID pgtype.
 		return vcs.GitLabWakeupTarget{}, err
 	}
 	return vcs.GitLabWakeupTarget{
-		Source: source, WorkspaceID: util.UUIDToString(workspaceID),
-		ConnectionID: condition.ConnectionID, MergeRequestID: mergeRequestID,
+		Source: vcs.GitLabWakeupSourceVCSConnection, WorkspaceID: util.UUIDToString(workspaceID),
+		ConnectionID: util.UUIDToString(connectionID), MergeRequestID: mergeRequestID,
 		Repository: repository, Number: int32(condition.Number),
 	}, nil
 }
@@ -322,37 +340,20 @@ func loadChatGitLabWakeupSnapshot(ctx context.Context, tx pgx.Tx, target vcs.Git
 	var refreshedAt, pipelineRefreshedAt pgtype.Timestamptz
 	var refreshError, pipelineRefreshError pgtype.Text
 	var err error
-	switch target.Source {
-	case vcs.GitLabWakeupSourceVCSConnection:
-		err = tx.QueryRow(ctx, `
-			SELECT pr.state, pr.head_sha, pr.title, pr.html_url,
-			       pr.status_sync_at, pr.status_sync_error,
-			       pr.pipeline_sync_at, pr.pipeline_sync_error
-			FROM vcs_pull_request pr
-			WHERE pr.workspace_id=$1 AND pr.connection_id=$2 AND pr.id=$3
-			  AND pr.provider='gitlab'
-			  AND lower(pr.repo_owner || '/' || pr.repo_name)=lower($4) AND pr.pr_number=$5
-		`,
-			target.WorkspaceID, target.ConnectionID, target.MergeRequestID, target.Repository, target.Number,
-		).Scan(&snapshot.State, &snapshot.HeadSHA, &snapshot.Title, &snapshot.URL,
-			&refreshedAt, &refreshError, &pipelineRefreshedAt, &pipelineRefreshError)
-	case vcs.GitLabWakeupSourceWorkspaceConnection:
-		err = tx.QueryRow(ctx, `
-			SELECT mr.state, mr.sha, mr.title, mr.web_url,
-			       mr.last_refreshed_at, mr.last_refresh_error,
-			       mr.pipeline_sync_at, mr.pipeline_sync_error
-			FROM gitlab_merge_request mr
-			JOIN gitlab_project_binding pb
-			  ON pb.workspace_id=mr.workspace_id AND pb.id=mr.project_binding_id
-			WHERE mr.workspace_id=$1 AND mr.id=$2 AND pb.connection_id=$3
-			  AND lower(pb.path_with_namespace)=lower($4) AND mr.mr_iid=$5
-		`,
-			target.WorkspaceID, target.MergeRequestID, target.ConnectionID, target.Repository, target.Number,
-		).Scan(&snapshot.State, &snapshot.HeadSHA, &snapshot.Title, &snapshot.URL,
-			&refreshedAt, &refreshError, &pipelineRefreshedAt, &pipelineRefreshError)
-	default:
-		return snapshot, fmt.Errorf("unsupported GitLab wakeup source %q", target.Source)
-	}
+	err = tx.QueryRow(ctx, `
+		SELECT pr.state, pr.head_sha, pr.title, pr.html_url,
+		       pr.status_sync_at, pr.status_sync_error,
+		       pr.pipeline_sync_at, pr.pipeline_sync_error
+		FROM vcs_pull_request pr
+		JOIN vcs_connection vc
+		  ON vc.workspace_id=pr.workspace_id AND vc.id=pr.connection_id AND vc.provider='gitlab'
+		WHERE pr.workspace_id=$1 AND pr.connection_id=$2 AND pr.id::text=$3
+		  AND pr.provider='gitlab'
+		  AND lower(pr.repo_owner || '/' || pr.repo_name)=lower($4) AND pr.pr_number=$5
+	`,
+		target.WorkspaceID, target.ConnectionID, target.MergeRequestID, target.Repository, target.Number,
+	).Scan(&snapshot.State, &snapshot.HeadSHA, &snapshot.Title, &snapshot.URL,
+		&refreshedAt, &refreshError, &pipelineRefreshedAt, &pipelineRefreshError)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return snapshot, errChatConditionPending{msg: "The GitLab merge request is no longer mirrored in this workspace; check the GitLab connection and project binding"}
 	}
@@ -428,44 +429,23 @@ func chatGitLabPipelineMatchesMR(
 }
 
 func loadChatGitLabWakeupPipelines(ctx context.Context, tx pgx.Tx, target vcs.GitLabWakeupTarget, currentHead string) ([]chatGitLabPipelineVersion, error) {
-	var rows pgx.Rows
-	var err error
-	switch target.Source {
-	case vcs.GitLabWakeupSourceVCSConnection:
-		rows, err = tx.Query(ctx, `
-			SELECT p.pipeline_id, p.pipeline_project_id, COALESCE(p.pipeline_project_path, ''),
-			       COALESCE(p.ref, ''), p.sha, p.status, p.pipeline_updated_at,
-			       pr.source_project_id, COALESCE(pr.source_project_path, ''), COALESCE(pr.branch, ''),
-			       0::bigint, pr.repo_owner || '/' || pr.repo_name
-			FROM vcs_gitlab_pipeline p
-			JOIN vcs_pull_request pr ON pr.id=p.pull_request_id
-			WHERE p.workspace_id=$1 AND p.connection_id=$2 AND p.pull_request_id=$3
-			  AND pr.workspace_id=$1 AND pr.connection_id=$2 AND pr.provider='gitlab'
-			  AND lower(pr.repo_owner || '/' || pr.repo_name)=lower($4) AND pr.pr_number=$5
-			ORDER BY p.pipeline_updated_at, p.pipeline_project_id, p.pipeline_id
-		`, target.WorkspaceID, target.ConnectionID, target.MergeRequestID, target.Repository, target.Number)
-	case vcs.GitLabWakeupSourceWorkspaceConnection:
-		rows, err = tx.Query(ctx, `
-			SELECT p.pipeline_id, p.pipeline_project_id,
-			       CASE
-			         WHEN p.pipeline_project_id=mr.gitlab_project_id THEN pb.path_with_namespace
-			         WHEN p.pipeline_project_id=mr.source_project_id THEN COALESCE(mr.source_project_path, '')
-			         ELSE ''
-			       END,
-			       COALESCE(p.ref, ''), p.sha, p.status, p.pipeline_updated_at,
-			       mr.source_project_id, COALESCE(mr.source_project_path, ''), COALESCE(mr.source_branch, ''),
-			       mr.gitlab_project_id, pb.path_with_namespace
-			FROM gitlab_mr_pipeline p
-			JOIN gitlab_merge_request mr ON mr.id=p.merge_request_id
-			JOIN gitlab_project_binding pb
-			  ON pb.workspace_id=mr.workspace_id AND pb.id=mr.project_binding_id
-			WHERE p.merge_request_id=$1 AND mr.workspace_id=$2 AND pb.connection_id=$3
-			  AND lower(pb.path_with_namespace)=lower($4) AND mr.mr_iid=$5
-			ORDER BY p.pipeline_updated_at, p.pipeline_project_id, p.pipeline_id
-		`, target.MergeRequestID, target.WorkspaceID, target.ConnectionID, target.Repository, target.Number)
-	default:
-		return nil, fmt.Errorf("unsupported GitLab wakeup source %q", target.Source)
-	}
+	rows, err := tx.Query(ctx, `
+		SELECT p.pipeline_id, p.pipeline_project_id, COALESCE(p.pipeline_project_path, ''),
+		       COALESCE(p.ref, ''), p.sha, p.status, p.pipeline_updated_at,
+		       pr.source_project_id, COALESCE(pr.source_project_path, ''), COALESCE(pr.branch, ''),
+		       COALESCE(gp.gitlab_project_id, 0), COALESCE(gp.path_with_namespace, pr.repo_owner || '/' || pr.repo_name)
+		FROM vcs_gitlab_pipeline p
+		JOIN vcs_pull_request pr ON pr.id=p.pull_request_id
+		JOIN vcs_connection vc
+		  ON vc.workspace_id=pr.workspace_id AND vc.id=pr.connection_id AND vc.provider='gitlab'
+		LEFT JOIN vcs_gitlab_project gp
+		  ON gp.workspace_id=pr.workspace_id AND gp.connection_id=pr.connection_id
+		 AND lower(gp.path_with_namespace)=lower(pr.repo_owner || '/' || pr.repo_name)
+		WHERE p.workspace_id=$1 AND p.connection_id=$2 AND pr.id::text=$3
+		  AND pr.workspace_id=$1 AND pr.provider='gitlab'
+		  AND lower(pr.repo_owner || '/' || pr.repo_name)=lower($4) AND pr.pr_number=$5
+		ORDER BY p.pipeline_updated_at, p.pipeline_project_id, p.pipeline_id
+	`, target.WorkspaceID, target.ConnectionID, target.MergeRequestID, target.Repository, target.Number)
 	if err != nil {
 		return nil, err
 	}
@@ -687,7 +667,7 @@ func (s *ChatWakeupService) normalizeChatCondition(ctx context.Context, tx pgx.T
 				}
 			}
 			out = ChatWakeupCondition{
-				Type: c.Type, Provider: "gitlab", ConnectionID: c.ConnectionID,
+				Type: c.Type, Provider: "gitlab", ConnectionID: target.ConnectionID,
 				Repo: target.Repository, Number: c.Number, Event: c.Event, GitLab: state,
 			}
 		} else {
@@ -761,11 +741,17 @@ func evaluateGitLabChatCondition(ctx context.Context, tx pgx.Tx, w db.ChatWakeup
 	if c.GitLab == nil || c.ConnectionID == "" || c.GitLab.MergeRequestID == "" {
 		return false, "", nil, errChatConditionPending{msg: "GitLab wakeup identity is incomplete; update the wakeup to select a connection and merge request"}
 	}
-	target := vcs.GitLabWakeupTarget{
+	target, err := canonicalGitLabWakeupTargetTx(ctx, tx, vcs.GitLabWakeupTarget{
 		Source: c.GitLab.Source, WorkspaceID: util.UUIDToString(w.WorkspaceID),
 		ConnectionID: c.ConnectionID, MergeRequestID: c.GitLab.MergeRequestID,
 		Repository: c.Repo, Number: c.Number,
+	})
+	if err != nil {
+		return false, "", nil, errChatConditionPending{msg: "GitLab wakeup identity is unavailable in this workspace"}
 	}
+	c.ConnectionID = target.ConnectionID
+	c.GitLab.Source = target.Source
+	c.GitLab.MergeRequestID = target.MergeRequestID
 	includePipelines := c.Event == "checks_finished"
 	snapshot, err := loadChatGitLabWakeupSnapshot(ctx, tx, target, includePipelines)
 	if err != nil {

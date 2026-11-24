@@ -13,6 +13,10 @@ import enIssues from "../../locales/en/issues.json";
 
 const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
 
+const legacyGitLabList = vi.hoisted(() => vi.fn());
+const gitlabDetailsRequest = vi.hoisted(() => vi.fn());
+const unifiedListFailure = vi.hoisted(() => vi.fn());
+const detailsQueryFailure = vi.hoisted(() => vi.fn());
 vi.mock("@multica/core/github/queries", async () => {
   const actual = await vi.importActual<typeof import("@multica/core/github/queries")>(
     "@multica/core/github/queries",
@@ -21,8 +25,13 @@ vi.mock("@multica/core/github/queries", async () => {
     ...actual,
     issuePullRequestsOptions: (issueId: string) => ({
       queryKey: ["github", "pull-requests", issueId],
-      queryFn: async () => ({ pull_requests: mockPRs, auto_complete: mockAutoComplete }),
-      enabled: !!issueId,
+      queryFn: async () => {
+        if (unifiedListFailure()) throw new Error("shared list failed");
+        return {
+          pull_requests: [...mockPRs, ...mockMRs.map(asListGitLabPR)],
+          auto_complete: mockAutoComplete,
+        };
+      },
     }),
   };
 });
@@ -33,15 +42,20 @@ vi.mock("@multica/core/gitlab/queries", async () => {
   );
   return {
     ...actual,
-    issueGitLabMergeRequestsOptions: (issueId: string) => ({
-      queryKey: ["gitlab", "merge-requests", issueId],
-      queryFn: async () => ({ merge_requests: mockMRs }),
-      enabled: !!issueId,
-    }),
+    issueGitLabMergeRequestsOptions: () => {
+      legacyGitLabList();
+      return {
+        queryKey: ["gitlab", "merge-requests"],
+        queryFn: async () => ({ merge_requests: mockMRs }),
+        enabled: true,
+      };
+    },
     gitlabMergeRequestDetailsOptions: (issueId: string, mrId: string) => ({
-      queryKey: ["gitlab", "merge-request-details", issueId, mrId],
-      queryFn: async () => mockDetails,
-      enabled: !!issueId && !!mrId,
+      queryFn: async () => {
+        gitlabDetailsRequest(issueId, mrId);
+        if (detailsQueryFailure()) throw new Error("details failed");
+        return mockDetails;
+      },
     }),
   };
 });
@@ -50,9 +64,12 @@ const apiMock = vi.hoisted(() => ({
   unlinkIssuePullRequest: vi.fn(),
   linkIssuePullRequest: vi.fn(),
   setIssuePRAutoComplete: vi.fn(),
-  gitLabJobArtifactsURL: (issueId: string, jobId: string) =>
-    `https://api.example.test/api/issues/${issueId}/gitlab/jobs/${jobId}/artifacts`,
+  gitLabJobArtifactsURL: (issueId: string, pullRequestId: string, jobId: string) =>
+    `https://api.example.test/api/issues/${issueId}/vcs/pull-requests/${pullRequestId}/gitlab/jobs/${jobId}/artifacts`,
+  getGitLabJobTrace: vi.fn(),
+  refreshGitLabMergeRequest: vi.fn(),
 }));
+
 vi.mock("@multica/core/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@multica/core/api")>()),
   api: apiMock,
@@ -144,6 +161,36 @@ function makeMR(overrides: Partial<GitLabMergeRequest> = {}): GitLabMergeRequest
   };
 }
 
+function asListGitLabPR(mr: GitLabMergeRequest): GitHubPullRequest {
+  const slash = mr.project_path.lastIndexOf("/");
+  return makePR({
+    id: mr.id,
+    provider: "gitlab",
+    workspace_id: mr.workspace_id,
+    repo_owner: slash < 0 ? "" : mr.project_path.slice(0, slash),
+    repo_name: slash < 0 ? mr.project_path : mr.project_path.slice(slash + 1),
+    number: mr.iid,
+    title: mr.title,
+    state: mr.state,
+    html_url: mr.web_url,
+    branch: mr.source_branch,
+    author_login: mr.author_username,
+    author_avatar_url: mr.author_avatar_url,
+    merged_at: mr.merged_at,
+    closed_at: mr.closed_at,
+    pr_created_at: mr.mr_created_at,
+    pr_updated_at: mr.mr_updated_at,
+    additions: mr.additions,
+    deletions: mr.deletions,
+    changed_files: mr.changed_files,
+    target_branch: mr.target_branch,
+    detailed_merge_status: mr.detailed_merge_status,
+    has_conflicts: mr.has_conflicts,
+    pipeline_status: mr.pipeline_status,
+    pipeline_url: mr.pipeline_url,
+  });
+}
+
 function renderList(issueId = "issue-1", includeGitHub = true) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const result = render(
@@ -163,8 +210,15 @@ async function waitForRender() {
 describe("PullRequestList sidebar rows", () => {
   beforeEach(() => {
     mockAutoComplete = null;
+    mockPRs = [];
     mockMRs = [];
+    legacyGitLabList.mockReset();
+    unifiedListFailure.mockReset().mockReturnValue(false);
+    detailsQueryFailure.mockReset().mockReturnValue(false);
+    gitlabDetailsRequest.mockReset();
     mockDetails = { merge_request: makeMR(), approval: null, discussions: [], jobs: [] };
+    apiMock.getGitLabJobTrace.mockReset();
+    apiMock.refreshGitLabMergeRequest.mockReset();
   });
 
   const verdict = () => screen.getByTestId("pull-request-verdict");
@@ -466,13 +520,22 @@ describe("PullRequestList sidebar rows", () => {
     expect(row).not.toHaveClass("rounded-lg", "border", "bg-card");
   });
 
-  it("renders GitHub PRs and GitLab MRs in the same sidebar list", async () => {
-    mockPRs = [makePR({ title: "GitHub fix" })];
-    mockMRs = [
-      makeMR({
+  it("renders provider rows from one unified list query", async () => {
+    mockPRs = [
+      makePR({ title: "GitHub fix" }),
+      makePR({
+        id: "vcs-mr-1",
+        provider: "gitlab",
+        repo_owner: "group",
+        repo_name: "repo",
+        number: 7,
         title: "GitLab feature",
-        source_branch: "feat/gitlab",
+        html_url: "https://gitlab.example.test/group/repo/-/merge_requests/7",
+        branch: "feat/gitlab",
         target_branch: "main",
+        detailed_merge_status: "mergeable",
+        has_conflicts: false,
+        pipeline_status: "passed",
       }),
     ];
     renderList();
@@ -483,14 +546,29 @@ describe("PullRequestList sidebar rows", () => {
     const gitlabRow = screen.getByText("GitLab feature").closest('[data-testid="pull-request-row"]');
     expect(gitlabRow).toHaveTextContent("GitLab");
     expect(gitlabRow).toHaveTextContent("feat/gitlab -> main");
+    expect(legacyGitLabList).not.toHaveBeenCalled();
   });
 
-  it("lists only GitLab MRs when the workspace turns the GitHub PR sidebar off", async () => {
-    mockPRs = [makePR({ title: "Hidden GitHub PR" })];
+  it("keeps non-GitHub providers visible when the GitHub PR sidebar is off", async () => {
+    mockPRs = [
+      makePR({ title: "Hidden GitHub PR" }),
+      makePR({ id: "gitea-1", provider: "gitea", title: "Visible Gitea PR" }),
+      makePR({ id: "forgejo-1", provider: "forgejo", title: "Visible Forgejo PR" }),
+    ];
     mockMRs = [makeMR({ title: "Visible GitLab MR" })];
     renderList("issue-1", false);
     await screen.findByText("Visible GitLab MR");
+    expect(screen.getByText("Visible Gitea PR")).toBeInTheDocument();
+    expect(screen.getByText("Visible Forgejo PR")).toBeInTheDocument();
     expect(screen.queryByText("Hidden GitHub PR")).not.toBeInTheDocument();
+  });
+
+  it("shows a retry action when the unified pull-request list fails", async () => {
+    unifiedListFailure.mockReturnValue(true);
+    renderList();
+    expect(
+      await screen.findByRole("button", { name: "Could not load. Retry" }),
+    ).toBeInTheDocument();
   });
 
   it("sorts mixed GitHub PR and GitLab MR rows by created time descending", async () => {
@@ -594,8 +672,8 @@ describe("PullRequestList sidebar rows", () => {
     expect(screen.queryByText("Merge status unknown")).not.toBeInTheDocument();
   });
 
-  it("expands GitLab merge request details", async () => {
-    mockMRs = [makeMR({ title: "GitLab detail MR" })];
+  it("loads full details and job artifacts through the canonical VCS MR ID", async () => {
+    mockMRs = [makeMR({ id: "vcs-mr-1", title: "GitLab detail MR" })];
     mockDetails = {
       merge_request: mockMRs[0]!,
       approval: {
@@ -634,9 +712,72 @@ describe("PullRequestList sidebar rows", () => {
     fireEvent.click(screen.getByRole("button", { name: "GitLab details" }));
 
     expect(await screen.findByText("1 approval remaining")).toBeInTheDocument();
+    expect(gitlabDetailsRequest).toHaveBeenCalledWith("issue-1", "vcs-mr-1");
     expect(screen.getByText("assert failed")).toBeInTheDocument();
-    expect(screen.getByText("artifacts.zip")).toBeInTheDocument();
     expect(screen.getByText(/Please fix this/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "artifacts.zip" })).toHaveAttribute(
+      "href",
+      "https://api.example.test/api/issues/issue-1/vcs/pull-requests/vcs-mr-1/gitlab/jobs/job-1/artifacts",
+    );
+  });
+  it("shows a retry action when GitLab details fail to load", async () => {
+    mockMRs = [makeMR({ id: "vcs-mr-details-error", title: "Details error MR" })];
+    detailsQueryFailure.mockReturnValue(true);
+    renderList();
+    await screen.findByText("Details error MR");
+    fireEvent.click(screen.getByRole("button", { name: "GitLab details" }));
+    expect(
+      await screen.findByRole("button", { name: "Could not load. Retry" }),
+    ).toBeInTheDocument();
+    expect(gitlabDetailsRequest).toHaveBeenCalledWith(
+      "issue-1",
+      "vcs-mr-details-error",
+    );
+  });
+
+  it("loads a job trace using the canonical VCS MR ID", async () => {
+    const mr = makeMR({ id: "vcs-mr-trace", title: "Trace MR" });
+    mockMRs = [mr];
+    mockDetails = {
+      merge_request: mr,
+      approval: null,
+      discussions: [],
+      jobs: [{
+        id: "job-1",
+        pipeline_id: 77,
+        job_id: 9001,
+        name: "test",
+        status: "failed",
+        allow_failure: false,
+        trace_summary: null,
+      }],
+    };
+    apiMock.getGitLabJobTrace.mockResolvedValue({
+      trace_summary: "trace fetched by canonical ID",
+      trace_truncated: false,
+    });
+    renderList();
+    await screen.findByText("Trace MR");
+    fireEvent.click(screen.getByRole("button", { name: "GitLab details" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Load trace" }));
+
+    expect(await screen.findByText("trace fetched by canonical ID")).toBeInTheDocument();
+    expect(apiMock.getGitLabJobTrace).toHaveBeenCalledWith(
+      "issue-1",
+      "vcs-mr-trace",
+      "job-1",
+    );
+  });
+
+  it("shows a visible retry error when refreshing a GitLab MR fails", async () => {
+    mockMRs = [makeMR({ id: "vcs-mr-refresh-error", title: "Refresh error MR" })];
+    apiMock.refreshGitLabMergeRequest.mockRejectedValueOnce(new Error("denied"));
+    renderList();
+    await screen.findByText("Refresh error MR");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh GitLab merge request" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load. Retry");
   });
 });
 
@@ -647,6 +788,8 @@ describe("PullRequestList auto-complete", () => {
   beforeEach(() => {
     mockAutoComplete = null;
     mockMRs = [];
+    unifiedListFailure.mockReset().mockReturnValue(false);
+    detailsQueryFailure.mockReset().mockReturnValue(false);
     apiMock.unlinkIssuePullRequest.mockReset();
     apiMock.linkIssuePullRequest.mockReset();
     apiMock.setIssuePRAutoComplete.mockReset();

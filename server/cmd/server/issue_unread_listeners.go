@@ -30,6 +30,9 @@ func registerIssueUnreadListeners(bus *events.Bus, queries *db.Queries) {
 }
 
 func markIssueUnreadForRun(ctx context.Context, bus *events.Bus, queries *db.Queries, e events.Event, outcome string) {
+	if !vcsMigrationReady(ctx, queries) {
+		return
+	}
 	payload, ok := e.Payload.(map[string]any)
 	if !ok {
 		return

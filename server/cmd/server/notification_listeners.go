@@ -874,6 +874,9 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 
 	// issue:created — Direct notification to assignee if assignee != actor
 	bus.Subscribe(protocol.EventIssueCreated, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -919,6 +922,9 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 
 	// issue:updated — handle assignee changes, status changes, priority, due date
 	bus.Subscribe(protocol.EventIssueUpdated, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -1124,6 +1130,9 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 	})
 
 	bus.Subscribe(protocol.EventIssueLabelsChanged, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -1134,6 +1143,9 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 
 	// comment:created — notify all subscribers except the commenter
 	bus.Subscribe(protocol.EventCommentCreated, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -1204,6 +1216,9 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 
 	// issue_reaction:added — notify the issue creator
 	bus.Subscribe(protocol.EventIssueReactionAdded, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -1239,6 +1254,9 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 
 	// reaction:added — notify the comment author
 	bus.Subscribe(protocol.EventReactionAdded, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -1281,6 +1299,9 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 
 	// task:failed — notify all subscribers except the agent
 	bus.Subscribe(protocol.EventTaskFailed, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return

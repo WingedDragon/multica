@@ -8,6 +8,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/service"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -25,8 +26,13 @@ var autopilotIssueSync = func(ctx context.Context, svc *service.AutopilotService
 
 // registerAutopilotListeners hooks into issue and task events to keep
 // autopilot runs in sync with their linked issues and tasks.
-func registerAutopilotListeners(bus *events.Bus, svc *service.AutopilotService) {
+func registerAutopilotListeners(bus *events.Bus, svc *service.AutopilotService, gateQueries ...*db.Queries) {
 	ctx := context.Background()
+	var queries *db.Queries
+	if len(gateQueries) > 0 {
+		queries = gateQueries[0]
+	}
+	ready := func() bool { return queries == nil || vcsMigrationReady(ctx, queries) }
 
 	// When an issue with origin_type='autopilot' reaches a terminal status,
 	// update the corresponding autopilot run.
@@ -57,18 +63,21 @@ func registerAutopilotListeners(bus *events.Bus, svc *service.AutopilotService) 
 			status != "cancelled" {
 			return
 		}
+		if !ready() {
+			return
+		}
 		autopilotIssueSync(ctx, svc, issueID)
 	})
 
 	// When a task completes or fails, check if it's an autopilot run_only task.
 	bus.Subscribe(protocol.EventTaskCompleted, func(e events.Event) {
-		syncRunFromTaskEvent(ctx, svc, e)
+		syncRunFromTaskEvent(ctx, svc, e, queries)
 	})
 	bus.Subscribe(protocol.EventTaskFailed, func(e events.Event) {
-		syncRunFromTaskEvent(ctx, svc, e)
+		syncRunFromTaskEvent(ctx, svc, e, queries)
 	})
 	bus.Subscribe(protocol.EventTaskCancelled, func(e events.Event) {
-		syncRunFromTaskEvent(ctx, svc, e)
+		syncRunFromTaskEvent(ctx, svc, e, queries)
 	})
 }
 
@@ -91,7 +100,10 @@ func autopilotIssueIDAndStatus(v any) (string, string, bool) {
 	return id, status, true
 }
 
-func syncRunFromTaskEvent(ctx context.Context, svc *service.AutopilotService, e events.Event) {
+func syncRunFromTaskEvent(ctx context.Context, svc *service.AutopilotService, e events.Event, gateQueries ...*db.Queries) {
+	if len(gateQueries) > 0 && !vcsMigrationReady(ctx, gateQueries[0]) {
+		return
+	}
 	payload, ok := e.Payload.(map[string]any)
 	if !ok {
 		return

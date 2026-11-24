@@ -291,24 +291,14 @@ func (s *IssueWakeupService) syncGitLabConditionTargets(ctx context.Context, can
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT source,connection_id,merge_request_id,repository,number
-		FROM (
-			SELECT 'gitlab_connection'::text AS source,gc.id::text AS connection_id,mr.id::text AS merge_request_id,
-				pb.path_with_namespace AS repository,mr.mr_iid AS number
-			FROM issue_gitlab_merge_request imr
-			JOIN gitlab_merge_request mr ON mr.id=imr.merge_request_id AND mr.workspace_id=imr.workspace_id
-			JOIN gitlab_project_binding pb ON pb.id=mr.project_binding_id AND pb.workspace_id=mr.workspace_id
-				AND pb.gitlab_project_id=mr.gitlab_project_id
-			JOIN gitlab_connection gc ON gc.id=pb.connection_id AND gc.workspace_id=pb.workspace_id
-			WHERE imr.workspace_id=$1 AND imr.issue_id=$2
-			UNION ALL
-			SELECT 'vcs_connection'::text,vc.id::text,pr.id::text,pr.repo_owner||'/'||pr.repo_name,pr.pr_number
-			FROM issue_vcs_pull_request ivpr
-			JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id
-			JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
-			WHERE pr.workspace_id=$1 AND pr.provider='gitlab' AND ivpr.issue_id=$2
-		) targets
-		ORDER BY source,connection_id,merge_request_id`, candidate.WorkspaceID, candidate.IssueID)
+	rows, err := tx.Query(ctx, `SELECT 'vcs_connection'::text AS source,vc.id::text AS connection_id,
+			pr.id::text AS merge_request_id,pr.repo_owner || '/' || pr.repo_name AS repository,pr.pr_number AS number
+		FROM issue_vcs_pull_request ivpr
+		JOIN issue i ON i.id=ivpr.issue_id
+		JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id AND pr.workspace_id=i.workspace_id
+		JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
+		WHERE i.workspace_id=$1 AND ivpr.issue_id=$2
+		ORDER BY connection_id,merge_request_id`, candidate.WorkspaceID, candidate.IssueID)
 	if err != nil {
 		return nil, err
 	}
@@ -582,31 +572,16 @@ func (s *IssueWakeupService) evaluateGitLabPullRequests(ctx context.Context, tx 
 	preservedFacts := make(map[string]struct{})
 	linked, vcsLinked := 0, 0
 	var pending error
-	rows, err := tx.Query(ctx, `SELECT source,connection_id,merge_request_id,repository,instance_url,number,state,head_sha,
-			COALESCE(conflict_head_sha,''),has_conflicts,mr_sync_at,mr_sync_error,pipeline_sync_at,pipeline_sync_error
-		FROM (
-			SELECT 'gitlab_connection'::text AS source,gc.id::text AS connection_id,mr.id::text AS merge_request_id,
-				pb.path_with_namespace AS repository,gc.base_url AS instance_url,mr.mr_iid AS number,mr.state,
-				COALESCE(mr.sha,'') AS head_sha,COALESCE(mr.conflict_sha,'') AS conflict_head_sha,
-				mr.has_conflicts,mr.last_refreshed_at AS mr_sync_at,COALESCE(mr.last_refresh_error,'') AS mr_sync_error,
-				mr.pipeline_sync_at,COALESCE(mr.pipeline_sync_error,'') AS pipeline_sync_error
-			FROM issue_gitlab_merge_request imr
-			JOIN gitlab_merge_request mr ON mr.id=imr.merge_request_id AND mr.workspace_id=imr.workspace_id
-			JOIN gitlab_project_binding pb ON pb.id=mr.project_binding_id AND pb.workspace_id=mr.workspace_id
-				AND pb.gitlab_project_id=mr.gitlab_project_id
-			JOIN gitlab_connection gc ON gc.id=pb.connection_id AND gc.workspace_id=pb.workspace_id
-			WHERE imr.workspace_id=$1 AND imr.issue_id=$2
-			UNION ALL
-			SELECT 'vcs_connection'::text,vc.id::text,pr.id::text,pr.repo_owner||'/'||pr.repo_name,
-				vc.instance_url,pr.pr_number,pr.state,COALESCE(pr.head_sha,''),
-				COALESCE(pr.conflict_head_sha,''),pr.has_conflicts,pr.status_sync_at,COALESCE(pr.status_sync_error,''),
-				pr.pipeline_sync_at,COALESCE(pr.pipeline_sync_error,'')
-			FROM issue_vcs_pull_request ivpr
-			JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id
-			JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
-			WHERE pr.workspace_id=$1 AND pr.provider='gitlab' AND ivpr.issue_id=$2
-		) targets
-		ORDER BY source,connection_id,merge_request_id`, w.WorkspaceID, w.IssueID)
+	rows, err := tx.Query(ctx, `SELECT 'vcs_connection'::text AS source,vc.id::text AS connection_id,pr.id::text AS merge_request_id,
+			pr.repo_owner || '/' || pr.repo_name AS repository,vc.instance_url,pr.pr_number AS number,pr.state,
+			COALESCE(pr.head_sha,''),COALESCE(pr.conflict_head_sha,''),pr.has_conflicts,
+			pr.status_sync_at,COALESCE(pr.status_sync_error,''),pr.pipeline_sync_at,COALESCE(pr.pipeline_sync_error,'')
+		FROM issue_vcs_pull_request ivpr
+		JOIN issue i ON i.id=ivpr.issue_id
+		JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id AND pr.workspace_id=i.workspace_id
+		JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
+		WHERE i.workspace_id=$1 AND pr.provider='gitlab' AND ivpr.issue_id=$2
+		ORDER BY connection_id,merge_request_id`, w.WorkspaceID, w.IssueID)
 	if err != nil {
 		return nil, nil, 0, 0, nil, err
 	}
@@ -717,39 +692,24 @@ func (s *IssueWakeupService) evaluateGitLabPullRequests(ctx context.Context, tx 
 		return facts, preservedFacts, linked, vcsLinked, pending, nil
 	}
 
-	pipelineRows, err := tx.Query(ctx, `SELECT source,connection_id,merge_request_id,pipeline_id,pipeline_project_id,pipeline_project_path,
-			sha,lower(status),pipeline_updated_at
-		FROM (
-			SELECT 'gitlab_connection'::text AS source,gc.id::text AS connection_id,mr.id::text AS merge_request_id,
-				p.pipeline_id,p.pipeline_project_id,
-				CASE WHEN p.pipeline_project_id=mr.gitlab_project_id THEN pb.path_with_namespace
-					WHEN p.pipeline_project_id=mr.source_project_id AND p.ref=mr.source_branch THEN COALESCE(mr.source_project_path,'')
-					ELSE '' END AS pipeline_project_path,
-				p.sha,p.status,p.pipeline_updated_at
-			FROM issue_gitlab_merge_request imr
-			JOIN gitlab_merge_request mr ON mr.id=imr.merge_request_id AND mr.workspace_id=imr.workspace_id
-			JOIN gitlab_project_binding pb ON pb.id=mr.project_binding_id AND pb.workspace_id=mr.workspace_id
-				AND pb.gitlab_project_id=mr.gitlab_project_id
-			JOIN gitlab_connection gc ON gc.id=pb.connection_id AND gc.workspace_id=pb.workspace_id
-			JOIN gitlab_mr_pipeline p ON p.merge_request_id=mr.id AND p.sha=mr.sha AND mr.sha<>''
-				AND (p.pipeline_project_id=mr.gitlab_project_id OR
-					(p.pipeline_project_id=mr.source_project_id AND COALESCE(mr.source_branch,'')<>'' AND p.ref=mr.source_branch))
-			WHERE imr.workspace_id=$1 AND imr.issue_id=$2
-			UNION ALL
-			SELECT 'vcs_connection'::text,vc.id::text,pr.id::text,p.pipeline_id,p.pipeline_project_id,
-				COALESCE(p.pipeline_project_path,''),p.sha,p.status,p.pipeline_updated_at
-			FROM issue_vcs_pull_request ivpr
-			JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id
-			JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
-			JOIN vcs_gitlab_pipeline p ON p.pull_request_id=pr.id AND p.workspace_id=pr.workspace_id
-				AND p.connection_id=vc.id AND p.sha=pr.head_sha AND pr.head_sha<>''
-				AND (lower(p.pipeline_project_path)=lower(pr.repo_owner||'/'||pr.repo_name)
-					OR (p.pipeline_project_id=pr.source_project_id
-						AND lower(p.pipeline_project_path)=lower(COALESCE(pr.source_project_path,''))
-						AND COALESCE(pr.branch,'')<>'' AND p.ref=pr.branch))
-			WHERE pr.workspace_id=$1 AND pr.provider='gitlab' AND ivpr.issue_id=$2
-		) pipelines
-		ORDER BY source,connection_id,merge_request_id,pipeline_id`, w.WorkspaceID, w.IssueID)
+	pipelineRows, err := tx.Query(ctx, `SELECT 'vcs_connection'::text AS source,vc.id::text AS connection_id,
+			pr.id::text AS merge_request_id,p.pipeline_id,p.pipeline_project_id,COALESCE(p.pipeline_project_path,''),
+			p.sha,lower(p.status),p.pipeline_updated_at
+		FROM issue_vcs_pull_request ivpr
+		JOIN issue i ON i.id=ivpr.issue_id
+		JOIN vcs_pull_request pr ON pr.id=ivpr.pull_request_id AND pr.workspace_id=i.workspace_id
+		JOIN vcs_connection vc ON vc.id=pr.connection_id AND vc.workspace_id=pr.workspace_id AND vc.provider='gitlab'
+		JOIN vcs_gitlab_project gp ON gp.workspace_id=pr.workspace_id AND gp.connection_id=vc.id
+			AND gp.path_with_namespace=pr.repo_owner || '/' || pr.repo_name
+		JOIN vcs_gitlab_pipeline p ON p.pull_request_id=pr.id AND p.workspace_id=pr.workspace_id
+			AND p.connection_id=vc.id AND p.sha=pr.head_sha AND pr.head_sha<>''
+			AND ((p.pipeline_project_id=gp.gitlab_project_id
+					AND lower(p.pipeline_project_path)=lower(gp.path_with_namespace))
+				OR (p.pipeline_project_id=pr.source_project_id
+					AND lower(p.pipeline_project_path)=lower(COALESCE(pr.source_project_path,''))
+					AND COALESCE(pr.branch,'')<>'' AND p.ref=pr.branch))
+		WHERE i.workspace_id=$1 AND pr.provider='gitlab' AND ivpr.issue_id=$2
+		ORDER BY connection_id,merge_request_id,p.pipeline_id`, w.WorkspaceID, w.IssueID)
 	if err != nil {
 		return nil, nil, 0, 0, nil, err
 	}
@@ -926,10 +886,11 @@ func (s *IssueWakeupService) evaluateCondition(ctx context.Context, tx pgx.Tx, q
 				COALESCE(SUM(CASE WHEN cs.state='pending' THEN 1 ELSE 0 END),0),
 				COUNT(cs.state)
 			FROM vcs_pull_request pr
-			JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id=pr.id
-			LEFT JOIN vcs_commit_status cs ON cs.connection_id=pr.connection_id AND cs.sha=pr.head_sha AND pr.head_sha<>''
-			WHERE ipr.issue_id=$1
-			GROUP BY pr.id`, w.IssueID)
+		JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id=pr.id
+		JOIN issue i ON i.id=ipr.issue_id AND i.workspace_id=pr.workspace_id
+		LEFT JOIN vcs_commit_status cs ON cs.connection_id=pr.connection_id AND cs.sha=pr.head_sha AND pr.head_sha<>''
+		WHERE ipr.issue_id=$1 AND i.workspace_id=$2
+		GROUP BY pr.id`, w.IssueID, w.WorkspaceID)
 		if err != nil {
 			return false, "", nil, err
 		}

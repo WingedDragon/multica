@@ -665,6 +665,13 @@ func (s *IssueWakeupService) authorizeRun(ctx context.Context, q *db.Queries, is
 // Tick uses the existing scheduler lease. Each config has a row lock as well,
 // so a manual retry or a second server cannot dispatch the same receipt twice.
 func (s *IssueWakeupService) Tick(ctx context.Context) error {
+	ready, err := vcsMigrationAllowsBusinessWrites(ctx, s.Tasks.Queries)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return nil
+	}
 	return s.tick(ctx, nil)
 }
 
@@ -674,6 +681,13 @@ func (s *IssueWakeupService) Tick(ctx context.Context) error {
 // another package's test is still asserting on.
 func (s *IssueWakeupService) TickWorkspaces(ctx context.Context, workspaceIDs ...pgtype.UUID) error {
 	if len(workspaceIDs) == 0 {
+		return nil
+	}
+	ready, err := vcsMigrationAllowsBusinessWrites(ctx, s.Tasks.Queries)
+	if err != nil {
+		return err
+	}
+	if !ready {
 		return nil
 	}
 	return s.tick(ctx, workspaceIDs)

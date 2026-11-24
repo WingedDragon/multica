@@ -114,41 +114,23 @@ func TestChatWakeupCLIGitLabConnectionRequiresGitLabTarget(t *testing.T) {
 		})
 	}
 }
-func TestChatWakeupCLIGitLabConnectionDiscoveryIsWorkspaceScoped(t *testing.T) {
+func TestChatWakeupCLIGitLabConnectionDiscoveryUsesCanonicalWorkspaceConnections(t *testing.T) {
 	const (
-		legacyID        = "44b522ca-5fe6-4ea4-b686-263946524f14"
-		foreignLegacyID = "c92386c7-7abe-41ca-9f57-3772ae567cc4"
-		vcsID           = "a1d4da51-e0f4-436f-8d6c-8ac6a44e0a48"
-		foreignVCSID    = "89a49f14-f32b-43d6-bfb1-e6f330234907"
+		vcsID        = "a1d4da51-e0f4-436f-8d6c-8ac6a44e0a48"
+		foreignVCSID = "89a49f14-f32b-43d6-bfb1-e6f330234907"
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/workspaces/ws/gitlab/config":
-			_ = json.NewEncoder(w).Encode(handler.GitLabConfigResponse{
-				Configured:       true,
-				CanManage:        false,
-				BaseURL:          "https://legacy.example",
-				ManualWebhookURL: "https://api.example/gitlab/webhook",
-				Connections: []handler.GitLabConnectionResponse{
-					{ID: legacyID, WorkspaceID: "ws", BaseURL: "https://legacy.example", Host: "legacy.example"},
-					{ID: foreignLegacyID, WorkspaceID: "other-workspace", BaseURL: "https://foreign.example", Host: "foreign.example"},
-				},
-				Projects: []handler.GitLabProjectBindingResponse{
-					{WorkspaceID: "ws", PathWithNamespace: "private/local-project"},
-					{WorkspaceID: "other-workspace", PathWithNamespace: "private/foreign-project"},
-				},
-			})
-		case "/api/workspaces/ws/vcs/connections":
-			_ = json.NewEncoder(w).Encode(struct {
-				Connections []handler.VCSConnectionResponse `json:"connections"`
-			}{Connections: []handler.VCSConnectionResponse{
-				{ID: vcsID, WorkspaceID: "ws", Provider: "gitlab", InstanceURL: "https://vcs.example"},
-				{ID: "forgejo-id", WorkspaceID: "ws", Provider: "forgejo", InstanceURL: "https://forgejo.example"},
-				{ID: foreignVCSID, WorkspaceID: "other-workspace", Provider: "gitlab", InstanceURL: "https://foreign-vcs.example"},
-			}})
-		default:
+		if r.URL.Path != "/api/workspaces/ws/vcs/connections" {
 			http.NotFound(w, r)
+			return
 		}
+		_ = json.NewEncoder(w).Encode(struct {
+			Connections []handler.VCSConnectionResponse `json:"connections"`
+		}{Connections: []handler.VCSConnectionResponse{
+			{ID: vcsID, WorkspaceID: "ws", Provider: "gitlab", InstanceURL: "https://vcs.example"},
+			{ID: "forgejo-id", WorkspaceID: "ws", Provider: "forgejo", InstanceURL: "https://forgejo.example"},
+			{ID: foreignVCSID, WorkspaceID: "other-workspace", Provider: "gitlab", InstanceURL: "https://foreign-vcs.example"},
+		}})
 	}))
 	defer server.Close()
 	rows, err := listChatWakeupGitLabConnections(context.Background(), &cli.APIClient{
@@ -159,16 +141,12 @@ func TestChatWakeupCLIGitLabConnectionDiscoveryIsWorkspaceScoped(t *testing.T) {
 	}
 	want := []map[string]any{
 		{
-			"id": legacyID, "provider": "gitlab", "source": "gitlab_connection",
-			"instance_url": "https://legacy.example", "host": "legacy.example",
-		},
-		{
 			"id": vcsID, "provider": "gitlab", "source": "vcs_connection",
 			"instance_url": "https://vcs.example",
 		},
 	}
 	if !reflect.DeepEqual(rows, want) {
-		t.Fatalf("GitLab connections = %#v, want workspace-scoped, secret-free IDs %#v", rows, want)
+		t.Fatalf("GitLab connections = %#v, want workspace-scoped canonical IDs %#v", rows, want)
 	}
 	for _, row := range rows {
 		if _, ok := row["projects"]; ok {

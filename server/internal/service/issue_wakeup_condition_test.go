@@ -731,21 +731,27 @@ func TestWakeupConditionPullRequestMergedCoversVCSProviders(t *testing.T) {
 // linkVCSPR links a self-hosted VCS pull request to issue and returns its id.
 func linkVCSPR(t *testing.T, f principalFixture, issue pgtype.UUID, connection, provider string, number int, head string) string {
 	t.Helper()
+	projectID := int64(number + 10000)
 	if provider == "gitlab" {
 		instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
 		f.Exec(t, `INSERT INTO vcs_connection(id,workspace_id,provider,instance_url,account_login,access_token_encrypted,webhook_secret_encrypted)
 			VALUES($1,$2,'gitlab',$3,'fixture','encrypted-token','encrypted-secret')`,
 			connection, f.WorkspaceID, instanceURL)
 		f.Cleanup(t, "DELETE FROM vcs_connection WHERE id=$1", connection)
+		f.Exec(t, `INSERT INTO vcs_gitlab_project(workspace_id,connection_id,gitlab_project_id,path_with_namespace,web_url,hook_enabled)
+			VALUES($1,$2,$3,'selfhosted/wakeup-test',$4,false)`,
+			f.WorkspaceID, connection, projectID, instanceURL+"/selfhosted/wakeup-test")
+		f.Cleanup(t, "DELETE FROM vcs_gitlab_project WHERE workspace_id=$1 AND connection_id=$2 AND gitlab_project_id=$3",
+			f.WorkspaceID, connection, projectID)
 	}
 	var pr string
 	if err := f.Pool.QueryRow(context.Background(), `INSERT INTO vcs_pull_request(
 			workspace_id,connection_id,provider,repo_owner,repo_name,pr_number,title,state,html_url,pr_created_at,pr_updated_at,
 			head_sha,source_project_id,source_project_path,status_sync_at)
 		VALUES($1,$2,$3,'selfhosted','wakeup-test',$4,'PR','open','https://vcs.example.test/pr',now(),now(),$5,
-			CASE WHEN $3='gitlab' THEN 1::bigint END,CASE WHEN $3='gitlab' THEN 'selfhosted/wakeup-test' END,
+			CASE WHEN $3='gitlab' THEN $6::bigint END,CASE WHEN $3='gitlab' THEN 'selfhosted/wakeup-test' END,
 			CASE WHEN $3='gitlab' THEN now() END) RETURNING id`,
-		f.WorkspaceID, connection, provider, number, head).Scan(&pr); err != nil {
+		f.WorkspaceID, connection, provider, number, head, projectID).Scan(&pr); err != nil {
 		t.Fatal(err)
 	}
 	f.Cleanup(t, "DELETE FROM issue_vcs_pull_request WHERE pull_request_id=$1", pr)
@@ -763,17 +769,11 @@ func (f conditionGitLabWakeupSyncFunc) SyncGitLabWakeupTarget(ctx context.Contex
 }
 
 func installConditionGitLabSyncer(t *testing.T, s *IssueWakeupService, f principalFixture, observe func(vcs.GitLabWakeupTarget)) {
-	t.Helper()
 	s.Tasks.GitLabWakeupSyncer = conditionGitLabWakeupSyncFunc(func(ctx context.Context, target vcs.GitLabWakeupTarget) error {
 		if observe != nil {
 			observe(target)
 		}
-		switch target.Source {
-		case vcs.GitLabWakeupSourceWorkspaceConnection:
-			f.Exec(t, "UPDATE gitlab_merge_request SET last_refreshed_at=now(),last_refresh_error=NULL,pipeline_sync_at=now(),pipeline_sync_error=NULL WHERE id=$1 AND workspace_id=$2", target.MergeRequestID, target.WorkspaceID)
-		case vcs.GitLabWakeupSourceVCSConnection:
-			f.Exec(t, "UPDATE vcs_pull_request SET status_sync_at=now(),status_sync_error=NULL,pipeline_sync_at=now(),pipeline_sync_error=NULL WHERE id=$1 AND workspace_id=$2", target.MergeRequestID, target.WorkspaceID)
-		}
+		f.Exec(t, "UPDATE vcs_pull_request SET status_sync_at=now(),status_sync_error=NULL,pipeline_sync_at=now(),pipeline_sync_error=NULL WHERE id=$1 AND workspace_id=$2", target.MergeRequestID, target.WorkspaceID)
 		return nil
 	})
 }
@@ -793,58 +793,28 @@ func newConnection(t *testing.T, f principalFixture) string {
 	return id
 }
 
-func newConditionGitLabConnection(t *testing.T, f principalFixture) (string, string) {
-	t.Helper()
-	id := newConnection(t, f)
-	host := strings.ReplaceAll(id, "-", "") + ".gitlab.example.test"
-	_, err := f.q.UpsertGitLabConnection(context.Background(), db.UpsertGitLabConnectionParams{
-		WorkspaceID:   parseTestUUID(t, f.WorkspaceID),
-		BaseUrl:       "https://" + host,
-		Host:          host,
-		ConnectedByID: parseTestUUID(t, f.UserID),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var connection string
-	if err := f.Pool.QueryRow(context.Background(), "SELECT id::text FROM gitlab_connection WHERE workspace_id=$1 AND host=$2", f.WorkspaceID, host).Scan(&connection); err != nil {
-		t.Fatal(err)
-	}
-	f.Cleanup(t, "DELETE FROM gitlab_connection WHERE id=$1", connection)
-	return connection, host
-}
-
-func linkConditionGitLabMR(t *testing.T, f principalFixture, issue pgtype.UUID, connection, repository string, projectID int64, number int, state, head string) string {
-	t.Helper()
-	ctx := context.Background()
-	var binding string
-	if err := f.Pool.QueryRow(ctx, `INSERT INTO gitlab_project_binding(workspace_id,connection_id,gitlab_project_id,path_with_namespace,web_url,hook_enabled)
-		VALUES($1,$2,$3,$4,$5,false) RETURNING id::text`,
-		f.WorkspaceID, connection, projectID, repository, "https://gitlab.example.test/"+repository).Scan(&binding); err != nil {
-		t.Fatal(err)
-	}
-	var mr string
-	if err := f.Pool.QueryRow(ctx, `INSERT INTO gitlab_merge_request(
-		workspace_id,project_binding_id,gitlab_project_id,mr_iid,title,state,web_url,sha,mr_created_at,mr_updated_at,last_refreshed_at,source_project_id,source_project_path
-	) VALUES($1,$2,$3,$4,'MR',$5,$6,$7,now(),now(),now(),$3,$8) RETURNING id::text`,
-		f.WorkspaceID, binding, projectID, number, state, "https://gitlab.example.test/"+repository+"/-/merge_requests/1", head, repository).Scan(&mr); err != nil {
-		t.Fatal(err)
-	}
-	f.Exec(t, "INSERT INTO issue_gitlab_merge_request(workspace_id,issue_id,merge_request_id) VALUES($1,$2,$3)", f.WorkspaceID, issue, mr)
-	return mr
-}
-
 func linkConditionVCSGitLabMR(t *testing.T, f principalFixture, issue pgtype.UUID, connection, instanceURL, repository string, projectID int64, number int, state, head string) string {
 	t.Helper()
 	ctx := context.Background()
-	f.Exec(t, `INSERT INTO vcs_connection(id,workspace_id,provider,instance_url,account_login,access_token_encrypted,webhook_secret_encrypted)
-		VALUES($1,$2,'gitlab',$3,'fixture','encrypted-token','encrypted-secret')`, connection, f.WorkspaceID, instanceURL)
-	f.Cleanup(t, "DELETE FROM vcs_connection WHERE id=$1", connection)
+	var exists bool
+	if err := f.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM vcs_connection WHERE id=$1 AND workspace_id=$2)", connection, f.WorkspaceID).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		f.Exec(t, `INSERT INTO vcs_connection(id,workspace_id,provider,instance_url,account_login,access_token_encrypted,webhook_secret_encrypted)
+			VALUES($1,$2,'gitlab',$3,'fixture','encrypted-token','encrypted-secret')`, connection, f.WorkspaceID, instanceURL)
+		f.Cleanup(t, "DELETE FROM vcs_connection WHERE id=$1", connection)
+	}
 	slash := strings.LastIndex(repository, "/")
 	if slash < 1 || slash == len(repository)-1 {
 		t.Fatalf("repository path must include group and project: %q", repository)
 	}
 	owner, name := repository[:slash], repository[slash+1:]
+	f.Exec(t, `INSERT INTO vcs_gitlab_project(workspace_id,connection_id,gitlab_project_id,path_with_namespace,web_url,hook_enabled)
+		VALUES($1,$2,$3,$4,$5,false)`,
+		f.WorkspaceID, connection, projectID, repository, instanceURL+"/"+repository)
+	f.Cleanup(t, "DELETE FROM vcs_gitlab_project WHERE workspace_id=$1 AND connection_id=$2 AND gitlab_project_id=$3",
+		f.WorkspaceID, connection, projectID)
 	var pr string
 	if err := f.Pool.QueryRow(ctx, `INSERT INTO vcs_pull_request(
 		workspace_id,connection_id,provider,repo_owner,repo_name,pr_number,title,state,html_url,pr_created_at,pr_updated_at,head_sha,status_sync_at,source_project_id,source_project_path
@@ -857,24 +827,6 @@ func linkConditionVCSGitLabMR(t *testing.T, f principalFixture, issue pgtype.UUI
 	f.Cleanup(t, "DELETE FROM vcs_pull_request WHERE id=$1", pr)
 	f.Exec(t, "INSERT INTO issue_vcs_pull_request(issue_id,pull_request_id) VALUES($1,$2)", issue, pr)
 	return pr
-}
-
-func setGitLabMRConflict(t *testing.T, f principalFixture, mr, head string, hasConflicts *bool, conflictHead string) {
-	t.Helper()
-	f.Exec(t, `UPDATE gitlab_merge_request
-		SET sha=$2,has_conflicts=$3,conflict_sha=$4,last_refreshed_at=now(),last_refresh_error=NULL
-		WHERE id=$1`, mr, head, hasConflicts, conflictHead)
-}
-
-func setGitLabPipeline(t *testing.T, f principalFixture, mr string, id int64, sha, status string, updatedAt time.Time) {
-	t.Helper()
-	f.Exec(t, `INSERT INTO gitlab_mr_pipeline(merge_request_id,pipeline_id,pipeline_project_id,ref,sha,status,pipeline_updated_at)
-		SELECT mr.id,$2,mr.source_project_id,COALESCE(mr.source_branch,''),$3,$4,$5
-		FROM gitlab_merge_request mr WHERE mr.id=$1
-		ON CONFLICT(merge_request_id,pipeline_id) DO UPDATE SET
-			pipeline_project_id=EXCLUDED.pipeline_project_id,ref=EXCLUDED.ref,sha=EXCLUDED.sha,
-			status=EXCLUDED.status,pipeline_updated_at=EXCLUDED.pipeline_updated_at`,
-		mr, id, sha, status, updatedAt)
 }
 
 func setVCSGitLabPipeline(t *testing.T, f principalFixture, pr string, id int64, sha, status string, updatedAt time.Time) {
@@ -891,7 +843,10 @@ func setVCSGitLabPipeline(t *testing.T, f principalFixture, pr string, id int64,
 		workspace_id,connection_id,pull_request_id,pipeline_id,pipeline_project_id,pipeline_project_path,sha,ref,status,web_url,pipeline_updated_at
 	)
 	SELECT workspace_id,connection_id,id,$2,COALESCE(source_project_id,0),
-		COALESCE(source_project_path,repo_owner||'/'||repo_name),$3,COALESCE(branch,''),$4,NULL,$5
+		COALESCE(source_project_path,repo_owner||'/'||repo_name),
+		$3,
+		CASE WHEN COALESCE(branch,'')='' THEN 'refs/merge-requests/'||pr_number||'/head' ELSE branch END,
+		$4,NULL,$5
 	FROM vcs_pull_request WHERE id=$1
 	ON CONFLICT(pull_request_id,pipeline_project_path,pipeline_id) DO UPDATE SET
 		pipeline_project_id=EXCLUDED.pipeline_project_id,sha=EXCLUDED.sha,ref=EXCLUDED.ref,
@@ -1051,23 +1006,18 @@ func finishConditionWakeupRuns(t *testing.T, f principalFixture, wakeupID pgtype
 	f.Exec(t, "UPDATE agent_task_queue SET status='completed',completed_at=now() WHERE context->>'wakeup_id'=$1 AND status<>'completed'", util.UUIDToString(wakeupID))
 }
 
-func TestWakeupConditionGitLabMergedDeduplicatesMirrorsAndSyncsOutsideTransaction(t *testing.T) {
+func TestWakeupConditionGitLabMergeSyncsCanonicalTargetOutsideTransaction(t *testing.T) {
 	f, s, issue, agent := conditionFixture(t)
+	connection := newConnection(t, f)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
 	repository := "group/subgroup/project"
-	gitlabConnection, host := newConditionGitLabConnection(t, f)
-	gitlabMergeRequest := linkConditionGitLabMR(t, f, issue, gitlabConnection, repository, 901, 7, "merged", "head")
-	vcsConnection := newConnection(t, f)
-	vcsMergeRequest := linkConditionVCSGitLabMR(t, f, issue, vcsConnection, "https://"+host, repository, 901, 7, "merged", "head")
+	mr := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, repository, 901, 7, "merged", "head")
+	f.Exec(t, "DELETE FROM vcs_gitlab_project WHERE workspace_id=$1 AND connection_id=$2", f.WorkspaceID, connection)
+	f.Exec(t, "UPDATE vcs_pull_request SET pipeline_sync_at=now(),pipeline_sync_error='source project CI API unavailable' WHERE id=$1", mr)
 
-	f.Exec(t, "UPDATE gitlab_merge_request SET pipeline_sync_at=now(),pipeline_sync_error='source project CI API unavailable' WHERE id=$1", gitlabMergeRequest)
-	f.Exec(t, "UPDATE vcs_pull_request SET pipeline_sync_at=now(),pipeline_sync_error='source project CI API unavailable' WHERE id=$1", vcsMergeRequest)
-
-	targets := make(chan vcs.GitLabWakeupTarget, 16)
-	targetLock := make(chan struct{}, 1)
+	targets := make(chan vcs.GitLabWakeupTarget, 8)
 	s.Tasks.GitLabWakeupSyncer = conditionGitLabWakeupSyncFunc(func(ctx context.Context, target vcs.GitLabWakeupTarget) error {
 		targets <- target
-		targetLock <- struct{}{}
-		defer func() { <-targetLock }()
 		tx, err := f.Pool.Begin(ctx)
 		if err != nil {
 			return err
@@ -1080,147 +1030,114 @@ func TestWakeupConditionGitLabMergedDeduplicatesMirrorsAndSyncsOutsideTransactio
 		if err = tx.Commit(ctx); err != nil {
 			return err
 		}
-		switch target.Source {
-		case vcs.GitLabWakeupSourceWorkspaceConnection:
-			f.Exec(t, "UPDATE gitlab_merge_request SET last_refreshed_at=now(),last_refresh_error=NULL WHERE id=$1", target.MergeRequestID)
-		case vcs.GitLabWakeupSourceVCSConnection:
-			f.Exec(t, "UPDATE vcs_pull_request SET status_sync_at=now(),status_sync_error=NULL WHERE id=$1", target.MergeRequestID)
-		}
+		f.Exec(t, "UPDATE vcs_pull_request SET status_sync_at=now(),status_sync_error=NULL WHERE id=$1", target.MergeRequestID)
 		return nil
 	})
-	assertTargets := func(phase string) {
-		observed := make([]vcs.GitLabWakeupTarget, 0, 2)
-		for len(targets) > 0 {
-			observed = append(observed, <-targets)
-		}
-		sources := map[vcs.GitLabWakeupSource]bool{}
-		for _, target := range observed {
-			if target.Repository != repository || target.Number != 7 {
-				t.Fatalf("%s sync target lost full GitLab MR identity: %+v", phase, target)
-			}
-			sources[target.Source] = true
-		}
-		if len(observed) != 2 || !sources[vcs.GitLabWakeupSourceWorkspaceConnection] || !sources[vcs.GitLabWakeupSourceVCSConnection] {
-			t.Fatalf("%s did not sync both linked mirrors exactly once: %+v", phase, observed)
-		}
-	}
+
 	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous", Instruction: "Note the merge",
 		Condition: condition(t, map[string]any{"type": "pull_request", "event": "merged"})})
-	assertTargets("post-save")
 	got := wakeTick(t, f, s, w.ID)
-	if n := wakeRuns(t, f, w.ID); n != 1 {
-		t.Fatalf("a mirrored merged MR started %d runs, want one", n)
+	if n := wakeRuns(t, f, w.ID); n != 1 || got.LastError.Valid {
+		t.Fatalf("merged canonical GitLab MR started %d runs (error %+v), want one", n, got.LastError)
 	}
-	if !got.Enabled || got.LastError.Valid {
-		t.Fatalf("merged mirror condition: enabled=%t error=%+v", got.Enabled, got.LastError)
+	observed := make([]vcs.GitLabWakeupTarget, 0, len(targets))
+	for len(targets) > 0 {
+		observed = append(observed, <-targets)
 	}
-	assertTargets("scheduler")
+	if len(observed) == 0 {
+		t.Fatal("GitLab MR was not synchronized before evaluation")
+	}
+	for _, target := range observed {
+		if target.Source != vcs.GitLabWakeupSourceVCSConnection ||
+			target.WorkspaceID != f.WorkspaceID ||
+			target.ConnectionID != connection || target.MergeRequestID != mr ||
+			target.Repository != repository || target.Number != 7 {
+			t.Fatalf("wakeup sync did not use the canonical workspace-scoped MR: %+v", target)
+		}
+	}
 	finishConditionWakeupRuns(t, f, w.ID)
 	wakeTick(t, f, s, w.ID)
 	if n := wakeRuns(t, f, w.ID); n != 1 {
-		t.Fatalf("duplicate mirrors re-fired the same merge, runs=%d", n)
+		t.Fatalf("repeated merge evaluation started %d runs, want one", n)
 	}
 }
 
 func TestWakeupConditionGitLabConflictRequiresCurrentHeadAndKeepsFingerprintAcrossUnknown(t *testing.T) {
-	for _, source := range []string{"gitlab_connection", "vcs_connection"} {
-		t.Run(source, func(t *testing.T) {
-			f, s, issue, agent := conditionFixture(t)
-			var mr string
-			if source == "gitlab_connection" {
-				connection, _ := newConditionGitLabConnection(t, f)
-				mr = linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project", 902, 8, "open", "head-a")
-			} else {
-				connection := newConnection(t, f)
-				instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
-				mr = linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 902, 8, "open", "head-a")
-			}
-			setConflict := func(head string, known *bool, conflictHead string) {
-				if source == "gitlab_connection" {
-					setGitLabMRConflict(t, f, mr, head, known, conflictHead)
-				} else {
-					setVCSGitLabConflict(t, f, mr, head, known, conflictHead)
-				}
-			}
-			s.Tasks.GitLabWakeupSyncer = conditionGitLabWakeupSyncFunc(func(context.Context, vcs.GitLabWakeupTarget) error { return nil })
-			if source == "gitlab_connection" {
-				f.Exec(t, "UPDATE gitlab_merge_request SET pipeline_sync_at=now(),pipeline_sync_error='source project CI API unavailable' WHERE id=$1", mr)
-			} else {
-				f.Exec(t, "UPDATE vcs_pull_request SET pipeline_sync_at=now(),pipeline_sync_error='source project CI API unavailable' WHERE id=$1", mr)
-			}
-			w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous", Instruction: "Resolve conflicts",
-				Condition: condition(t, map[string]any{"type": "pull_request", "event": "conflicts"})})
-			got := wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid {
-				t.Fatalf("unknown conflict result started a run or hid its reason: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-			yes := true
-			setConflict("head-a", &yes, "old-head")
-			got = wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid {
-				t.Fatalf("old-head conflict result was accepted: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-			setConflict("head-a", &yes, "head-a")
-			got = wakeTick(t, f, s, w.ID)
-			satisfiedState := got.ConditionState
-			if wakeRuns(t, f, w.ID) != 1 || satisfiedState == "" {
-				t.Fatalf("current-head conflict started %d runs with state %q, want one run and a retained fingerprint", wakeRuns(t, f, w.ID), satisfiedState)
-			}
-			finishConditionWakeupRuns(t, f, w.ID)
-			setConflict("head-a", nil, "")
-			got = wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 1 || !got.LastError.Valid || got.ConditionState != satisfiedState {
-				t.Fatalf("temporary unknown conflict lost its wait reason or fingerprint: runs=%d error=%+v state=%q want %q", wakeRuns(t, f, w.ID), got.LastError, got.ConditionState, satisfiedState)
-			}
-			setConflict("head-a", &yes, "head-a")
-			got = wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 1 || got.LastError.Valid || got.ConditionState != satisfiedState {
-				t.Fatalf("recovered same conflict fired again or kept a stale diagnostic: runs=%d error=%+v state=%q want %q", wakeRuns(t, f, w.ID), got.LastError, got.ConditionState, satisfiedState)
-			}
-			no := false
-			setConflict("head-a", &no, "head-a")
-			wakeTick(t, f, s, w.ID)
-			setConflict("head-a", &yes, "head-a")
-			wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 2 {
-				t.Fatalf("resolved then reappearing conflict started %d runs, want two", wakeRuns(t, f, w.ID))
-			}
-			finishConditionWakeupRuns(t, f, w.ID)
-			setConflict("head-b", &yes, "head-a")
-			got = wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 2 || !got.LastError.Valid {
-				t.Fatalf("old-head verdict leaked onto a new head: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-			setConflict("head-b", &yes, "head-b")
-			wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 3 {
-				t.Fatalf("new-head conflict started %d runs, want three", wakeRuns(t, f, w.ID))
-			}
-		})
+	f, s, issue, agent := conditionFixture(t)
+	connection := newConnection(t, f)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+	mr := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 902, 8, "open", "head-a")
+	s.Tasks.GitLabWakeupSyncer = conditionGitLabWakeupSyncFunc(func(context.Context, vcs.GitLabWakeupTarget) error { return nil })
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous", Instruction: "Resolve conflicts",
+		Condition: condition(t, map[string]any{"type": "pull_request", "event": "conflicts"})})
+	if got := wakeTick(t, f, s, w.ID); wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid {
+		t.Fatalf("unknown conflict result started a run or hid its reason: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+	}
+	yes := true
+	setVCSGitLabConflict(t, f, mr, "head-a", &yes, "old-head")
+	if got := wakeTick(t, f, s, w.ID); wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid {
+		t.Fatalf("old-head conflict result was accepted: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+	}
+	setVCSGitLabConflict(t, f, mr, "head-a", &yes, "head-a")
+	got := wakeTick(t, f, s, w.ID)
+	satisfiedState := got.ConditionState
+	if wakeRuns(t, f, w.ID) != 1 || satisfiedState == "" {
+		t.Fatalf("current-head conflict started %d runs with state %q, want one run and a retained fingerprint", wakeRuns(t, f, w.ID), satisfiedState)
+	}
+	finishConditionWakeupRuns(t, f, w.ID)
+	setVCSGitLabConflict(t, f, mr, "head-a", nil, "")
+	got = wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 1 || !got.LastError.Valid || got.ConditionState != satisfiedState {
+		t.Fatalf("temporary unknown conflict lost its wait reason or fingerprint: runs=%d error=%+v state=%q want %q", wakeRuns(t, f, w.ID), got.LastError, got.ConditionState, satisfiedState)
+	}
+	setVCSGitLabConflict(t, f, mr, "head-a", &yes, "head-a")
+	got = wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 1 || got.LastError.Valid || got.ConditionState != satisfiedState {
+		t.Fatalf("recovered same conflict fired again or kept a stale diagnostic: runs=%d error=%+v state=%q want %q", wakeRuns(t, f, w.ID), got.LastError, got.ConditionState, satisfiedState)
+	}
+	no := false
+	setVCSGitLabConflict(t, f, mr, "head-a", &no, "head-a")
+	wakeTick(t, f, s, w.ID)
+	setVCSGitLabConflict(t, f, mr, "head-a", &yes, "head-a")
+	wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 2 {
+		t.Fatalf("resolved then reappearing conflict started %d runs, want two", wakeRuns(t, f, w.ID))
+	}
+	finishConditionWakeupRuns(t, f, w.ID)
+	setVCSGitLabConflict(t, f, mr, "head-b", &yes, "head-a")
+	got = wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 2 || !got.LastError.Valid {
+		t.Fatalf("old-head verdict leaked onto a new head: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+	}
+	setVCSGitLabConflict(t, f, mr, "head-b", &yes, "head-b")
+	wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 3 {
+		t.Fatalf("new-head conflict started %d runs, want three", wakeRuns(t, f, w.ID))
 	}
 }
 
 func TestWakeupConditionGitLabUnknownMRKeepsFingerprintWhileAnotherMRTriggers(t *testing.T) {
 	f, s, issue, agent := conditionFixture(t)
-	connection, _ := newConditionGitLabConnection(t, f)
-	mrA := linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project-a", 930, 20, "open", "head-a")
-	mrB := linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project-b", 931, 21, "open", "head-b")
+	connection := newConnection(t, f)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+	mrA := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project-a", 930, 20, "open", "head-a")
+	mrB := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project-b", 931, 21, "open", "head-b")
 	yes, no := true, false
-	setGitLabMRConflict(t, f, mrA, "head-a", &no, "head-a")
-	setGitLabMRConflict(t, f, mrB, "head-b", &no, "head-b")
+	setVCSGitLabConflict(t, f, mrA, "head-a", &no, "head-a")
+	setVCSGitLabConflict(t, f, mrB, "head-b", &no, "head-b")
 	s.Tasks.GitLabWakeupSyncer = conditionGitLabWakeupSyncFunc(func(context.Context, vcs.GitLabWakeupTarget) error { return nil })
 	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous", Instruction: "Resolve conflicts",
 		Condition: condition(t, map[string]any{"type": "pull_request", "event": "conflicts"})})
 
-	setGitLabMRConflict(t, f, mrA, "head-a", &yes, "head-a")
+	setVCSGitLabConflict(t, f, mrA, "head-a", &yes, "head-a")
 	got := wakeTick(t, f, s, w.ID)
 	if wakeRuns(t, f, w.ID) != 1 {
 		t.Fatalf("first conflict started %d runs, want one", wakeRuns(t, f, w.ID))
 	}
 	finishConditionWakeupRuns(t, f, w.ID)
 
-	setGitLabMRConflict(t, f, mrA, "head-a", nil, "")
-	setGitLabMRConflict(t, f, mrB, "head-b", &yes, "head-b")
+	setVCSGitLabConflict(t, f, mrA, "head-a", nil, "")
+	setVCSGitLabConflict(t, f, mrB, "head-b", &yes, "head-b")
 	got = wakeTick(t, f, s, w.ID)
 	if wakeRuns(t, f, w.ID) != 2 {
 		t.Fatalf("new known conflict was blocked by an unknown MR: runs=%d", wakeRuns(t, f, w.ID))
@@ -1230,283 +1147,168 @@ func TestWakeupConditionGitLabUnknownMRKeepsFingerprintWhileAnotherMRTriggers(t 
 	}
 	finishConditionWakeupRuns(t, f, w.ID)
 
-	setGitLabMRConflict(t, f, mrA, "head-a", &yes, "head-a")
+	setVCSGitLabConflict(t, f, mrA, "head-a", &yes, "head-a")
 	got = wakeTick(t, f, s, w.ID)
 	if wakeRuns(t, f, w.ID) != 2 {
 		t.Fatalf("recovered old conflict re-fired after another MR triggered: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
 	}
 }
 
-func TestWakeupConditionGitLabChecksFinishedUsesPipelineIdentityAndVersionOnBothSources(t *testing.T) {
-	for _, source := range []string{"gitlab_connection", "vcs_connection"} {
-		t.Run(source, func(t *testing.T) {
-			f, s, issue, agent := conditionFixture(t)
-			var mr string
-			if source == "gitlab_connection" {
-				connection, _ := newConditionGitLabConnection(t, f)
-				mr = linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project", 903, 9, "open", "same-head")
-				setGitLabPipeline(t, f, mr, 1101, "same-head", "success", time.Now().Add(-time.Minute))
-			} else {
-				connection := newConnection(t, f)
-				instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
-				mr = linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 903, 9, "open", "same-head")
-				setVCSGitLabPipeline(t, f, mr, 1101, "same-head", "success", time.Now().Add(-time.Minute))
-			}
-			installConditionGitLabSyncer(t, s, f, nil)
-			w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous", Instruction: "Review CI",
-				Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
-			wakeTick(t, f, s, w.ID)
-			if n := wakeRuns(t, f, w.ID); n != 0 {
-				t.Fatalf("baseline pipeline fired immediately: %d runs", n)
-			}
-			if source == "gitlab_connection" {
-				setGitLabPipeline(t, f, mr, 1102, "same-head", "success", time.Now().Add(time.Second))
-			} else {
-				setVCSGitLabPipeline(t, f, mr, 1102, "same-head", "success", time.Now().Add(time.Second))
-			}
-			got := wakeTick(t, f, s, w.ID)
-			if n := wakeRuns(t, f, w.ID); n != 1 || got.LastError.Valid {
-				t.Fatalf("same-head rerun started %d runs (error %+v), want one", n, got.LastError)
-			}
-			task, err := f.q.GetAgentTask(context.Background(), got.LastTaskID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(task.HandoffNote.String, `"pipeline_id":1102`) || !strings.Contains(task.HandoffNote.String, `"checks":"success"`) {
-				t.Fatalf("pipeline identity/version absent from observed facts: %s", task.HandoffNote.String)
-			}
-			finishConditionWakeupRuns(t, f, w.ID)
-			if source == "gitlab_connection" {
-				setGitLabPipeline(t, f, mr, 1102, "same-head", "success", time.Now().Add(2*time.Second))
-			} else {
-				setVCSGitLabPipeline(t, f, mr, 1102, "same-head", "success", time.Now().Add(2*time.Second))
-			}
-			wakeTick(t, f, s, w.ID)
-			if n := wakeRuns(t, f, w.ID); n != 2 {
-				t.Fatalf("same pipeline's newer terminal version started %d runs, want two", n)
-			}
-		})
-	}
-}
-
-func TestWakeupConditionGitLabChecksWaitForIndependentPipelineRefresh(t *testing.T) {
-	for _, source := range []string{"gitlab_connection", "vcs_connection"} {
-		t.Run(source, func(t *testing.T) {
-			f, s, issue, agent := conditionFixture(t)
-			var mr string
-			if source == "gitlab_connection" {
-				connection, _ := newConditionGitLabConnection(t, f)
-				mr = linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project", 909, 14, "open", "head")
-				setGitLabPipeline(t, f, mr, 1801, "head", "success", time.Now().Add(-time.Minute))
-				f.Exec(t, "UPDATE gitlab_merge_request SET pipeline_sync_at=now(),pipeline_sync_error='source project CI API unavailable' WHERE id=$1", mr)
-			} else {
-				connection := newConnection(t, f)
-				instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
-				mr = linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 909, 14, "open", "head")
-				setVCSGitLabPipeline(t, f, mr, 1801, "head", "success", time.Now().Add(-time.Minute))
-				f.Exec(t, "UPDATE vcs_pull_request SET pipeline_sync_at=now(),pipeline_sync_error='source project CI API unavailable' WHERE id=$1", mr)
-			}
-			s.Tasks.GitLabWakeupSyncer = conditionGitLabWakeupSyncFunc(func(context.Context, vcs.GitLabWakeupTarget) error { return nil })
-			w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Wait for current CI",
-				Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
-			got := wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid {
-				t.Fatalf("failed pipeline refresh fired stale CI or hid its reason: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-			if source == "gitlab_connection" {
-				f.Exec(t, "UPDATE gitlab_merge_request SET pipeline_sync_at=now(),pipeline_sync_error=NULL WHERE id=$1", mr)
-			} else {
-				f.Exec(t, "UPDATE vcs_pull_request SET pipeline_sync_at=now(),pipeline_sync_error=NULL WHERE id=$1", mr)
-			}
-			got = wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 0 || got.LastError.Valid {
-				t.Fatalf("old pipeline triggered after CI sync recovered: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-			newVersion := w.CreatedAt.Time.Add(time.Minute)
-			if source == "gitlab_connection" {
-				setGitLabPipeline(t, f, mr, 1802, "head", "success", newVersion)
-			} else {
-				setVCSGitLabPipeline(t, f, mr, 1802, "head", "success", newVersion)
-			}
-			got = wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 1 || got.LastError.Valid {
-				t.Fatalf("new CI result did not trigger after recovery: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-		})
-	}
-}
-
-func TestWakeupConditionGitLabMirroredPipelinesShareFingerprint(t *testing.T) {
+func TestWakeupConditionGitLabCIUsesPipelineIdentityAndVersion(t *testing.T) {
 	f, s, issue, agent := conditionFixture(t)
-	repository := "group/subgroup/project"
-	gitlabConnection, host := newConditionGitLabConnection(t, f)
-	legacyMR := linkConditionGitLabMR(t, f, issue, gitlabConnection, repository, 906, 11, "open", "same-head")
-	vcsConnection := newConnection(t, f)
-	vcsMR := linkConditionVCSGitLabMR(t, f, issue, vcsConnection, "https://"+host, repository, 906, 11, "open", "same-head")
-	baselineAt := time.Now().Add(-time.Minute)
-	setGitLabPipeline(t, f, legacyMR, 1401, "same-head", "success", baselineAt)
-	setVCSGitLabPipeline(t, f, vcsMR, 1401, "same-head", "success", baselineAt)
+	connection := newConnection(t, f)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+	mr := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 903, 9, "open", "same-head")
+	setVCSGitLabPipeline(t, f, mr, 1101, "same-head", "success", time.Now().Add(-time.Minute))
 	installConditionGitLabSyncer(t, s, f, nil)
-	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous", Instruction: "Review mirrored CI",
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous", Instruction: "Review CI",
 		Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
 	wakeTick(t, f, s, w.ID)
 	if n := wakeRuns(t, f, w.ID); n != 0 {
-		t.Fatalf("mirrored baseline pipeline fired immediately: %d runs", n)
+		t.Fatalf("baseline pipeline fired immediately: %d runs", n)
 	}
-	updatedAt := time.Now().Add(time.Second)
-	setGitLabPipeline(t, f, legacyMR, 1402, "same-head", "success", updatedAt)
-	setVCSGitLabPipeline(t, f, vcsMR, 1402, "same-head", "success", updatedAt)
+
+	firstVersion := w.CreatedAt.Time.Add(time.Second)
+	setVCSGitLabPipeline(t, f, mr, 1102, "same-head", "success", firstVersion)
 	got := wakeTick(t, f, s, w.ID)
 	if n := wakeRuns(t, f, w.ID); n != 1 || got.LastError.Valid {
-		t.Fatalf("mirrored pipeline started %d runs (error %+v), want one", n, got.LastError)
+		t.Fatalf("same-head rerun started %d runs (error %+v), want one", n, got.LastError)
 	}
-	pipelineFacts := 0
-	for key, count := range prConditionKeys(got.ConditionState) {
-		if strings.HasPrefix(key, gitLabPipelineConditionPrefix) {
-			pipelineFacts += count
-		}
+	task, err := f.q.GetAgentTask(context.Background(), got.LastTaskID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if pipelineFacts != 2 {
-		t.Fatalf("mirrored pipelines produced %d fingerprint facts, want one per pipeline: %s", pipelineFacts, got.ConditionState)
+	if !strings.Contains(task.HandoffNote.String, `"pipeline_id":1102`) || !strings.Contains(task.HandoffNote.String, `"checks":"success"`) {
+		t.Fatalf("pipeline identity/version absent from observed facts: %s", task.HandoffNote.String)
+	}
+	finishConditionWakeupRuns(t, f, w.ID)
+	setVCSGitLabPipeline(t, f, mr, 1102, "same-head", "success", firstVersion)
+	wakeTick(t, f, s, w.ID)
+	if n := wakeRuns(t, f, w.ID); n != 1 {
+		t.Fatalf("replayed identical pipeline version started %d runs, want one", n)
+	}
+
+	finishConditionWakeupRuns(t, f, w.ID)
+	secondVersion := firstVersion.Add(time.Second)
+	setVCSGitLabPipeline(t, f, mr, 1102, "same-head", "success", secondVersion)
+	wakeTick(t, f, s, w.ID)
+	if n := wakeRuns(t, f, w.ID); n != 2 {
+		t.Fatalf("new terminal version of the same pipeline started %d runs, want two", n)
+	}
+	finishConditionWakeupRuns(t, f, w.ID)
+
+	setVCSGitLabPipeline(t, f, mr, 1103, "same-head", "running", secondVersion.Add(time.Second))
+	got = wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 2 {
+		t.Fatalf("running pipeline started a run (error %+v)", got.LastError)
+	}
+	setVCSGitLabPipeline(t, f, mr, 1103, "same-head", "failed", secondVersion.Add(2*time.Second))
+	got = wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 3 || got.LastError.Valid {
+		t.Fatalf("new failed pipeline result started %d runs (error %+v), want three", wakeRuns(t, f, w.ID), got.LastError)
+	}
+}
+
+func TestWakeupConditionGitLabCIWaitsWhenBaselineIsUnavailable(t *testing.T) {
+	f, s, issue, agent := conditionFixture(t)
+	connection := newConnection(t, f)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+	mr := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 904, 10, "open", "same-head")
+	f.Exec(t, `UPDATE vcs_pull_request SET status_sync_at=NULL,status_sync_error='temporarily unavailable',
+		pipeline_sync_at=NULL,pipeline_sync_error='temporarily unavailable' WHERE id=$1`, mr)
+	s.Tasks.GitLabWakeupSyncer = conditionGitLabWakeupSyncFunc(func(context.Context, vcs.GitLabWakeupTarget) error {
+		return errors.New("temporarily unavailable")
+	})
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Wait for new CI",
+		Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
+	if !w.LastError.Valid {
+		t.Fatal("unavailable baseline did not expose its reason")
+	}
+	setVCSGitLabPipeline(t, f, mr, 1201, "same-head", "failed", w.CreatedAt.Time.Add(-time.Minute))
+	got := wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid {
+		t.Fatalf("sync failure fired a pipeline or hid its reason: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+	}
+
+	s.Tasks.GitLabWakeupSyncer = conditionGitLabWakeupSyncFunc(func(context.Context, vcs.GitLabWakeupTarget) error { return nil })
+	f.Exec(t, `UPDATE vcs_pull_request SET status_sync_at=now(),status_sync_error=NULL,
+		pipeline_sync_at=now(),pipeline_sync_error=NULL WHERE id=$1`, mr)
+	got = wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 0 || got.LastError.Valid {
+		t.Fatalf("old pipeline fired after sync recovered: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+	}
+	setVCSGitLabPipeline(t, f, mr, 1202, "same-head", "success", w.CreatedAt.Time.Add(time.Minute))
+	got = wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 1 || got.LastError.Valid {
+		t.Fatalf("new pipeline did not trigger after sync recovery: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+	}
+}
+
+func TestWakeupConditionGitLabPipelineRequiresAuthorizedProjectIdentity(t *testing.T) {
+	f, s, issue, agent := conditionFixture(t)
+	connection := newConnection(t, f)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+	mr := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 907, 12, "open", "head")
+	installConditionGitLabSyncer(t, s, f, nil)
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Review CI",
+		Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
+	f.Exec(t, `INSERT INTO vcs_gitlab_pipeline(
+		workspace_id,connection_id,pull_request_id,pipeline_id,pipeline_project_id,pipeline_project_path,sha,ref,status,pipeline_updated_at
+	) SELECT workspace_id,connection_id,id,1501,999999,repo_owner||'/'||repo_name,head_sha,
+		'refs/merge-requests/'||pr_number||'/head','passed',$2
+		FROM vcs_pull_request WHERE id=$1`, mr, time.Now())
+	got := wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid || !strings.Contains(got.LastError.String, "no terminal pipeline") {
+		t.Fatalf("pipeline with mismatched project ID was accepted: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+	}
+	setVCSGitLabPipeline(t, f, mr, 1502, "head", "success", w.CreatedAt.Time.Add(time.Minute))
+	got = wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 1 || got.LastError.Valid {
+		t.Fatalf("authorized current-project pipeline did not recover: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
 	}
 }
 
 func TestWakeupConditionGitLabSourcePipelineMustMatchMRSourceBranch(t *testing.T) {
-	for _, source := range []string{"gitlab_connection", "vcs_connection"} {
-		t.Run(source, func(t *testing.T) {
-			f, s, issue, agent := conditionFixture(t)
-			const targetProjectID, sourceProjectID = 9200, 9201
-			targetRepository := "target/subgroup/project"
-			sourceRepository := "fork/subgroup/project"
-			branch := "feature/wakeup"
-			var mr string
-			if source == "gitlab_connection" {
-				connection, _ := newConditionGitLabConnection(t, f)
-				mr = linkConditionGitLabMR(t, f, issue, connection, targetRepository, targetProjectID, 13, "open", "head")
-				f.Exec(t, `UPDATE gitlab_merge_request SET source_project_id=$2,source_project_path=$3,source_branch=$4 WHERE id=$1`,
-					mr, sourceProjectID, sourceRepository, branch)
-			} else {
-				connection := newConnection(t, f)
-				instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
-				mr = linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, targetRepository, targetProjectID, 13, "open", "head")
-				f.Exec(t, `UPDATE vcs_pull_request SET source_project_id=$2,source_project_path=$3,branch=$4 WHERE id=$1`,
-					mr, sourceProjectID, sourceRepository, branch)
-			}
-			installConditionGitLabSyncer(t, s, f, nil)
-			w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Review source branch CI",
-				Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
-			updatedAt := w.CreatedAt.Time.Add(time.Minute)
-			if source == "gitlab_connection" {
-				setGitLabPipeline(t, f, mr, 1601, "head", "success", updatedAt)
-				f.Exec(t, "UPDATE gitlab_mr_pipeline SET ref='wrong-branch' WHERE merge_request_id=$1 AND pipeline_id=1601", mr)
-			} else {
-				setVCSGitLabPipeline(t, f, mr, 1601, "head", "success", updatedAt)
-				f.Exec(t, "UPDATE vcs_gitlab_pipeline SET ref='wrong-branch' WHERE pull_request_id=$1 AND pipeline_id=1601", mr)
-			}
-			got := wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid {
-				t.Fatalf("unrelated source branch pipeline fired or hid pending status: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-			if source == "gitlab_connection" {
-				f.Exec(t, "UPDATE gitlab_mr_pipeline SET ref=$3 WHERE merge_request_id=$1 AND pipeline_id=$2", mr, 1601, branch)
-			} else {
-				f.Exec(t, "UPDATE vcs_gitlab_pipeline SET ref=$3 WHERE pull_request_id=$1 AND pipeline_id=$2", mr, 1601, branch)
-			}
-			got = wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 1 || got.LastError.Valid {
-				t.Fatalf("authorized source branch pipeline did not recover: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-		})
-	}
-}
-
-func TestWakeupConditionGitLabLegacyUnknownPipelineProjectIsPending(t *testing.T) {
 	f, s, issue, agent := conditionFixture(t)
-	connection, _ := newConditionGitLabConnection(t, f)
-	mr := linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project", 907, 12, "open", "head")
+	const targetProjectID, sourceProjectID = 9200, 9201
+	targetRepository := "target/subgroup/project"
+	sourceRepository := "fork/subgroup/project"
+	branch := "feature/wakeup"
+	connection := newConnection(t, f)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+	mr := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, targetRepository, targetProjectID, 13, "open", "head")
+	f.Exec(t, `UPDATE vcs_pull_request SET source_project_id=$2,source_project_path=$3,branch=$4 WHERE id=$1`,
+		mr, sourceProjectID, sourceRepository, branch)
 	installConditionGitLabSyncer(t, s, f, nil)
-	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Review CI",
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Review source branch CI",
 		Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
-	f.Exec(t, `INSERT INTO gitlab_mr_pipeline(merge_request_id,pipeline_id,pipeline_project_id,sha,status,pipeline_updated_at)
-		VALUES($1,1501,999999,'head','success',now())`, mr)
+	updatedAt := w.CreatedAt.Time.Add(time.Minute)
+	setVCSGitLabPipeline(t, f, mr, 1601, "head", "success", updatedAt)
+	f.Exec(t, "UPDATE vcs_gitlab_pipeline SET ref='wrong-branch' WHERE pull_request_id=$1 AND pipeline_id=1601", mr)
 	got := wakeTick(t, f, s, w.ID)
-	if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid || !strings.Contains(got.LastError.String, "no terminal pipeline") {
-		t.Fatalf("unknown pipeline project was not held as pending: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+	if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid {
+		t.Fatalf("unrelated source branch pipeline fired or hid pending status: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
 	}
-	setGitLabPipeline(t, f, mr, 1502, "head", "success", time.Now().Add(time.Second))
+	f.Exec(t, "UPDATE vcs_gitlab_pipeline SET ref=$3 WHERE pull_request_id=$1 AND pipeline_id=$2", mr, 1601, branch)
 	got = wakeTick(t, f, s, w.ID)
 	if wakeRuns(t, f, w.ID) != 1 || got.LastError.Valid {
-		t.Fatalf("known current project did not recover: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
+		t.Fatalf("authorized source branch pipeline did not recover: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
 	}
 }
 
-func TestWakeupConditionGitLabChecksUnavailableBaselineUsesActivationTime(t *testing.T) {
-	for _, source := range []string{"gitlab_connection", "vcs_connection"} {
-		t.Run(source, func(t *testing.T) {
-			f, s, issue, agent := conditionFixture(t)
-			var mr string
-			if source == "gitlab_connection" {
-				connection, _ := newConditionGitLabConnection(t, f)
-				mr = linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project", 904, 10, "open", "same-head")
-				f.Exec(t, "UPDATE gitlab_merge_request SET last_refreshed_at=NULL,last_refresh_error='temporarily unavailable' WHERE id=$1", mr)
-			} else {
-				connection := newConnection(t, f)
-				instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
-				mr = linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 904, 10, "open", "same-head")
-				f.Exec(t, "UPDATE vcs_pull_request SET status_sync_at=NULL,status_sync_error='temporarily unavailable' WHERE id=$1", mr)
-			}
-			installConditionGitLabSyncer(t, s, f, nil)
-			w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Wait for a new pipeline",
-				Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
-			if !w.LastError.Valid {
-				t.Fatal("unavailable baseline did not expose its reason")
-			}
-			oldVersion := w.CreatedAt.Time.Add(-time.Minute)
-			if source == "gitlab_connection" {
-				setGitLabPipeline(t, f, mr, 1201, "same-head", "failed", oldVersion)
-			} else {
-				setVCSGitLabPipeline(t, f, mr, 1201, "same-head", "failed", oldVersion)
-			}
-			got := wakeTick(t, f, s, w.ID)
-			if wakeRuns(t, f, w.ID) != 0 || got.LastError.Valid {
-				t.Fatalf("pre-activation pipeline fired or recovered diagnostic remained: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
-			}
-			if source == "gitlab_connection" {
-				setGitLabPipeline(t, f, mr, 1202, "same-head", "success", w.CreatedAt.Time.Add(time.Minute))
-			} else {
-				setVCSGitLabPipeline(t, f, mr, 1202, "same-head", "success", w.CreatedAt.Time.Add(time.Minute))
-			}
-			wakeTick(t, f, s, w.ID)
-			if n := wakeRuns(t, f, w.ID); n != 1 {
-				t.Fatalf("post-activation pipeline started %d runs, want one", n)
-			}
-		})
-	}
-}
-
-func TestWakeupConditionGitLabPipelineUpdatedAfterActivationIsNotAbsorbedByBaseline(t *testing.T) {
-	for _, source := range []string{"gitlab_connection", "vcs_connection"} {
-		t.Run(source, func(t *testing.T) {
-			f, s, issue, agent := conditionFixture(t)
-			var mr string
-			if source == "gitlab_connection" {
-				connection, _ := newConditionGitLabConnection(t, f)
-				mr = linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project", 908, 13, "open", "head")
-				setGitLabPipeline(t, f, mr, 1701, "head", "success", time.Now().Add(time.Minute))
-			} else {
-				connection := newConnection(t, f)
-				instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
-				mr = linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 908, 13, "open", "head")
-				setVCSGitLabPipeline(t, f, mr, 1701, "head", "success", time.Now().Add(time.Minute))
-			}
-			installConditionGitLabSyncer(t, s, f, nil)
-			w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Wait for pipeline completion",
-				Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
-			got := wakeTick(t, f, s, w.ID)
-			if n := wakeRuns(t, f, w.ID); n != 1 || got.LastError.Valid {
-				t.Fatalf("pipeline updated after activation started %d runs (error %+v), want one", n, got.LastError)
-			}
-		})
+func TestWakeupConditionGitLabDoesNotReadLinkedPullRequestFromAnotherWorkspace(t *testing.T) {
+	f, s, issue, agent := conditionFixture(t)
+	foreign, _, foreignIssue, _ := conditionFixture(t)
+	connection := newConnection(t, foreign)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+	foreignMR := linkConditionVCSGitLabMR(t, foreign, foreignIssue, connection, instanceURL, "group/subgroup/project", 908, 13, "merged", "head")
+	foreign.Cleanup(t, "DELETE FROM issue_vcs_pull_request WHERE issue_id=$1 AND pull_request_id=$2", issue, foreignMR)
+	foreign.Exec(t, "INSERT INTO issue_vcs_pull_request(issue_id,pull_request_id) VALUES($1,$2)", issue, foreignMR)
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Note the merge",
+		Condition: condition(t, map[string]any{"type": "pull_request", "event": "merged"})})
+	got := wakeTick(t, f, s, w.ID)
+	if wakeRuns(t, f, w.ID) != 0 || !got.LastError.Valid || !strings.Contains(got.LastError.String, errPRNotLinked.Error()) {
+		t.Fatalf("foreign workspace MR was visible to wakeup: runs=%d error=%+v", wakeRuns(t, f, w.ID), got.LastError)
 	}
 }
 
@@ -1521,12 +1323,13 @@ func TestWakeupConditionGitLabPipelineTerminalStatesAreAtPipelineLevel(t *testin
 	} {
 		t.Run(tc.status, func(t *testing.T) {
 			f, s, issue, agent := conditionFixture(t)
-			connection, _ := newConditionGitLabConnection(t, f)
-			mr := linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project", 905, 11, "open", "head")
+			connection := newConnection(t, f)
+			instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+			mr := linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 905, 11, "open", "head")
 			installConditionGitLabSyncer(t, s, f, nil)
 			w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Wait for CI",
 				Condition: condition(t, map[string]any{"type": "pull_request", "event": "checks_finished"})})
-			setGitLabPipeline(t, f, mr, 1301, "head", tc.status, w.CreatedAt.Time.Add(time.Second))
+			setVCSGitLabPipeline(t, f, mr, 1301, "head", tc.status, w.CreatedAt.Time.Add(time.Second))
 			got := wakeTick(t, f, s, w.ID)
 			if n := wakeRuns(t, f, w.ID); n != 1 || got.LastError.Valid {
 				t.Fatalf("terminal pipeline %q started %d runs (error %+v), want one", tc.status, n, got.LastError)
@@ -1544,16 +1347,17 @@ func TestWakeupConditionGitLabPipelineTerminalStatesAreAtPipelineLevel(t *testin
 
 func TestWakeupConditionGitLabDoesNotSyncForUnrelatedCondition(t *testing.T) {
 	f, s, issue, agent := conditionFixture(t)
-	connection, _ := newConditionGitLabConnection(t, f)
-	linkConditionGitLabMR(t, f, issue, connection, "group/subgroup/project", 906, 12, "open", "head")
-	calls := 0
+	connection := newConnection(t, f)
+	instanceURL := "https://" + strings.ReplaceAll(connection, "-", "") + ".gitlab.example.test"
+	linkConditionVCSGitLabMR(t, f, issue, connection, instanceURL, "group/subgroup/project", 906, 12, "open", "head")
+	calls := make(chan struct{}, 4)
 	installConditionGitLabSyncer(t, s, f, func(vcs.GitLabWakeupTarget) {
-		calls++
+		calls <- struct{}{}
 	})
 	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Wait for children",
 		Condition: condition(t, map[string]any{"type": "children_done"})})
 	wakeTick(t, f, s, w.ID)
-	if calls != 0 {
-		t.Fatalf("unrelated condition caused %d GitLab refreshes", calls)
+	if len(calls) != 0 {
+		t.Fatalf("unrelated condition caused %d GitLab refreshes", len(calls))
 	}
 }

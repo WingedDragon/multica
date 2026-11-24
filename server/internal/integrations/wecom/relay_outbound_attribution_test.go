@@ -46,6 +46,24 @@ func (h *ownsSocketHandler) sent() []relayFrame {
 	return append([]relayFrame(nil), h.calls...)
 }
 
+
+type blockingRelayHandler struct {
+	started    chan struct{}
+	release    chan struct{}
+	startedOnce sync.Once
+}
+
+func (h *blockingRelayHandler) ownsSocket(string) bool { return true }
+
+func (h *blockingRelayHandler) deliverRelayed(ctx context.Context, _ relayFrame) relayResult {
+	h.startedOnce.Do(func() { close(h.started) })
+	select {
+	case <-h.release:
+		return relayResult{outcome: outcomeDone}
+	case <-ctx.Done():
+		return relayResult{outcome: outcomeProvablyNotSent}
+	}
+}
 // shedRouter is a router wired to shed: depth 1, never started, so the first
 // frame fills the only slot and the second has nowhere to go. No timing.
 func shedRouter(t *testing.T, owns bool) (*RelayOutbound, *countingMetrics) {
@@ -55,6 +73,142 @@ func shedRouter(t *testing.T, owns bool) (*RelayOutbound, *countingMetrics) {
 	r.SetMetrics(mx)
 	r.Attach(&ownsSocketHandler{owns: owns})
 	return r, mx
+}
+
+func TestRelayOutboundStartStartsOnlyOnce(t *testing.T) {
+	r, _ := shedRouter(t, true)
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	defer cancelFirst()
+	defer cancelSecond()
+
+	r.Start(firstCtx)
+	r.Start(secondCtx)
+	cancelFirst()
+	done := make(chan struct{})
+	go func() {
+		r.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		cancelSecond()
+		<-done
+		t.Fatal("second Start created workers that outlived the first start context")
+	}
+}
+
+func TestRelayOutboundDeliveryGatePausesAndResumesQueuedItems(t *testing.T) {
+	r := NewRelayOutbound(&fanoutRelay{}, nil, RelayConfig{Shards: 1, QueueDepth: 1}, slog.Default())
+	handler := &ownsSocketHandler{owns: true}
+	r.Attach(handler)
+	body, err := json.Marshal(relayFrame{Kind: relayKindSeal, TaskID: "task-1"})
+	if err != nil {
+		t.Fatalf("marshal relay frame: %v", err)
+	}
+	r.DeliverWecomOutbound("task-1", body, "ev-1")
+	r.SetDeliveryEnabled(false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.Start(ctx)
+	select {
+	case <-time.After(30 * time.Millisecond):
+		if got := handler.sent(); len(got) != 0 {
+			t.Fatalf("paused delivery sent %d frames, want none", len(got))
+		}
+	}
+
+	r.SetDeliveryEnabled(true)
+	deadline := time.After(time.Second)
+	for len(handler.sent()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("queued relay item did not resume after maintenance")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if got := handler.sent(); len(got) != 1 {
+		t.Fatalf("resumed deliveries = %d, want 1", len(got))
+	}
+	cancel()
+	if err := r.Wait(); err != nil {
+		t.Fatalf("Wait after drained cancellation: %v", err)
+	}
+}
+
+func TestRelayOutboundDisablingDeliveryWaitsForInFlightSend(t *testing.T) {
+	r := NewRelayOutbound(&fanoutRelay{}, nil, RelayConfig{Shards: 1, QueueDepth: 1}, slog.Default())
+	handler := &blockingRelayHandler{started: make(chan struct{}), release: make(chan struct{})}
+	r.Attach(handler)
+	ctx, cancel := context.WithCancel(context.Background())
+	r.Start(ctx)
+	defer func() {
+		cancel()
+		_ = r.Wait()
+	}()
+
+	body, err := json.Marshal(relayFrame{Kind: relayKindSeal, TaskID: "task-1"})
+	if err != nil {
+		t.Fatalf("marshal relay frame: %v", err)
+	}
+	r.DeliverWecomOutbound("task-1", body, "ev-1")
+	select {
+	case <-handler.started:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("delivery did not enter the in-flight send")
+	}
+
+	paused := make(chan struct{})
+	go func() {
+		r.SetDeliveryEnabled(false)
+		close(paused)
+	}()
+	select {
+	case <-paused:
+		close(handler.release)
+		cancel()
+		t.Fatal("maintenance gate returned before the in-flight send finished")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(handler.release)
+	select {
+	case <-paused:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("maintenance gate did not complete after the in-flight send finished")
+	}
+	cancel()
+	if err := r.Wait(); err != nil {
+		t.Fatalf("Wait after quiescent shutdown: %v", err)
+	}
+}
+
+func TestRelayOutboundCancellationWhilePausedDoesNotSendAndReportsBacklog(t *testing.T) {
+	r := NewRelayOutbound(&fanoutRelay{}, nil, RelayConfig{Shards: 1, QueueDepth: 1}, slog.Default())
+	handler := &ownsSocketHandler{owns: true}
+	r.Attach(handler)
+	body, err := json.Marshal(relayFrame{Kind: relayKindSeal, TaskID: "task-1"})
+	if err != nil {
+		t.Fatalf("marshal relay frame: %v", err)
+	}
+	r.DeliverWecomOutbound("task-1", body, "ev-1")
+	r.SetDeliveryEnabled(false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.Start(ctx)
+	cancel()
+	if err := r.Wait(); err == nil {
+		t.Fatal("paused worker shutdown silently abandoned queued delivery")
+	}
+	if got := handler.sent(); len(got) != 0 {
+		t.Fatalf("paused cancellation sent %d frames, want none", len(got))
+	}
+	if got := len(r.queues[0]); got != 1 {
+		t.Fatalf("queued items after refused paused drain = %d, want 1", got)
+	}
 }
 
 func shedTwice(t *testing.T, r *RelayOutbound, kind string) {

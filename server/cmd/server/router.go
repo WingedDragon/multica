@@ -1629,6 +1629,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Use(opts.HTTPMetrics.Middleware)
 	}
 	r.Use(chimw.Recoverer)
+	r.Use(h.GitLabMigrationWriteGate)
 	r.Use(h.PluginSurfaceHostBoundary)
 	r.Use(middleware.ContentSecurityPolicy)
 
@@ -1684,7 +1685,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// POST /api/docs/{id}/collab-ticket; the service calls back with the
 	// shared secret.
 	if h.Collab != nil {
-		r.Get("/collab", h.Collab.Proxy().ServeHTTP)
+		r.Get("/collab", h.GitLabMigrationWebSocketGate(h.Collab.Proxy(), 0).ServeHTTP)
 		r.Route("/internal/collab/docs/{id}", func(r chi.Router) {
 			r.Use(h.RequireCollabSecret)
 			r.Get("/", h.GetCollabDoc)
@@ -1756,10 +1757,6 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// GitHub App webhook (no Multica auth — requests are authenticated via
 	// HMAC-SHA256 signature in the handler) and post-install setup callback.
 	r.Post("/api/webhooks/github", h.HandleGitHubWebhook)
-	r.Post("/api/webhooks/gitlab", h.HandleGitLabWebhook)
-	// Workspace GitLab connections use a connection-scoped path and encrypted
-	// per-connection webhook token; the legacy env-configured path above remains.
-	r.Post("/api/webhooks/gitlab/{connectionId}", h.HandleGitLabWebhook)
 	r.Get("/api/github/setup", h.GitHubSetupCallback)
 	// Slack OAuth callback (no Multica auth in the path — it is hit by Slack's
 	// browser redirect; the workspace/agent/initiator are recovered from the
@@ -1980,6 +1977,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// for the same reason as GitHub installations; connect /
 					// disconnect are admin-gated in the group below.
 					r.Get("/vcs/connections", h.ListVCSConnections)
+					r.Get("/vcs/gitlab/projects", h.ListVCSGitLabProjects)
 					r.Get("/qoder", h.GetQoderConnection)
 					r.Get("/qoder/agents", h.ListQoderAgents)
 					// Custom runtime profiles — listing/reading is member-visible
@@ -2072,6 +2070,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/gitlab/projects", h.CreateGitLabProjectBinding)
 					r.Post("/gitlab/projects/{bindingId}/refresh", h.RefreshGitLabProjectBinding)
 					r.Delete("/gitlab/projects/{bindingId}", h.DeleteGitLabProjectBinding)
+					r.Post("/vcs/gitlab/projects", h.CreateVCSGitLabProject)
+					r.Post("/vcs/gitlab/projects/{projectId}/refresh", h.RefreshVCSGitLabProject)
+					r.Delete("/vcs/gitlab/projects/{projectId}", h.DeleteVCSGitLabProject)
 					// VCS connect / disconnect / webhook regeneration (admin-only).
 					r.Post("/vcs/connections", h.ConnectVCS)
 					r.Put("/qoder", h.SaveQoderConnection)
@@ -2409,6 +2410,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/pull-requests", h.LinkIssuePullRequest)
 					r.Delete("/pull-requests/{prId}", h.UnlinkIssuePullRequest)
 					r.Put("/pr-auto-complete", h.SetIssuePRAutoComplete)
+					r.Get("/vcs/pull-requests/{prId}/gitlab", h.GetVCSGitLabMergeRequestDetails)
+					r.Post("/vcs/pull-requests/{prId}/gitlab/refresh", h.RefreshVCSGitLabMergeRequestForIssue)
+					r.Post("/vcs/pull-requests/{prId}/gitlab/merge", h.MergeVCSGitLabMergeRequestForIssue)
+					r.Get("/vcs/pull-requests/{prId}/gitlab/jobs/{jobId}/trace", h.GetVCSGitLabJobTrace)
+					r.Get("/vcs/pull-requests/{prId}/gitlab/jobs/{jobId}/artifacts", h.OpenVCSGitLabJobArtifacts)
 					r.Get("/gitlab/merge-requests", h.ListGitLabMergeRequestsForIssue)
 					r.Get("/gitlab/merge-requests/{mrId}/details", h.GetGitLabMergeRequestDetails)
 					r.Post("/gitlab/merge-requests/{mrId}/refresh", h.RefreshGitLabMergeRequestForIssue)

@@ -325,6 +325,13 @@ func newMainHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
+func reportRelayDrainError(err error) {
+	if err != nil {
+		slog.Error("WeCom relay shutdown did not drain completely; migration quiescence is unverified",
+			"error", err)
+	}
+}
+
 func main() {
 	logger.Init()
 	// Read the opt-out before constructing any telemetry dependency. In the
@@ -483,7 +490,9 @@ func main() {
 			}
 			// Join the dispatcher BEFORE its Redis clients go away, or the
 			// drain races the teardown it depends on.
-			wecomRelayOutbound.Wait()
+			if err := wecomRelayOutbound.Wait(); err != nil {
+				reportRelayDrainError(err)
+			}
 		})
 	}
 	defer func() {
@@ -567,12 +576,9 @@ func main() {
 						LeaseSettle: leaseSettle,
 					}, slog.Default())
 				wecomRelay.SetWecomOutboundDeliverer(wecomRelayOutbound)
-				wecomRelayOutbound.Start(relayCtx)
 			}
-			// Every deliverer is registered by this point. The shard readers
-			// open on a replay window, so anything registered after Start
-			// silently misses it.
-			relay.Start(relayCtx)
+			// Register every deliverer before readers start. The relay itself is
+			// started below only after the migration gate opens.
 			broadcaster = realtime.NewDualWriteBroadcaster(hub, relay)
 			slog.Info(
 				"realtime: Redis relay enabled",
@@ -609,6 +615,20 @@ func main() {
 	defer analyticsClient.Close()
 
 	queries := db.New(pool)
+	if wecomRelayOutbound != nil {
+		// Start paused: the initial ready observation may race the worker's
+		// first readiness check, and either order remains fail-closed.
+		wecomRelayOutbound.SetDeliveryEnabled(false)
+		watchVCSMigrationGate(relayCtx, queries, wecomRelayOutbound.SetDeliveryEnabled)
+	}
+	if relay != nil {
+		runVCSMigrationStartOnce(relayCtx, queries, func() {
+			if wecomRelayOutbound != nil {
+				wecomRelayOutbound.Start(relayCtx)
+			}
+			relay.Start(relayCtx)
+		})
+	}
 	hub.SetAuthorizer(newScopeAuthorizer(queries))
 	// Order matters: subscriber listeners must register BEFORE notification listeners.
 	// The notification listener queries the subscriber table to determine recipients,
@@ -737,7 +757,7 @@ func main() {
 	// that cache's version, so an idle runtime could keep returning an empty
 	// claim until the cache TTL expires.
 	taskSvc, autopilotSvc := backgroundServices(h)
-	registerAutopilotListeners(bus, autopilotSvc)
+	registerAutopilotListeners(bus, autopilotSvc, queries)
 
 	// Construct a LivenessStore that mirrors the one wired into the HTTP
 	// handler. Both the heartbeat write path (handler) and the sweeper read
@@ -760,52 +780,92 @@ func main() {
 	// Queued work now expires on the same runtime-liveness signal as in-flight
 	// work, so there is no separate queue TTL to tune: a busy runtime keeps its
 	// backlog, and a departed one retires everything it owned at once.
-	go h.RunQoderConnections(sweepCtx, pool, "http://localhost:"+port)
-	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus, runtimeReconnectGrace)
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		h.RunQoderConnections(ctx, pool, "http://localhost:"+port)
+	})
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		runRuntimeSweeper(ctx, queries, liveness, taskSvc, bus, runtimeReconnectGrace)
+	})
 	if telemetryWorker != nil {
 		go telemetryWorker.Run(sweepCtx)
 	}
-	go runDelegatedFailureRecoverySweeper(sweepCtx, taskSvc)
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		runDelegatedFailureRecoverySweeper(ctx, taskSvc)
+	})
 	// Seven-day runtime retention does not share the 30-second liveness tick:
 	// its bounded transactions run independently once per hour, so a slow GC
 	// round cannot delay offline detection or task recovery.
-	go runRuntimeGCSweeper(sweepCtx, pool, queries, taskSvc.Metrics, h)
-	// Source-context cleanup is object-store work, so it gets its own goroutine
-	// instead of a slot in the runtime sweep tick.
-	go runSourceContextSweeper(sweepCtx, taskSvc)
-	go inboxTrimmer.Run(sweepCtx)
-	go runEnvironmentLogSweeper(sweepCtx, queries)
-	go runCommentIdempotencySweeper(sweepCtx, queries)
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		runRuntimeGCSweeper(ctx, pool, queries, taskSvc.Metrics, h)
+	})
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		runSourceContextSweeper(ctx, taskSvc)
+	})
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		inboxTrimmer.Run(ctx)
+	})
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		runEnvironmentLogSweeper(ctx, queries)
+	})
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		runCommentIdempotencySweeper(ctx, queries)
+	})
 	if h.ConnectedApps != nil {
-		go h.ConnectedApps.RunSweeper(sweepCtx)
+		runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+			h.ConnectedApps.RunSweeper(ctx)
+		})
 	}
 	go heartbeatScheduler.Run(sweepCtx)
-	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
+	runVCSMigrationGatedWorker(autopilotCtx, queries, func(ctx context.Context) {
+		runAutopilotFailureMonitor(ctx, queries, bus, envFailureMonitorConfig())
+	})
 	if autopilotSvc.QuotaEnabled() {
-		go runAutopilotQuotaReconciler(autopilotCtx, autopilotSvc)
+		runVCSMigrationGatedWorker(autopilotCtx, queries, func(ctx context.Context) {
+			runAutopilotQuotaReconciler(ctx, autopilotSvc)
+		})
 	}
 	go runDBStatsLogger(sweepCtx, "primary", pool)
 	if replicaPool != nil {
 		go runDBStatsLogger(sweepCtx, "replica", replicaPool)
 	}
 	if h.WebhookDeliveryWorker != nil {
-		go h.WebhookDeliveryWorker.Run(sweepCtx)
+		runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+			h.WebhookDeliveryWorker.Run(ctx)
+		})
 	}
 	if h.SeatCapacityWorker != nil {
-		go h.SeatCapacityWorker.Run(sweepCtx)
+		runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+			h.SeatCapacityWorker.Run(ctx)
+		})
 	}
 	if h.TelegramOutbound != nil {
-		h.TelegramOutbound.Start(sweepCtx)
+		runVCSMigrationGatedWorkerOnce(sweepCtx, queries, func(ctx context.Context) {
+			h.TelegramOutbound.Start(ctx)
+			<-ctx.Done()
+			if !h.TelegramOutbound.WaitWithTimeout(5 * time.Second) {
+				slog.Warn("telegram outbound worker did not drain after migration gate closed")
+			}
+		})
 	}
 	if h.WeixinOutbound != nil {
-		h.WeixinOutbound.Start(sweepCtx)
+		runVCSMigrationGatedWorkerOnce(sweepCtx, queries, func(ctx context.Context) {
+			h.WeixinOutbound.Start(ctx)
+			<-ctx.Done()
+			if !h.WeixinOutbound.WaitWithTimeout(5 * time.Second) {
+				slog.Warn("weixin outbound worker did not drain after migration gate closed")
+			}
+		})
 	}
 	if h.WeixinInstall != nil {
-		go h.WeixinInstall.RunCleanup(sweepCtx)
+		runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+			h.WeixinInstall.RunCleanup(ctx)
+		})
 	}
-	// GitHub PR-card API snapshot pipeline (MUL-5265): worker pool + TTL sweeper.
-	// No-op when unconfigured (no App private key).
-	h.PRRefresh.Start(sweepCtx)
+	// GitHub PR-card API snapshot workers also write canonical snapshots.
+	runVCSMigrationGatedWorkerOnce(sweepCtx, queries, func(ctx context.Context) {
+		h.PRRefresh.Start(ctx)
+		<-ctx.Done()
+	})
 
 	// Channel inbound supervisor (MUL-3620): holds the §4.4 WS lease per
 	// installation and drives each channel.Channel. It is channel-agnostic,
@@ -815,11 +875,16 @@ func main() {
 	// alongside the other long-running workers, AFTER the HTTP server has
 	// drained.
 	if h.ChannelSupervisor != nil {
-		go h.ChannelSupervisor.Run(sweepCtx)
+		runVCSMigrationGatedWorkerOnce(sweepCtx, queries, func(ctx context.Context) {
+			h.ChannelSupervisor.Run(ctx)
+			h.ChannelSupervisor.Wait()
+		})
 	}
 
 	if h.LarkTyping != nil {
-		go h.LarkTyping.Run(sweepCtx)
+		runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+			h.LarkTyping.Run(ctx)
+		})
 	}
 
 	// Media intent-ledger reconciler (PR #5580): settles uploaded-but-unbound
@@ -827,15 +892,14 @@ func main() {
 	// spikes cannot starve any other sweeper's cadence.
 	if h.ChannelMediaReconciler != nil {
 		h.ChannelMediaReconciler.Metrics = channelMediaMetrics
-		go h.ChannelMediaReconciler.Run(sweepCtx)
+		runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+			h.ChannelMediaReconciler.Run(ctx)
+		})
 	}
-
-	// WeCom scan-code install worker: drives QR generate + poll out of band, so
-	// no HTTP request waits on WeCom. Started even when the scan flow is
-	// unconfigured, so any session already in flight reaches a terminal state
-	// instead of spinning forever in the admin's dialog.
 	if h.WecomInstallWorker != nil {
-		go h.WecomInstallWorker.Run(sweepCtx)
+		runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+			h.WecomInstallWorker.Run(ctx)
+		})
 	}
 
 	// MUL-2957: DB-backed execution scheduler. The scheduler turns the
@@ -852,39 +916,31 @@ func main() {
 	// missing because of an unusual partial-migration state — by
 	// logging them on the tick that fails and retrying on the next
 	// cycle, so a temporary outage does not crash the server.
-	schedulerMgr := scheduler.NewManager(pool, scheduler.Options{})
-	if err := schedulerMgr.Register(scheduler.TaskUsageHourlyJob(pool)); err != nil {
-		slog.Warn("scheduler: failed to register task_usage_hourly rollup job", "error", err)
-	}
-	// MUL-3551: scheduled-Autopilot dispatch runs on the same DB-backed
-	// scheduler. The job owns its plan_times via PlansForScope (each
-	// trigger has its own cron expression, so the Cadence planner does
-	// not fit). Crash recovery, occurrence-level idempotency, lease
-	// theft, and retry are all reused from the manager + sys_cron_executions
-	// — there is no separate goroutine for scheduled Autopilot anymore.
-	if err := schedulerMgr.Register(scheduler.SearchIndexChangePruneJob(queries)); err != nil {
-		slog.Warn("scheduler: failed to register search index change prune job", "error", err)
-	}
-	if err := schedulerMgr.Register(scheduler.IssueWakeupJob(&service.IssueWakeupService{Tasks: taskSvc})); err != nil {
-		slog.Error("scheduler: register issue wakeups", "error", err)
-	}
-	if err := schedulerMgr.Register(scheduler.ChildEventSweepJob(&service.IssueWakeupService{Tasks: taskSvc})); err != nil {
-		slog.Error("scheduler: register child-done sweep", "error", err)
-	}
-	if err := schedulerMgr.Register(scheduler.ChatWakeupJob(&service.ChatWakeupService{Tasks: taskSvc})); err != nil {
-		slog.Error("scheduler: register chat wakeups", "error", err)
-	}
-	if err := schedulerMgr.Register(scheduler.AutopilotScheduleDispatchJob(pool, queries, autopilotSvc)); err != nil {
-		slog.Warn("scheduler: failed to register autopilot_schedule_dispatch job", "error", err)
-	}
-	// Manifest-declared Plugin schedules share the same durable lease and retry
-	// machinery. The job is inert while plugins_v1 is disabled.
-	if err := schedulerMgr.Register(scheduler.PluginHookScheduleDispatchJob(queries, h.PluginService)); err != nil {
-		slog.Warn("scheduler: failed to register plugin_hook_schedule_dispatch job", "error", err)
-	}
-	go func() {
-		_ = schedulerMgr.Run(sweepCtx)
-	}()
+	runVCSMigrationGatedWorker(sweepCtx, queries, func(ctx context.Context) {
+		schedulerMgr := scheduler.NewManager(pool, scheduler.Options{})
+		if err := schedulerMgr.Register(scheduler.TaskUsageHourlyJob(pool)); err != nil {
+			slog.Warn("scheduler: failed to register task_usage_hourly rollup job", "error", err)
+		}
+		if err := schedulerMgr.Register(scheduler.SearchIndexChangePruneJob(queries)); err != nil {
+			slog.Warn("scheduler: failed to register search index change prune job", "error", err)
+		}
+		if err := schedulerMgr.Register(scheduler.IssueWakeupJob(&service.IssueWakeupService{Tasks: taskSvc})); err != nil {
+			slog.Error("scheduler: register issue wakeups", "error", err)
+		}
+		if err := schedulerMgr.Register(scheduler.ChildEventSweepJob(&service.IssueWakeupService{Tasks: taskSvc})); err != nil {
+			slog.Error("scheduler: register child-done sweep", "error", err)
+		}
+		if err := schedulerMgr.Register(scheduler.ChatWakeupJob(&service.ChatWakeupService{Tasks: taskSvc})); err != nil {
+			slog.Error("scheduler: register chat wakeups", "error", err)
+		}
+		if err := schedulerMgr.Register(scheduler.AutopilotScheduleDispatchJob(pool, queries, autopilotSvc)); err != nil {
+			slog.Warn("scheduler: failed to register autopilot_schedule_dispatch job", "error", err)
+		}
+		if err := schedulerMgr.Register(scheduler.PluginHookScheduleDispatchJob(queries, h.PluginService)); err != nil {
+			slog.Warn("scheduler: failed to register plugin_hook_schedule_dispatch job", "error", err)
+		}
+		_ = schedulerMgr.Run(ctx)
+	})
 
 	if metricsServer != nil {
 		go func() {

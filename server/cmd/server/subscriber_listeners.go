@@ -29,8 +29,12 @@ func isAssignmentRecipientType(assigneeType string) bool {
 // serialization boundary (see subscribeDelegatedHuman).
 func registerSubscriberListeners(bus *events.Bus, pool *pgxpool.Pool) {
 	queries := db.New(pool)
+	ctx := context.Background()
 	// issue:created — subscribe creator + assignee (if different)
 	bus.Subscribe(protocol.EventIssueCreated, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -69,6 +73,9 @@ func registerSubscriberListeners(bus *events.Bus, pool *pgxpool.Pool) {
 
 	// issue:updated — subscribe new assignee or @mentioned users
 	bus.Subscribe(protocol.EventIssueUpdated, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return
@@ -101,6 +108,9 @@ func registerSubscriberListeners(bus *events.Bus, pool *pgxpool.Pool) {
 
 	// comment:created — subscribe the commenter
 	bus.Subscribe(protocol.EventCommentCreated, func(e events.Event) {
+		if !vcsMigrationReady(ctx, queries) {
+			return
+		}
 		payload, ok := e.Payload.(map[string]any)
 		if !ok {
 			return

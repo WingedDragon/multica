@@ -253,7 +253,7 @@ multica chat wakeup list
 
 条件には `--until-issue` と `--state` または `--status`、`--until-children-done` と任意の `--stage`、`--until-pr`、`--until-run`、`--until-reply` と任意の `--from <user-id>` を使えます。GitHub の PR 条件は、このワークスペースにミラーされた PR を `owner/repo#N[:merged|closed|checks]` 形式で指定します。`checks` は現在の head のチェック終了を待ち、成功も失敗も対象です。GitHub の `checks` 条件は、サーバーが GitHub から CI 状態を読み取れる場合にのみ作成できます。セルフホストのサーバーでは `GITHUB_APP_ID` と `GITHUB_APP_PRIVATE_KEY` が必要です（[GitHub 連携](/github-integration)を参照）。作成時にすでに終了しているチェック結果は基準として記録され、その結果だけでは直ちにエージェントを起動しません。
 
-GitLab マージリクエストには、`multica chat wakeup connections` で接続を確認し、`--until-pr group/subgroup/project#N[:merged|closed|checks] --gitlab-connection <connection-id>` を使います。プロジェクトはこのワークスペースにミラーされている必要があります。接続で GitLab インスタンスを指定でき、サブグループのパスにも対応します。
+GitLab マージリクエストには、`multica chat wakeup connections` で接続を確認し、`--until-pr group/subgroup/project#N[:merged|closed|checks] --gitlab-connection <connection-id>` を使います。プロジェクトはこのワークスペースにミラーされている必要があります。接続で GitLab インスタンスを指定でき、サブグループのパスにも対応します。MR はタスクに関連付けられている必要はなく、接続 ID と完全なプロジェクトパスで対象を特定します。`merged` はマージを、`closed` はクローズまたはマージを待ちます。`checks` は現在の head の Pipeline が成功または失敗で終了するのを待ちます。作成・更新時にすでに終了している結果は基準として扱い、直ちには起動しません。状態を取得できない場合や古い head の結果しかない場合は、理由を表示して待ち続けます。
 
 `list`、`get <id>` で確認し、`cancel <id>` でキャンセルします。定期確認の実行中は、`checkin <id> --note "..."` で返信を送らずに状況を記録できます。目的を達成したら `finish <id>` で確認を終えます。期限到来による最後の実行では必ず報告し、無言のチェックインはできません。
 

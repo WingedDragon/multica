@@ -9,9 +9,21 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/integrations/gitlab"
 	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+func (h *Handler) gitLabDetailAPIForVCSConnection(connection db.VcsConnection, token string) (gitLabDetailAPI, error) {
+	cfg := gitlab.LoadConfigFromEnv()
+	cfg.BaseURL = connection.InstanceUrl
+	cfg.Token = token
+	api, err := newGitLabClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return detailGitLabAPI(api)
+}
 
 type vcsGitLabWakeupPipelineSync struct {
 	reader         vcs.GitLabWakeupSnapshotReader
@@ -72,16 +84,16 @@ func (h *Handler) syncGitLabWakeupTarget(ctx context.Context, target vcs.GitLabW
 			return errors.New("invalid GitLab wakeup merge request")
 		}
 	}
-
-	var pipelineErr, mrErr error
-	switch target.Source {
-	case vcs.GitLabWakeupSourceVCSConnection:
-		pipelineErr, mrErr = h.syncVCSGitLabWakeupTarget(ctx, target, workspaceID, connectionID)
-	case vcs.GitLabWakeupSourceWorkspaceConnection:
-		pipelineErr, mrErr = h.syncWorkspaceGitLabWakeupTarget(ctx, target, workspaceID, connectionID)
-	default:
+	if target.Source != vcs.GitLabWakeupSourceVCSConnection &&
+		target.Source != vcs.GitLabWakeupSourceWorkspaceConnection {
 		return errors.New("invalid GitLab wakeup source")
 	}
+
+	target, connectionID, err = h.canonicalizeGitLabWakeupTarget(ctx, target, workspaceID, connectionID)
+	if err != nil {
+		return errors.New(gitLabWakeupFailureMessage(err))
+	}
+	pipelineErr, mrErr := h.syncVCSGitLabWakeupTarget(ctx, target, workspaceID, connectionID)
 	if mrErr != nil {
 		return errors.New(gitLabWakeupFailureMessage(mrErr))
 	}
@@ -120,6 +132,11 @@ func (h *Handler) beginVCSGitLabWakeupTarget(ctx context.Context, target vcs.Git
 	})
 	if err != nil {
 		return nil, err
+	}
+	if pr.Provider != string(vcs.KindGitLab) || pr.WorkspaceID != workspaceID ||
+		pr.ConnectionID != connectionID || pr.PrNumber != target.Number ||
+		!strings.EqualFold(pr.RepoOwner+"/"+pr.RepoName, target.Repository) {
+		return nil, errors.New("GitLab merge request does not match the canonical workspace target")
 	}
 	if target.MergeRequestID != "" && uuidToString(pr.ID) != target.MergeRequestID {
 		return nil, errors.New("GitLab merge request identity changed")
@@ -169,6 +186,42 @@ func (h *Handler) beginVCSGitLabWakeupTarget(ctx context.Context, target vcs.Git
 	snapshot := vcs.GitLabWakeupSnapshot{MergeRequest: mrSnapshot.MergeRequest}
 	if err := h.persistVCSGitLabWakeupMR(ctx, pr, snapshot, syncGeneration); err != nil {
 		return nil, markMRFailure(err)
+	}
+	detailAPI, err := h.gitLabDetailAPIForVCSConnection(connection, token)
+	if err != nil {
+		return nil, markMRFailure(err)
+	}
+	project, err := h.Queries.GetVCSGitLabProjectByConnectionPath(ctx, db.GetVCSGitLabProjectByConnectionPathParams{
+		WorkspaceID: workspaceID, ConnectionID: connectionID, PathWithNamespace: target.Repository,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		remoteProject, projectErr := detailAPI.GetProject(ctx, target.Repository)
+		if projectErr != nil {
+			return nil, markMRFailure(projectErr)
+		}
+		project = db.VcsGitlabProject{
+			WorkspaceID: workspaceID, ConnectionID: connectionID,
+			GitlabProjectID: remoteProject.ID, PathWithNamespace: remoteProject.PathWithNamespace,
+		}
+	} else if err != nil {
+		return nil, markMRFailure(err)
+	}
+	if project.WorkspaceID != workspaceID || project.ConnectionID != connectionID ||
+		project.GitlabProjectID <= 0 || project.PathWithNamespace != target.Repository {
+		return nil, markMRFailure(errors.New("GitLab project identity did not match the authorized target"))
+	}
+	remoteMR, err := detailAPI.GetMergeRequest(ctx, project.GitlabProjectID, pr.PrNumber)
+	if err != nil {
+		return nil, markMRFailure(err)
+	}
+	current := pr
+	current.WakeupSyncGeneration = syncGeneration
+	pr, _, err = h.syncVCSGitLabMergeRequestAtGeneration(ctx, detailAPI, project, remoteMR, &current, syncGeneration)
+	if err != nil {
+		// The authoritative MR snapshot was persisted above. Errors from the
+		// later detail/Pipeline refresh must not mark that successful status sync
+		// as failed.
+		return nil, err
 	}
 	return &vcsGitLabWakeupPipelineSync{
 		reader: reader, instanceURL: connection.InstanceUrl, token: token, target: target,
@@ -356,46 +409,82 @@ func (h *Handler) persistVCSGitLabWakeupPipelines(ctx context.Context, pr db.Vcs
 	return true, nil
 }
 
-func (h *Handler) syncWorkspaceGitLabWakeupTarget(ctx context.Context, target vcs.GitLabWakeupTarget, workspaceID, connectionID pgtype.UUID) (error, error) {
-	connection, err := h.Queries.GetGitLabConnectionByID(ctx, db.GetGitLabConnectionByIDParams{
-		ID:          connectionID,
-		WorkspaceID: workspaceID,
+func (h *Handler) canonicalizeGitLabWakeupTarget(ctx context.Context, target vcs.GitLabWakeupTarget, workspaceID, requestedConnectionID pgtype.UUID) (vcs.GitLabWakeupTarget, pgtype.UUID, error) {
+	legacySource := target.Source == vcs.GitLabWakeupSourceWorkspaceConnection
+	if !legacySource && target.Source != vcs.GitLabWakeupSourceVCSConnection {
+		return target, pgtype.UUID{}, errors.New("invalid GitLab wakeup source")
+	}
+	connectionID, err := h.canonicalGitLabConnectionID(ctx, workspaceID, requestedConnectionID, legacySource)
+	if err != nil {
+		return target, pgtype.UUID{}, err
+	}
+	target.Source = vcs.GitLabWakeupSourceVCSConnection
+	target.ConnectionID = uuidToString(connectionID)
+	if target.MergeRequestID != "" {
+		pullRequestID, err := h.canonicalGitLabPullRequestID(ctx, workspaceID, connectionID, target.MergeRequestID, legacySource)
+		if err != nil {
+			return target, pgtype.UUID{}, err
+		}
+		target.MergeRequestID = uuidToString(pullRequestID)
+	}
+	return target, connectionID, nil
+}
+
+func (h *Handler) canonicalGitLabConnectionID(ctx context.Context, workspaceID, candidateID pgtype.UUID, legacy bool) (pgtype.UUID, error) {
+	connectionID := candidateID
+	if legacy {
+		unifiedID, err := h.Queries.ResolveGitLabMigrationID(ctx, db.ResolveGitLabMigrationIDParams{
+			WorkspaceID: workspaceID,
+			EntityKind:  "connection",
+			LegacyID:    candidateID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return pgtype.UUID{}, errors.New("legacy GitLab connection alias is unavailable in this workspace")
+		}
+		if err != nil {
+			return pgtype.UUID{}, err
+		}
+		connectionID = unifiedID
+	}
+	connection, err := h.Queries.GetVCSConnectionByID(ctx, connectionID)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	if connection.WorkspaceID != workspaceID || connection.Provider != string(vcs.KindGitLab) {
+		return pgtype.UUID{}, errors.New("GitLab connection does not belong to this workspace")
+	}
+	return connection.ID, nil
+}
+
+func (h *Handler) canonicalGitLabPullRequestID(ctx context.Context, workspaceID, connectionID pgtype.UUID, candidateID string, legacy bool) (pgtype.UUID, error) {
+	pullRequestID, err := parseGitLabWakeupUUID(candidateID)
+	if err != nil {
+		return pgtype.UUID{}, errors.New("invalid GitLab wakeup merge request")
+	}
+	if legacy {
+		unifiedID, err := h.Queries.ResolveGitLabMigrationID(ctx, db.ResolveGitLabMigrationIDParams{
+			WorkspaceID: workspaceID,
+			EntityKind:  "pull_request",
+			LegacyID:    pullRequestID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return pgtype.UUID{}, errors.New("legacy GitLab merge request alias is unavailable in this workspace")
+		}
+		if err != nil {
+			return pgtype.UUID{}, err
+		}
+		pullRequestID = unifiedID
+	}
+	pullRequest, err := h.Queries.GetVCSPullRequestInWorkspace(ctx, db.GetVCSPullRequestInWorkspaceParams{
+		ID: pullRequestID, WorkspaceID: workspaceID,
 	})
 	if err != nil {
-		return nil, err
+		return pgtype.UUID{}, err
 	}
-	mr, err := h.Queries.GetGitLabMergeRequestForWakeup(ctx, db.GetGitLabMergeRequestForWakeupParams{
-		WorkspaceID:       workspaceID,
-		ConnectionID:      connectionID,
-		PathWithNamespace: target.Repository,
-		MrIid:             target.Number,
-	})
-	if err != nil {
-		return nil, err
+	if pullRequest.Provider != string(vcs.KindGitLab) || pullRequest.ConnectionID != connectionID {
+		return pgtype.UUID{}, errors.New("GitLab merge request does not belong to this workspace connection")
 	}
-	if target.MergeRequestID != "" && uuidToString(mr.ID) != target.MergeRequestID {
-		return nil, errors.New("GitLab merge request identity changed")
-	}
-	markFailure := func(err error) error {
-		return h.markGitLabMergeRequestRefreshErrorForGeneration(ctx, mr, mr.WakeupSyncGeneration, err)
-	}
-	clientConfig, err := h.gitLabConfigForConnectionRow(connection)
-	if err != nil {
-		return nil, markFailure(err)
-	}
-	api, err := newGitLabClient(clientConfig)
-	if err != nil {
-		return nil, markFailure(err)
-	}
-	detailAPI, err := detailGitLabAPI(api)
-	if err != nil {
-		return nil, markFailure(err)
-	}
-	_, summary, err := h.refreshGitLabMergeRequest(ctx, detailAPI, mr)
-	if err != nil {
-		return nil, err
-	}
-	return summary.PipelineError, nil
+	return pullRequest.ID, nil
 }
 
 func gitLabWakeupFailureMessage(err error) string {

@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, GitMerge, RefreshCw } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { api } from "@multica/core/api";
+import { githubKeys } from "@multica/core/github";
 import { gitlabKeys } from "@multica/core/gitlab";
 import type {
   GitLabApprovalRule,
@@ -29,7 +30,8 @@ export function GitLabMergeRequestDetails({
     Record<string, GitLabJobTraceResponse>
   >({});
   const loadTrace = useMutation({
-    mutationFn: (jobId: string) => api.getGitLabJobTrace(issueId, jobId),
+    mutationFn: (jobId: string) =>
+      api.getGitLabJobTrace(issueId, details.merge_request.id, jobId),
     onSuccess: (trace, jobId) => {
       setLoadedTraces((prev) => ({ ...prev, [jobId]: trace }));
     },
@@ -44,7 +46,7 @@ export function GitLabMergeRequestDetails({
       );
       await Promise.all([
         queryClient.invalidateQueries({
-          queryKey: gitlabKeys.mergeRequests(issueId),
+          queryKey: githubKeys.pullRequests(issueId),
         }),
         queryClient.invalidateQueries({
           queryKey: gitlabKeys.mergeRequestDetails(
@@ -203,13 +205,22 @@ export function GitLabMergeRequestDetails({
                   ) : null}
                   {job.artifacts_file_name ? (
                     <a
-                      href={api.gitLabJobArtifactsURL(issueId, job.id)}
+                      href={api.gitLabJobArtifactsURL(
+                        issueId,
+                        details.merge_request.id,
+                        job.id,
+                      )}
                       className="inline-flex items-center gap-1 hover:text-foreground"
                     >
                       {job.artifacts_file_name}
                       <ExternalLink className="h-3 w-3" />
                     </a>
                   ) : null}
+                {loadTrace.isError && loadTrace.variables === job.id ? (
+                  <p role="alert" className="text-destructive">
+                    {t(($) => $.detail.section_load_failed_retry)}
+                  </p>
+                ) : null}
                 </div>
                 {traceSummary ? (
                   <pre className="max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted/50 p-2 font-mono text-[10px] leading-snug text-foreground">

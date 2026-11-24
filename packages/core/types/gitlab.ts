@@ -1,20 +1,11 @@
 export type GitLabMergeRequestState = "open" | "closed" | "merged" | "draft";
 export type GitLabPipelineStatus = string;
 
-export interface GitLabConnection {
-  id: string;
-  workspace_id: string;
-  base_url: string;
-  host: string;
-  server_configured?: boolean;
-  webhook_url?: string | null;
-  webhook_path?: string | null;
-}
 
 export interface GitLabProjectBinding {
   id: string;
   workspace_id: string;
-  connection_id?: string | null;
+  connection_id: string;
   gitlab_project_id: number;
   path_with_namespace: string;
   web_url: string;
@@ -28,31 +19,14 @@ export interface GitLabProjectBinding {
   refresh_in_progress_at?: string | null;
   created_at: string;
 }
-
-export interface GitLabConfigResponse {
-  configured: boolean;
-  can_manage?: boolean;
-  base_url?: string;
-  manual_webhook_url?: string;
-  credential_storage_configured: boolean;
-  connections: GitLabConnection[];
+export interface ListGitLabProjectsResponse {
   projects: GitLabProjectBinding[];
 }
 
-export interface CreateGitLabConnectionRequest {
-  base_url: string;
-  access_token: string;
-}
 
-export interface CreateGitLabConnectionResponse {
-  connection: GitLabConnection;
-  webhook_secret?: string;
-  webhook_url: string;
-  webhook_path: string;
-}
 
 export interface CreateGitLabProjectRequest {
-  connection_id?: string;
+  connection_id: string;
   project: string;
 }
 
@@ -93,9 +67,6 @@ export interface GitLabMergeRequest {
   mr_updated_at: string;
 }
 
-export interface ListGitLabMergeRequestsResponse {
-  merge_requests: GitLabMergeRequest[];
-}
 
 export interface GitLabUserRef {
   id?: number;

@@ -506,6 +506,8 @@ type hold struct {
 	readyAt time.Time
 }
 
+var ErrRelayDrainIncomplete = errors.New("wecom relay stopped before queued deliveries were drained")
+
 // RelayOutbound publishes a delivery to the replica holding the bot's socket,
 // and performs the ones other replicas publish. One per process.
 type RelayOutbound struct {
@@ -543,8 +545,19 @@ type RelayOutbound struct {
 	progress       atomic.Value // progressSink
 	warnNoProgress sync.Once
 
-	queues []chan queued
-	wg     sync.WaitGroup
+	queues    []chan queued
+	wg        sync.WaitGroup
+	startOnce sync.Once
+
+	deliveryGateMu      sync.RWMutex
+	deliveryEnabled     bool
+	deliveryGateChanged chan struct{}
+	stopping            bool
+	workerStopped       chan struct{}
+	workerStopOnce      sync.Once
+	blockedDeliveries   atomic.Int64
+	drainIncomplete     atomic.Bool
+	drainErrorOnce      sync.Once
 }
 
 // NewRelayOutbound builds the cross-replica router. replayGrace is the relay's
@@ -557,22 +570,81 @@ func NewRelayOutbound(publisher relayPublisher, dedupe DedupeStore, cfg RelayCon
 	}
 	cfg = cfg.withDefaults()
 	r := &RelayOutbound{
-		publisher: publisher,
-		dedupe:    dedupe,
-		dedupeTTL: dedupeTTLFor(cfg.ReplayGrace),
-		cfg:       cfg,
-		retryPlan: cfg.retryPlan(),
-		owner:     newReqID(),
-		logger:    logger,
-		seen:      newSeenEvents(4096),
-		verify:    make(chan pendingOutcome, cfg.QueueDepth),
-		ready:     make(chan struct{}),
-		queues:    make([]chan queued, cfg.Shards),
+		publisher:           publisher,
+		dedupe:              dedupe,
+		dedupeTTL:           dedupeTTLFor(cfg.ReplayGrace),
+		cfg:                 cfg,
+		retryPlan:           cfg.retryPlan(),
+		owner:               newReqID(),
+		logger:              logger,
+		seen:                newSeenEvents(4096),
+		verify:              make(chan pendingOutcome, cfg.QueueDepth),
+		ready:               make(chan struct{}),
+		queues:              make([]chan queued, cfg.Shards),
+		deliveryEnabled:     true,
+		deliveryGateChanged: make(chan struct{}),
+		workerStopped:       make(chan struct{}),
 	}
 	for i := range r.queues {
 		r.queues[i] = make(chan queued, cfg.QueueDepth)
 	}
 	return r
+}
+
+// SetDeliveryEnabled pauses external delivery without discarding queued work.
+// Disabling waits for any in-flight delivery to finish before returning.
+func (r *RelayOutbound) SetDeliveryEnabled(enabled bool) {
+	if r == nil {
+		return
+	}
+	r.deliveryGateMu.Lock()
+	if r.stopping || r.deliveryEnabled == enabled {
+		r.deliveryGateMu.Unlock()
+		return
+	}
+	r.deliveryEnabled = enabled
+	close(r.deliveryGateChanged)
+	r.deliveryGateChanged = make(chan struct{})
+	r.deliveryGateMu.Unlock()
+}
+
+func (r *RelayOutbound) waitForDeliveryEnabled(ctx context.Context) bool {
+	for {
+		r.deliveryGateMu.RLock()
+		enabled := r.deliveryEnabled
+		stopping := r.stopping
+		changed := r.deliveryGateChanged
+		r.deliveryGateMu.RUnlock()
+		if stopping || ctx.Err() != nil {
+			return false
+		}
+		if enabled {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-changed:
+		}
+	}
+}
+
+func (r *RelayOutbound) markStopping() {
+	r.deliveryGateMu.Lock()
+	r.stopping = true
+	if r.blockedDeliveries.Load() > 0 {
+		r.drainIncomplete.Store(true)
+	}
+	r.deliveryGateMu.Unlock()
+	r.workerStopOnce.Do(func() { close(r.workerStopped) })
+}
+
+func (r *RelayOutbound) recordIncompleteDrain(reason string) {
+	r.drainIncomplete.Store(true)
+	r.drainErrorOnce.Do(func() {
+		r.logger.Error("wecom relay: worker stopped with undelivered work",
+			"reason", reason, "blocked_deliveries", r.blockedDeliveries.Load())
+	})
 }
 
 // SetMetrics installs the health sink. Called once during boot, before any
@@ -629,12 +701,14 @@ func (r *RelayOutbound) Start(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	for i := range r.queues {
+	r.startOnce.Do(func() {
+		for i := range r.queues {
+			r.wg.Add(1)
+			go r.work(ctx, r.queues[i])
+		}
 		r.wg.Add(1)
-		go r.work(ctx, r.queues[i])
-	}
-	r.wg.Add(1)
-	go r.watchOutcomes(ctx)
+		go r.watchOutcomes(ctx)
+	})
 }
 
 // handlerReady blocks until Attach has run, and reports whether there is a
@@ -670,12 +744,28 @@ func (r *RelayOutbound) handlerReady(ctx context.Context) bool {
 func (r *RelayOutbound) work(ctx context.Context, q chan queued) {
 	defer r.wg.Done()
 	if !r.handlerReady(ctx) {
+		r.markStopping()
+		if len(q) > 0 || r.blockedDeliveries.Load() > 0 {
+			r.recordIncompleteDrain("worker stopped before handler attachment")
+		}
 		return
 	}
 	lines := map[string]*hold{}
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
+	var pending *queued
 	for {
+		if !r.waitForDeliveryEnabled(ctx) {
+			r.finishWorker(ctx, q, lines, pending)
+			return
+		}
+		if pending != nil {
+			if r.offer(ctx, lines, *pending) {
+				pending = nil
+			}
+			continue
+		}
+
 		wait := time.Hour
 		if next, ok := earliestDue(lines); ok {
 			if wait = time.Until(next); wait < 0 {
@@ -690,26 +780,55 @@ func (r *RelayOutbound) work(ctx context.Context, q chan queued) {
 		}
 		timer.Reset(wait)
 
+		r.deliveryGateMu.RLock()
+		deliveryEnabled := r.deliveryEnabled && !r.stopping
+		deliveryChanged := r.deliveryGateChanged
+		r.deliveryGateMu.RUnlock()
+		if !deliveryEnabled {
+			continue
+		}
 		select {
 		case item := <-q:
-			// The select is fair, so an item can win against an already-fired
-			// ctx.Done. Performing it on the cancelled context would misfile it
-			// as a dedupe outage; it belongs to the drain.
 			if ctx.Err() != nil {
-				r.drainRemaining(ctx, q, lines, &item)
+				pending = &item
+				r.finishWorker(ctx, q, lines, pending)
 				return
 			}
-			r.offer(ctx, lines, item)
+			if !r.offer(ctx, lines, item) {
+				pending = &item
+			}
 		case <-timer.C:
 			if ctx.Err() != nil {
-				r.drainRemaining(ctx, q, lines, nil)
+				r.finishWorker(ctx, q, lines, nil)
 				return
 			}
 			r.fireDue(ctx, lines)
+		case <-deliveryChanged:
 		case <-ctx.Done():
-			r.drainRemaining(ctx, q, lines, nil)
+			r.finishWorker(ctx, q, lines, nil)
 			return
 		}
+	}
+}
+
+func (r *RelayOutbound) finishWorker(ctx context.Context, q chan queued, lines map[string]*hold, first *queued) {
+	r.markStopping()
+	r.deliveryGateMu.RLock()
+	if !r.deliveryEnabled {
+		pending := first != nil || len(q) > 0 || r.blockedDeliveries.Load() > 0
+		for _, h := range lines {
+			pending = pending || len(h.items) > 0
+		}
+		r.deliveryGateMu.RUnlock()
+		if pending {
+			r.recordIncompleteDrain("delivery gate closed during shutdown")
+		}
+		return
+	}
+	drained := r.drainRemaining(ctx, q, lines, first)
+	r.deliveryGateMu.RUnlock()
+	if !drained || r.blockedDeliveries.Load() > 0 {
+		r.recordIncompleteDrain("shutdown drain budget exhausted or ingress blocked")
 	}
 }
 
@@ -731,26 +850,40 @@ func earliestDue(lines map[string]*hold) (time.Time, bool) {
 // offer takes one frame off the shard queue. If its installation already has a
 // line waiting out a re-offer, it joins the BACK of that line: overtaking the
 // frame in front of it is exactly the reordering this exists to prevent.
-func (r *RelayOutbound) offer(ctx context.Context, lines map[string]*hold, item queued) {
+func (r *RelayOutbound) offer(ctx context.Context, lines map[string]*hold, item queued) bool {
 	if h := lines[item.frame.InstallationID]; h != nil {
+		r.deliveryGateMu.RLock()
+		if !r.deliveryEnabled || r.stopping {
+			r.deliveryGateMu.RUnlock()
+			return false
+		}
 		if len(h.items) >= r.cfg.QueueDepth {
 			r.shed(item, "the installation's line is full behind a retry")
-			return
+			r.deliveryGateMu.RUnlock()
+			return true
 		}
 		h.items = append(h.items, item)
-		return
+		r.deliveryGateMu.RUnlock()
+		return true
 	}
-	r.step(ctx, lines, item)
+	return r.step(ctx, lines, item)
 }
 
 // step runs one delivery and files what it means for the line. A frame that
 // needs another offer stays at the head of its installation's line with the
 // next delay on it; a finished one lets whatever queued behind it move up.
-func (r *RelayOutbound) step(ctx context.Context, lines map[string]*hold, item queued) {
+func (r *RelayOutbound) step(ctx context.Context, lines map[string]*hold, item queued) bool {
+	r.deliveryGateMu.RLock()
+	if !r.deliveryEnabled || r.stopping {
+		r.deliveryGateMu.RUnlock()
+		return false
+	}
+	performed := r.perform(ctx, item)
+	r.deliveryGateMu.RUnlock()
 	inst := item.frame.InstallationID
-	if r.perform(ctx, item) {
+	if performed {
 		r.advance(lines, inst)
-		return
+		return true
 	}
 	delay, more := r.delayFor(item.attempts)
 	if !more {
@@ -762,7 +895,7 @@ func (r *RelayOutbound) step(ctx context.Context, lines map[string]*hold, item q
 			"installation_id", inst, "task_id", item.frame.TaskID,
 			"attempts", item.attempts+1)
 		r.advance(lines, inst)
-		return
+		return true
 	}
 	item.attempts++
 	h := lines[inst]
@@ -773,6 +906,7 @@ func (r *RelayOutbound) step(ctx context.Context, lines map[string]*hold, item q
 		h.items[0] = item // it is the head; step is only ever called on one
 	}
 	h.readyAt = time.Now().Add(delay)
+	return true
 }
 
 // advance retires a finished head and lets the next frame for that
@@ -845,7 +979,7 @@ func (r *RelayOutbound) shed(item queued, why string) {
 // Frames parked in a line waiting out a re-offer go first and without their
 // backoff: the wait existed to give a lease time to move, and shutdown has
 // overtaken that.
-func (r *RelayOutbound) drainRemaining(ctx context.Context, q chan queued, lines map[string]*hold, first *queued) {
+func (r *RelayOutbound) drainRemaining(ctx context.Context, q chan queued, lines map[string]*hold, first *queued) bool {
 	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cfg.DrainBudget)
 	defer cancel()
 	if first != nil {
@@ -857,37 +991,56 @@ func (r *RelayOutbound) drainRemaining(ctx context.Context, q chan queued, lines
 		// to overtake.
 		if h := lines[first.frame.InstallationID]; h != nil {
 			h.items = append(h.items, *first)
-		} else {
-			r.perform(drainCtx, *first)
+		} else if !r.perform(drainCtx, *first) {
+			lines[first.frame.InstallationID] = &hold{items: []queued{*first}}
+			return false
 		}
 	}
 	for inst, h := range lines {
-		for _, item := range h.items {
+		for i, item := range h.items {
 			if drainCtx.Err() != nil {
-				return
+				h.items = h.items[i:]
+				return false
 			}
-			r.perform(drainCtx, item)
+			if !r.perform(drainCtx, item) {
+				h.items = h.items[i:]
+				return false
+			}
 		}
 		delete(lines, inst)
 	}
 	for {
 		if drainCtx.Err() != nil {
-			return
+			return false
 		}
 		select {
 		case item := <-q:
-			r.perform(drainCtx, item)
+			if !r.perform(drainCtx, item) {
+				h := lines[item.frame.InstallationID]
+				if h == nil {
+					h = &hold{}
+					lines[item.frame.InstallationID] = h
+				}
+				h.items = append(h.items, item)
+				return false
+			}
 		default:
-			return
+			return true
 		}
 	}
 }
 
-// Wait blocks until every worker has stopped. For tests and shutdown.
-func (r *RelayOutbound) Wait() {
-	if r != nil {
-		r.wg.Wait()
+// Wait blocks until every worker has stopped. An incomplete drain is returned
+// so shutdown/release code cannot treat an undrained queue as quiescent.
+func (r *RelayOutbound) Wait() error {
+	if r == nil {
+		return nil
 	}
+	r.wg.Wait()
+	if r.drainIncomplete.Load() {
+		return ErrRelayDrainIncomplete
+	}
+	return nil
 }
 
 // publish hands a delivery to the other replicas and reports what the bus did
@@ -1061,9 +1214,10 @@ func (r *RelayOutbound) confirmInbox(ctx context.Context, eventID string) relayP
 	return relayNoHolder
 }
 
-// DeliverWecomOutbound is realtime.WecomOutboundDeliverer. It must not block:
-// the caller is the shared shard read loop, and everything else on that shard
-// waits behind it.
+// DeliverWecomOutbound is realtime.WecomOutboundDeliverer. Queue admission is
+// nonblocking during normal operation. During maintenance it waits instead of
+// shedding a frame; the shared shard reader stays parked until delivery resumes
+// or process shutdown reports an incomplete drain.
 func (r *RelayOutbound) DeliverWecomOutbound(scopeID string, frame []byte, eventID string) {
 	if r == nil {
 		return
@@ -1073,16 +1227,50 @@ func (r *RelayOutbound) DeliverWecomOutbound(scopeID string, frame []byte, event
 		r.logger.Warn("wecom relay: undecodable frame", "error", err, "installation_id", scopeID)
 		return
 	}
+	if !r.lockIngressForDelivery() {
+		return
+	}
+	defer r.deliveryGateMu.RUnlock()
 	if f.Kind == relayKindProgress {
 		r.deliverProgress(f)
 		return
 	}
+	item := queued{frame: f, eventID: eventID}
 	select {
-	case r.queues[r.shardFor(dispatchKey(f))] <- queued{frame: f, eventID: eventID}:
+	case r.queues[r.shardFor(dispatchKey(f))] <- item:
 	default:
-		// Shed rather than stall the shard. Counted, because a reply nobody
-		// gets is exactly what this whole path exists to stop being silent.
-		r.shed(queued{frame: f, eventID: eventID}, "dispatch queue full")
+		// In normal operation, shed rather than stall the shard. This branch is
+		// unreachable while maintenance is active because ingress waits at the
+		// delivery gate above.
+		r.shed(item, "dispatch queue full")
+	}
+}
+
+// lockIngressForDelivery returns with the gate's read lock held. This makes
+// disabling the gate a barrier against both new queue admissions and in-flight
+// progress forwarding.
+func (r *RelayOutbound) lockIngressForDelivery() bool {
+	for {
+		r.deliveryGateMu.RLock()
+		if r.stopping {
+			r.deliveryGateMu.RUnlock()
+			r.recordIncompleteDrain("relay ingress arrived after shutdown began")
+			return false
+		}
+		if r.deliveryEnabled {
+			return true
+		}
+		changed := r.deliveryGateChanged
+		r.deliveryGateMu.RUnlock()
+		r.blockedDeliveries.Add(1)
+		select {
+		case <-changed:
+			r.blockedDeliveries.Add(-1)
+		case <-r.workerStopped:
+			r.blockedDeliveries.Add(-1)
+			r.recordIncompleteDrain("maintenance-paused ingress interrupted by shutdown")
+			return false
+		}
 	}
 }
 

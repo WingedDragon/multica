@@ -288,7 +288,163 @@ describe("ApiClient pull-request response schema", () => {
     expect(result.pull_requests).toHaveLength(1);
     expect(result.pull_requests[0]?.link_source).toBeUndefined();
   });
+
+  it("parses GitLab VCS merge requests from the shared issue pull-request list", async () => {
+    stubPullRequests({
+      pull_requests: [
+        {
+          ...validPR,
+          id: "vcs-mr-1",
+          provider: "gitlab",
+          repo_owner: "group/subgroup",
+          repo_name: "project",
+          number: 7,
+          title: "GitLab feature",
+          branch: "feat/gitlab",
+          target_branch: "main",
+          detailed_merge_status: "mergeable",
+          has_conflicts: false,
+          pipeline_status: "passed",
+          pipeline_url: "https://gitlab.example.test/pipelines/77",
+        },
+      ],
+    });
+
+    const result = await new ApiClient("https://api.example.test").listIssuePullRequests("issue-1");
+    expect(result.pull_requests).toHaveLength(1);
+    expect(result.pull_requests[0]).toMatchObject({
+      id: "vcs-mr-1",
+      provider: "gitlab",
+      repo_owner: "group/subgroup",
+      repo_name: "project",
+      number: 7,
+      target_branch: "main",
+      detailed_merge_status: "mergeable",
+      has_conflicts: false,
+      pipeline_status: "passed",
+    });
+  });
 });
+describe("ApiClient GitLab VCS routes", () => {
+  const project = {
+    id: "project-1",
+    workspace_id: "ws-1",
+    connection_id: "connection-1",
+    gitlab_project_id: 42,
+    path_with_namespace: "group/subgroup/project",
+    web_url: "https://gitlab.example.test/group/subgroup/project",
+    hook_enabled: false,
+    last_sync_error: null,
+    last_refresh_at: null,
+    last_refresh_error: "hook permission denied",
+    created_at: "2026-01-01T00:00:00Z",
+  };
+
+  it("uses one workspace VCS project endpoint for list, add, remove, and refresh", async () => {
+    const fetchMock = vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+      const path = new URL(input).pathname;
+      const body = path.endsWith("/refresh")
+        ? { updated_mrs: 1 }
+        : path.endsWith("/projects") && init?.method === "POST"
+          ? { project }
+          : { projects: [project] };
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+
+    await expect(client.listGitLabProjects("ws-1")).resolves.toMatchObject({
+      projects: [{ id: "project-1", connection_id: "connection-1" }],
+    });
+    await client.createGitLabProject("ws-1", {
+      connection_id: "connection-1",
+      project: "group/subgroup/project",
+    });
+    await client.deleteGitLabProject("ws-1", "project-1");
+    await expect(client.refreshGitLabProject("ws-1", "project-1")).resolves.toMatchObject({
+      updated_mrs: 1,
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/api/workspaces/ws-1/vcs/gitlab/projects",
+      "/api/workspaces/ws-1/vcs/gitlab/projects",
+      "/api/workspaces/ws-1/vcs/gitlab/projects/project-1",
+      "/api/workspaces/ws-1/vcs/gitlab/projects/project-1/refresh",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      connection_id: "connection-1",
+      project: "group/subgroup/project",
+    });
+  });
+
+  it("loads details, refreshes, merges, loads traces, and links artifacts by canonical VCS PR ID", async () => {
+    const details = {
+      merge_request: {
+        id: "vcs-mr-1",
+        workspace_id: "ws-1",
+        project_path: "group/subgroup/project",
+        gitlab_project_id: 42,
+        iid: 7,
+        title: "Fix the project",
+        state: "open",
+        web_url: "https://gitlab.example.test/group/subgroup/project/-/merge_requests/7",
+        source_branch: "fix",
+        target_branch: "main",
+        author_username: "ada",
+        author_avatar_url: null,
+        sha: "abc123",
+        detailed_merge_status: "mergeable",
+        has_conflicts: false,
+        pipeline_status: "passed",
+        pipeline_url: null,
+        merged_at: null,
+        closed_at: null,
+        mr_created_at: "2026-01-01T00:00:00Z",
+        mr_updated_at: "2026-01-01T00:00:00Z",
+      },
+      approval: null,
+      discussions: [],
+      jobs: [],
+    };
+    const fetchMock = vi.fn().mockImplementation((input: string) => {
+      const body = new URL(input).pathname.endsWith("/trace")
+        ? { trace_summary: "test failed", trace_truncated: false }
+        : details;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+
+    await client.getGitLabMergeRequestDetails("issue-1", "vcs-mr-1");
+    await client.refreshGitLabMergeRequest("issue-1", "vcs-mr-1");
+    await client.mergeGitLabMergeRequest("issue-1", "vcs-mr-1");
+    await expect(client.getGitLabJobTrace("issue-1", "vcs-mr-1", "job-1")).resolves.toEqual({
+      trace_summary: "test failed",
+      trace_truncated: false,
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/api/issues/issue-1/vcs/pull-requests/vcs-mr-1/gitlab",
+      "/api/issues/issue-1/vcs/pull-requests/vcs-mr-1/gitlab/refresh",
+      "/api/issues/issue-1/vcs/pull-requests/vcs-mr-1/gitlab/merge",
+      "/api/issues/issue-1/vcs/pull-requests/vcs-mr-1/gitlab/jobs/job-1/trace",
+    ]);
+    expect(client.gitLabJobArtifactsURL("issue-1", "vcs-mr-1", "job-1")).toBe(
+      "https://api.example.test/api/issues/issue-1/vcs/pull-requests/vcs-mr-1/gitlab/jobs/job-1/artifacts",
+    );
+  });
+});
+
 
 describe("ApiClient issue environments response schema", () => {
   const validEnvironment = {

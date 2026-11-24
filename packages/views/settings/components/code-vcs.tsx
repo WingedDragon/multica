@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Copy, FolderGit2, GitBranch, MoreHorizontal, RefreshCw, Unplug } from "@multica/ui/icons";
@@ -42,10 +42,12 @@ import {
 } from "@multica/ui/components/ui/dropdown-menu";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { vcsConnectionsOptions } from "@multica/core/vcs";
+import { gitlabProjectsOptions } from "@multica/core/gitlab";
 import { api } from "@multica/core/api";
 import type { ConnectVCSResponse, VCSProvider } from "@multica/core/types";
 import { useT } from "../../i18n";
 import { SettingsRow } from "./settings-layout";
+import { GitLabProjectRows } from "./code-gitlab";
 import { HostMark, HostStatus } from "./code-host";
 
 const PROVIDERS: VCSProvider[] = ["forgejo", "gitea", "gitlab"];
@@ -70,10 +72,12 @@ export function VCSConnectionRows() {
   const wsId = useWorkspaceId();
   const qc = useQueryClient();
 
-  const { data } = useQuery(vcsConnectionsOptions(wsId));
-  const connections = data?.connections ?? [];
-  const configured = data?.configured === true;
-  const canManage = data?.can_manage === true;
+  const vcsQuery = useQuery(vcsConnectionsOptions(wsId));
+  const gitlabProjectsQuery = useQuery(gitlabProjectsOptions(wsId));
+  const connections = vcsQuery.data?.connections ?? [];
+  const gitlabProjects = gitlabProjectsQuery.data?.projects ?? [];
+  const configured = vcsQuery.data?.configured === true;
+  const canManage = vcsQuery.data?.can_manage === true;
 
   const [connectOpen, setConnectOpen] = useState(false);
   const [provider, setProvider] = useState<VCSProvider>("forgejo");
@@ -160,58 +164,120 @@ export function VCSConnectionRows() {
           </>
         )
       : t(($) => $.vcs.hosts_hint);
+  if (vcsQuery.isLoading) {
+    return (
+      <SettingsRow label={t(($) => $.vcs.section_title)}>
+        <span className="text-caption text-muted-foreground">
+          {t(($) => $.vcs.connections_loading)}
+        </span>
+      </SettingsRow>
+    );
+  }
+
+  if (vcsQuery.isError && !vcsQuery.data) {
+    return (
+      <SettingsRow label={t(($) => $.vcs.connections_load_failed)}>
+        <Button variant="outline" size="sm" onClick={() => void vcsQuery.refetch()}>
+          {t(($) => $.vcs.retry)}
+        </Button>
+      </SettingsRow>
+    );
+  }
+
 
   return (
     <>
-      {connections.map((c) => (
+      {vcsQuery.isError ? (
         <SettingsRow
-          key={c.id}
-          label={
-            <span className="flex min-w-0 items-center gap-3">
-              <HostMark>
-                <GitBranch className="size-4" />
-              </HostMark>
-              <span className="flex min-w-0 flex-wrap items-center gap-x-2">
-                <span className="break-all">
-                  {`${PROVIDER_LABELS[c.provider] ?? c.provider} · ${c.instance_url}`}
-                </span>
-                <HostStatus tone="success" label={t(($) => $.integrations.status_connected)} />
-              </span>
-            </span>
-          }
-          description={
-            <span className="block break-all pl-12">
-              {t(($) => $.vcs.connected_as, { login: c.account_login })}
-            </span>
-          }
+          label={t(($) => $.vcs.connections_load_failed)}
         >
-          {canManage ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <IconButton
-                    variant="ghost"
-                    size="icon-sm"
-                    label={t(($) => $.vcs.connection_actions, { url: c.instance_url })}
-                  />
-                }
-              >
-                <MoreHorizontal />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-auto">
-                <DropdownMenuItem onClick={() => setRotateTarget(c.id)}>
-                  <RefreshCw />
-                  {t(($) => $.vcs.regenerate_webhook)}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(c.id)}>
-                  <Unplug />
-                  {t(($) => $.vcs.disconnect)}
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
+          <Button variant="outline" size="sm" onClick={() => void vcsQuery.refetch()}>
+            {t(($) => $.vcs.retry)}
+          </Button>
         </SettingsRow>
+      ) : null}
+
+      {connections.map((c) => (
+        <Fragment key={c.id}>
+          <SettingsRow
+            label={
+              <span className="flex min-w-0 items-center gap-3">
+                <HostMark>
+                  <GitBranch className="size-4" />
+                </HostMark>
+                <span className="flex min-w-0 flex-wrap items-center gap-x-2">
+                  <span className="break-all">
+                    {`${PROVIDER_LABELS[c.provider] ?? c.provider} · ${c.instance_url}`}
+                  </span>
+                  <HostStatus tone="success" label={t(($) => $.integrations.status_connected)} />
+                </span>
+              </span>
+            }
+            description={
+              <span className="block break-all pl-12">
+                {t(($) => $.vcs.connected_as, { login: c.account_login })}
+              </span>
+            }
+          >
+            {canManage ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <IconButton
+                      variant="ghost"
+                      size="icon-sm"
+                      label={t(($) => $.vcs.connection_actions, { url: c.instance_url })}
+                    />
+                  }
+                >
+                  <MoreHorizontal />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-auto">
+                  <DropdownMenuItem onClick={() => setRotateTarget(c.id)}>
+                    <RefreshCw />
+                    {t(($) => $.vcs.regenerate_webhook)}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(c.id)}>
+                    <Unplug />
+                    {t(($) => $.vcs.disconnect)}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
+          </SettingsRow>
+          {c.provider === "gitlab" && gitlabProjectsQuery.isLoading ? (
+            <SettingsRow className="pl-16" label={t(($) => $.gitlab.projects_title)}>
+              <span className="text-caption text-muted-foreground">
+                {t(($) => $.gitlab.projects_loading)}
+              </span>
+            </SettingsRow>
+          ) : null}
+          {c.provider === "gitlab" && gitlabProjectsQuery.isError ? (
+            <SettingsRow
+              className="pl-16"
+              label={t(($) => $.gitlab.projects_load_failed)}
+            >
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void gitlabProjectsQuery.refetch()}
+              >
+                {t(($) => $.gitlab.retry)}
+              </Button>
+            </SettingsRow>
+          ) : null}
+          {c.provider === "gitlab" &&
+            !gitlabProjectsQuery.isLoading &&
+            (!gitlabProjectsQuery.isError || gitlabProjectsQuery.data) ? (
+            <GitLabProjectRows
+              connection={c}
+              projects={gitlabProjects.filter((project) => project.connection_id === c.id)}
+              canManage={canManage}
+              hasLoaded={!gitlabProjectsQuery.isError}
+            />
+          ) : null}
+          </Fragment>
       ))}
 
       {canManage || connections.length === 0 ? (

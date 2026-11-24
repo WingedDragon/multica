@@ -66,6 +66,55 @@ func TestBatchedHeartbeatScheduler_CoalescesAndFlushes(t *testing.T) {
 		t.Fatalf("flush did not bump last_seen_at: stale=%s after=%s", stale, lastSeenAfter)
 	}
 }
+func TestBatchedHeartbeatSchedulerMaintenanceFlushPreservesAndResumes(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	setVCSMigrationStateForTest(t, "verification_pending", true)
+
+	runtimeID := createRuntimeLocalSkillTestRuntime(t, testUserID)
+	stale := time.Now().Add(-2 * time.Hour)
+	setRuntimeLastSeenAt(t, runtimeID, stale)
+	rt := loadRuntime(t, runtimeID)
+	sched := NewBatchedHeartbeatScheduler(testHandler.Queries, time.Hour, nil)
+	if err := sched.Schedule(context.Background(), rt.ID, rt.WorkspaceID); err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+
+	sched.FlushNow(context.Background())
+	if got := sched.PendingCount(); got != 1 {
+		t.Fatalf("maintenance flush pending = %d, want 1", got)
+	}
+	_, lastSeen, _ := readRuntimeRow(t, runtimeID)
+	if lastSeen.After(stale.Add(time.Second)) {
+		t.Fatalf("maintenance flush changed last_seen_at: stale=%s after=%s", stale, lastSeen)
+	}
+
+	setVCSMigrationStateForTest(t, "complete", false)
+	sched.FlushNow(context.Background())
+	if got := sched.PendingCount(); got != 0 {
+		t.Fatalf("post-maintenance flush pending = %d, want 0", got)
+	}
+	_, lastSeen, _ = readRuntimeRow(t, runtimeID)
+	if !lastSeen.After(stale.Add(time.Hour)) {
+		t.Fatalf("post-maintenance flush did not resume: stale=%s after=%s", stale, lastSeen)
+	}
+}
+
+func TestBatchedHeartbeatSchedulerRunStartsOnceAndStopIsIdempotent(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	sched := NewBatchedHeartbeatScheduler(testHandler.Queries, time.Hour, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go sched.Run(ctx)
+	go sched.Run(ctx)
+	sched.Stop()
+	sched.Stop()
+}
+
 
 // TestBatchedHeartbeatScheduler_ExplicitDeregisterReceiptStaysOffline confirms
 // that a heartbeat queued before a user-visible deregistration cannot undo the

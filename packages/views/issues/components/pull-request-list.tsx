@@ -22,6 +22,7 @@ import {
   XCircle,
 } from "@multica/ui/icons";
 import {
+  githubKeys,
   issuePullRequestsOptions,
   derivePullRequestVerdict,
   formatPullRequestDiffCount,
@@ -35,17 +36,11 @@ import {
 import {
   gitlabKeys,
   gitlabMergeRequestDetailsOptions,
-  issueGitLabMergeRequestsOptions,
 } from "@multica/core/gitlab";
 import { api } from "@multica/core/api";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
-import type {
-  GitHubPullRequest,
-  GitLabMergeRequest,
-  GitLabPipelineStatus,
-  PRAutoComplete,
-} from "@multica/core/types";
+import type { GitHubPullRequest, PRAutoComplete } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
 import { IconButton } from "@multica/ui/components/common/icon-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@multica/ui/components/ui/tooltip";
@@ -70,10 +65,12 @@ type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 // collapse the rest once the section reaches 4 rows.
 const PR_LIMIT_BEFORE_COLLAPSE = 4;
 
-// GitHub PRs and GitLab MRs share one ordered sidebar list.
+// GitLab MRs use their details card; every other VCS provider stays on the
+// shared PR row without GitLab-specific actions.
 type PullRequestRowEntry =
   | { provider: "github"; item: GitHubPullRequest }
-  | { provider: "gitlab"; item: GitLabMergeRequest };
+  | { provider: "gitlab"; item: GitHubPullRequest }
+  | { provider: "other"; item: GitHubPullRequest };
 
 type PullRequestStatusKind =
   | "closed"
@@ -135,44 +132,42 @@ export function PullRequestList({
   issueId: string;
   /** The issue's identifier, for the "linked by MUL-1 in the title" label. */
   identifier?: string;
-  /** GitLab merge requests stay listed when the workspace turns GitHub PRs off. */
+  /** GitHub PRs follow the workspace setting; other VCS providers stay visible. */
   includeGitHub?: boolean;
 }) {
   const { t } = useT("issues");
   const [expanded, setExpanded] = useState(false);
-  const githubQuery = useQuery({
-    ...issuePullRequestsOptions(issueId),
-    enabled: includeGitHub && !!issueId,
-  });
-  const gitlabQuery = useQuery(issueGitLabMergeRequestsOptions(issueId));
-  const prs = githubQuery.data?.pull_requests ?? [];
+  const query = useQuery(issuePullRequestsOptions(issueId));
+  const allPrs = query.data?.pull_requests ?? [];
+  const prs = allPrs.filter(
+    (pr) => includeGitHub || (pr.provider ?? "github") !== "github",
+  );
   // Older backends send no auto-complete block and have no link/unlink
   // endpoints, so the row actions stay hidden with it.
-  const autoComplete = githubQuery.data?.auto_complete ?? null;
+  const autoComplete = includeGitHub ? query.data?.auto_complete ?? null : null;
   const rowActions = autoComplete ? { issueId, identifier, autoComplete } : null;
-  const rows: PullRequestRowEntry[] = [
-    ...(includeGitHub
-      ? prs.map((pr) => ({ provider: "github" as const, item: pr }))
-      : []),
-    ...(gitlabQuery.data?.merge_requests ?? []).map((mr) => ({ provider: "gitlab" as const, item: mr })),
-  ].sort((a, b) => createdAt(b).localeCompare(createdAt(a)));
+  const rows: PullRequestRowEntry[] = prs
+    .map((item): PullRequestRowEntry => {
+      const provider = item.provider ?? "github";
+      if (provider === "gitlab") return { provider: "gitlab", item };
+      if (provider === "github") return { provider: "github", item };
+      return { provider: "other", item };
+    })
+    .sort((a, b) => createdAt(b).localeCompare(createdAt(a)));
 
   useEffect(() => {
     setExpanded(false);
   }, [issueId]);
 
-  if ((includeGitHub && githubQuery.isLoading) || gitlabQuery.isLoading) {
+  if (query.isLoading) {
     return <p className="text-label text-muted-foreground px-2">{t(($) => $.detail.pull_requests_loading)}</p>;
   }
-  if (((includeGitHub && githubQuery.isError) || gitlabQuery.isError) && rows.length === 0) {
+  if (query.isError && rows.length === 0) {
     return (
       <button
         type="button"
         className="flex min-h-8 w-full items-center rounded-md px-2 py-1.5 text-left text-label text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
-        onClick={() => {
-          if (includeGitHub && githubQuery.isError) void githubQuery.refetch();
-          if (gitlabQuery.isError) void gitlabQuery.refetch();
-        }}
+        onClick={() => void query.refetch()}
       >
         {t(($) => $.detail.section_load_failed_retry)}
       </button>
@@ -196,16 +191,19 @@ export function PullRequestList({
   // The repo name only tells rows apart when the rows span repos; otherwise it
   // spends the width the diff needs. The row tooltip keeps owner/repo#number.
   const showRepo =
-    new Set(
-      rows.map((row) =>
-        row.provider === "github"
-          ? `${row.item.repo_owner}/${row.item.repo_name}`
-          : row.item.project_path,
-      ),
-    ).size > 1;
+    new Set(rows.map((row) => `${row.item.repo_owner}/${row.item.repo_name}`)).size > 1;
 
   return (
     <div className="space-y-1">
+      {query.isError ? (
+        <button
+          type="button"
+          className="flex min-h-8 w-full items-center rounded-md px-2 py-1.5 text-left text-label text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+          onClick={() => void query.refetch()}
+        >
+          {t(($) => $.detail.section_load_failed_retry)}
+        </button>
+      ) : null}
       {expandedHead.map((row) => (
         <ProviderPullRequestRow
           key={`${row.provider}:${row.item.id}`}
@@ -242,7 +240,7 @@ export function PullRequestList({
         </div>
       ) : null}
       {autoComplete ? (
-        <AutoCompleteLine issueId={issueId} prs={prs} autoComplete={autoComplete} />
+        <AutoCompleteLine issueId={issueId} prs={allPrs} autoComplete={autoComplete} />
       ) : null}
     </div>
   );
@@ -261,15 +259,20 @@ function ProviderPullRequestRow({
   showRepo: boolean;
   actions: RowActions | null;
 }) {
-  return row.provider === "github" ? (
-    <PullRequestRow pr={row.item} identifier={identifier} showRepo={showRepo} actions={actions} />
-  ) : (
+  return row.provider === "gitlab" ? (
     <GitLabMergeRequestRow issueId={issueId} mr={row.item} showRepo={showRepo} />
+  ) : (
+    <PullRequestRow
+      pr={row.item}
+      identifier={identifier}
+      showRepo={showRepo}
+      actions={row.provider === "github" ? actions : null}
+    />
   );
 }
 
 function createdAt(row: PullRequestRowEntry): string {
-  return row.provider === "github" ? row.item.pr_created_at : row.item.mr_created_at;
+  return row.item.pr_created_at;
 }
 
 interface RowActions {
@@ -784,13 +787,17 @@ function getVerdictPill(verdict: PullRequestVerdict, t: IssuesT): VerdictPillCon
  * adds the pipeline strip, the derived merge-status pill, and — behind the
  * details toggle — approvals, jobs and discussions.
  */
+/**
+ * One linked GitLab MR in the shared VCS PR list. Its id is the canonical
+ * vcs_pull_request id, used for details, refresh, merge, trace and artifacts.
+ */
 function GitLabMergeRequestRow({
   issueId,
   mr,
   showRepo,
 }: {
   issueId: string;
-  mr: GitLabMergeRequest;
+  mr: GitHubPullRequest;
   showRepo: boolean;
 }) {
   const { t } = useT("issues");
@@ -798,21 +805,39 @@ function GitLabMergeRequestRow({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const cfg = PULL_REQUEST_STATE_ICON[mr.state] ?? { icon: GitPullRequest, className: "" };
   const StateIcon = cfg.icon;
-  const counts = getGitLabPipelineCounts(mr.pipeline_status);
+  const counts = getGitLabPipelineCounts(mr);
   const kind = deriveGitLabMergeRequestStatusKind(mr, counts);
-  const statusPill = getGitLabVerdictPill(kind, t);
-  // A draft MR keeps whatever GitLab says about the merge; the prefix only
-  // marks that the merge stays blocked until the MR is marked ready.
+  const hasLegacyChecks =
+    mr.pipeline_status == null &&
+    (mr.checks_conclusion != null ||
+      mr.checks_total != null ||
+      mr.checks_passed != null ||
+      mr.checks_failed != null ||
+      mr.checks_running != null ||
+      mr.checks_pending != null);
+  const legacyVerdict = hasLegacyChecks ? derivePullRequestVerdict(mr) : null;
+  const legacyStatusPill =
+    legacyVerdict &&
+    (legacyVerdict.kind === "failed" ||
+      legacyVerdict.kind === "running" ||
+      legacyVerdict.kind === "passed")
+      ? getVerdictPill(legacyVerdict, t)
+      : null;
+  const statusPill =
+    legacyStatusPill &&
+    kind !== "closed" &&
+    kind !== "merged" &&
+    kind !== "conflicts" &&
+    kind !== "gitlab_blocked" &&
+    kind !== "gitlab_checking"
+      ? legacyStatusPill
+      : getGitLabVerdictPill(kind, t);
   const pill =
     mr.state === "draft"
       ? { ...statusPill, label: t(($) => $.detail.pull_request_card_draft_prefix, { status: statusPill.label }) }
       : statusPill;
   const segments = deriveGitLabMergeRequestProgressSegments(mr.state, counts);
-  const showStats = shouldShowPullRequestStats({
-    additions: mr.additions,
-    deletions: mr.deletions,
-    changed_files: mr.changed_files,
-  });
+  const showStats = shouldShowPullRequestStats(mr);
   const branchLabel = getGitLabBranchLabel(mr);
   const detailsQuery = useQuery({
     ...gitlabMergeRequestDetailsOptions(issueId, mr.id),
@@ -822,14 +847,12 @@ function GitLabMergeRequestRow({
     mutationFn: () => api.refreshGitLabMergeRequest(issueId, mr.id),
     onSuccess: async () => {
       await Promise.all([
-        qc.invalidateQueries({ queryKey: gitlabKeys.mergeRequests(issueId) }),
+        qc.invalidateQueries({ queryKey: githubKeys.pullRequests(issueId) }),
         qc.invalidateQueries({ queryKey: gitlabKeys.mergeRequestDetails(issueId, mr.id) }),
       ]);
     },
   });
 
-  // The row link and this row's buttons are siblings: a button inside an
-  // anchor is invalid HTML, and refreshing must not open the MR.
   return (
     <div className="group/pr relative -mx-2 rounded-md transition-colors hover:bg-accent/50">
       <Tooltip>
@@ -837,7 +860,7 @@ function GitLabMergeRequestRow({
           render={
             <a
               data-testid="pull-request-row"
-              href={mr.web_url}
+              href={mr.html_url}
               target="_blank"
               rel="noreferrer noopener"
               className="flex items-start gap-2 rounded-md px-2 py-1.5"
@@ -850,7 +873,7 @@ function GitLabMergeRequestRow({
             <div className="mt-1 flex items-center gap-2">
               <p className="flex h-lh min-w-0 flex-1 flex-wrap items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-micro text-muted-foreground tabular-nums">
                 <span className="min-w-0 truncate">
-                  {showRepo ? mr.project_path : null}!{mr.iid}
+                  {showRepo ? `${mr.repo_owner}/${mr.repo_name}` : null}!{mr.number}
                 </span>
                 <span className="inline-flex min-w-0 items-center gap-1.5">
                   <span aria-hidden="true" className="text-faint-foreground">
@@ -875,8 +898,8 @@ function GitLabMergeRequestRow({
         <TooltipContent side="left" align="start" className="flex-col items-start gap-0.5">
           <span className="font-medium">{mr.title}</span>
           <span className="text-muted-foreground">
-            {mr.project_path}!{mr.iid}
-            {mr.author_username ? ` · @${mr.author_username}` : null}
+            {mr.repo_owner}/{mr.repo_name}!{mr.number}
+            {mr.author_login ? ` · @${mr.author_login}` : null}
           </span>
           {showStats ? (
             <span className="text-muted-foreground tabular-nums">
@@ -910,16 +933,33 @@ function GitLabMergeRequestRow({
           <RefreshCw className={cn("h-3 w-3", refresh.isPending && "animate-spin")} />
         </Button>
       </div>
+      {refresh.isError ? (
+        <p role="alert" className="px-2 pb-1.5 text-[11px] text-destructive">
+          {t(($) => $.detail.section_load_failed_retry)}
+        </p>
+      ) : null}
       {detailsOpen ? (
-        detailsQuery.isLoading ? (
-          <p className="px-2 pb-1.5 text-[11px] text-muted-foreground">
-            {t(($) => $.detail.gitlab_loading_details)}
-          </p>
-        ) : detailsQuery.data ? (
-          <div className="px-2 pb-1.5">
-            <GitLabMergeRequestDetails issueId={issueId} details={detailsQuery.data} />
-          </div>
-        ) : null
+        <>
+          {detailsQuery.isLoading ? (
+            <p className="px-2 pb-1.5 text-[11px] text-muted-foreground">
+              {t(($) => $.detail.gitlab_loading_details)}
+            </p>
+          ) : null}
+          {detailsQuery.isError ? (
+            <button
+              type="button"
+              className="px-2 pb-1.5 text-left text-[11px] text-muted-foreground underline"
+              onClick={() => void detailsQuery.refetch()}
+            >
+              {t(($) => $.detail.section_load_failed_retry)}
+            </button>
+          ) : null}
+          {detailsQuery.data ? (
+            <div className="px-2 pb-1.5">
+              <GitLabMergeRequestDetails issueId={issueId} details={detailsQuery.data} />
+            </div>
+          ) : null}
+        </>
       ) : null}
     </div>
   );
@@ -949,20 +989,46 @@ function PullRequestProgressStrip({
   );
 }
 
-function getGitLabPipelineCounts(status: GitLabPipelineStatus | string | null): {
+function getGitLabPipelineCounts(mr: GitHubPullRequest): {
   failed: number;
   pending: number;
   passed: number;
 } {
-  return {
-    failed: status === "failed" ? 1 : 0,
-    pending: status === "pending" ? 1 : 0,
-    passed: status === "passed" ? 1 : 0,
-  };
+  const normalized = mr.pipeline_status?.toLowerCase();
+  if (normalized) {
+    return {
+      failed: normalized === "failed" ? 1 : 0,
+      pending:
+        normalized === "pending" ||
+        normalized === "running" ||
+        normalized === "created" ||
+        normalized === "preparing"
+          ? 1
+          : 0,
+      passed: normalized === "passed" || normalized === "success" ? 1 : 0,
+    };
+  }
+
+  const failed = Math.max(
+    mr.checks_failed ?? 0,
+    mr.checks_conclusion === "failed" ? 1 : 0,
+  );
+  const pending = Math.max(
+    mr.checks_running ?? 0,
+    mr.checks_pending ?? 0,
+    mr.checks_conclusion === "pending" ? 1 : 0,
+  );
+  const passed = Math.max(
+    mr.checks_passed ?? 0,
+    mr.checks_conclusion === "passed"
+      ? Math.max(1, (mr.checks_total ?? 1) - failed - pending)
+      : 0,
+  );
+  return { failed, pending, passed };
 }
 
 function deriveGitLabMergeRequestStatusKind(
-  mr: GitLabMergeRequest,
+  mr: GitHubPullRequest,
   counts: { failed: number; pending: number; passed: number },
 ): GitLabMergeRequestStatusKind {
   if (mr.state === "closed") return "closed";
@@ -990,11 +1056,11 @@ function deriveGitLabMergeRequestStatusKind(
   return "ready";
 }
 
-function getGitLabBranchLabel(mr: GitLabMergeRequest): string | null {
-  if (mr.source_branch && mr.target_branch) {
-    return `${mr.source_branch} -> ${mr.target_branch}`;
+function getGitLabBranchLabel(mr: GitHubPullRequest): string | null {
+  if (mr.branch && mr.target_branch) {
+    return `${mr.branch} -> ${mr.target_branch}`;
   }
-  return mr.source_branch ?? mr.target_branch ?? null;
+  return mr.branch ?? mr.target_branch ?? null;
 }
 
 function deriveGitLabMergeRequestProgressSegments(

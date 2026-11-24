@@ -198,6 +198,10 @@ allowlist の正確な判定順序は[ログインとサインアップ](/auth-s
 | Telegram | `MULTICA_TELEGRAM_TOOL_PROGRESS` | ストリーミング返信に表示するツールのステップ。`auto`（既定。DM では詳細、グループでは作業の種類のみ）、`off`、`summary`、`detail` |
 | セルフホスト Git | `MULTICA_VCS_INTEGRATION_ENABLED` | Forgejo/Gitea/GitLab 連携のスイッチ。compose ではデフォルトで有効 |
 | セルフホスト Git | `MULTICA_VCS_SECRET_KEY` | base64 エンコードされた 32 バイトの暗号化キー（`openssl rand -base64 32`）。未設定の場合、この機能全体が利用できません |
+| セルフホスト Git | `GITLAB_PROXY_URL` | GitLab 向けの任意の送信プロキシ。トークン検証、プロジェクトと Webhook の管理、MR の詳細、ウェイクアップの状態取得に共通して使用します。未設定なら直接接続し、他のプロバイダーには影響しません。[セルフホスト Git ホスティング](/vcs-integration)を参照してください。 |
+| GitLab 移行 | `GITLAB_BASE_URL` | 旧データ移行時に限るインスタンス URL のフォールバック。完全一致する旧インスタンスの保存済み認証情報が暗号化されていない場合のみ使用し、暗号化済みの保存値を優先します。 |
+| GitLab 移行 | `GITLAB_TOKEN` | 旧データ移行時に限るトークンのフォールバック。完全一致するインスタンスの保存済みトークンが暗号化されていない場合のみ使用します。暗号化済みの保存値を優先し、この秘密情報をログに出力しないでください。 |
+| GitLab 移行 | `GITLAB_WEBHOOK_SECRET` | 旧データ移行時に限る Webhook secret のフォールバック。完全一致するインスタンスの保存済み secret が暗号化されていない場合のみ使用します。暗号化済みの保存値を優先し、この秘密情報をログに出力しないでください。 |
 | テーマストア | `MULTICA_THEME_REGISTRY_URL` | 公式レジストリの fork など、別のレジストリの `index.json`。[テーマと外観](/themes#セルフホスト)を参照 |
 
 `GITHUB_APP_ID` と秘密鍵を設定しなくても、PR の関連付け・ミラー・マージ時のステータス変更は通常どおり動きますが、カードに CI とマージ可否のステータスが表示されず、「GitHub から選択」のリポジトリ入口も無効になります。

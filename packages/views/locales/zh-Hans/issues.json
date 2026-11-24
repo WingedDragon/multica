@@ -512,7 +512,7 @@
     "quick_action_blocked_title": "你无法执行这条快捷操作",
     "quick_action_blocked_body": "\"{{name}}\"由一个你无权触发的智能体执行。可以请工作区管理员把该智能体开放给团队，或把这条操作改绑一个共享的智能体。",
     "quick_action_blocked_ok": "知道了",
-    "pull_requests_loading": "加载中…",
+    "pull_requests_loading": "加载中...",
     "pull_requests_empty": "还没有关联的 PR 或 MR。在 PR 或 MR 的分支名、标题或正文里引用本 issue 的 identifier 即可自动关联。",
     "merge_request_provider_gitlab": "GitLab",
     "merge_request_card_status_blocked": "合并受阻",

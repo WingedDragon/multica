@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -265,6 +266,9 @@ func TestValidateToken(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.kind, func(t *testing.T) {
+			if c.kind == "gitlab" {
+				t.Setenv("GITLAB_PROXY_URL", "")
+			}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != c.path {
 					t.Errorf("path = %q, want %q", r.URL.Path, c.path)
@@ -414,6 +418,7 @@ func TestGitLabConflictStateRequiresAuthoritativeStatus(t *testing.T) {
 }
 
 func TestGitLabWakeupSnapshotUsesCurrentHeadAndForkProject(t *testing.T) {
+	t.Setenv("GITLAB_PROXY_URL", "")
 	var targetDetails, sourceDetails bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.EscapedPath() {
@@ -468,6 +473,7 @@ func TestGitLabWakeupSnapshotUsesCurrentHeadAndForkProject(t *testing.T) {
 }
 
 func TestGitLabWakeupSnapshotFailsWhenForkProjectIsUnreadable(t *testing.T) {
+	t.Setenv("GITLAB_PROXY_URL", "")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.EscapedPath() {
 		case "/api/v4/projects/group%2Frepo":
@@ -507,33 +513,39 @@ func TestForgejoStatusTimestamp(t *testing.T) {
 	}
 }
 
-func TestGitlabRepositoryReadable(t *testing.T) {
+func TestGitlabRepositoryReadableDistinguishesUnknownAccess(t *testing.T) {
+	t.Setenv("GITLAB_PROXY_URL", "")
 	cases := []struct {
-		status int
-		want   bool
+		name      string
+		status    int
+		body      string
+		want      bool
+		wantError bool
 	}{
-		{http.StatusOK, true},
-		{http.StatusForbidden, false},
-		{http.StatusNotFound, false},
+		{name: "readable", status: http.StatusOK, body: `{"path_with_namespace":"group/sub/repo"}`, want: true},
+		{name: "unauthorized", status: http.StatusUnauthorized, wantError: true},
+		{name: "forbidden", status: http.StatusForbidden, wantError: true},
+		{name: "not found is ambiguous", status: http.StatusNotFound, wantError: true},
+		{name: "identity mismatch", status: http.StatusOK, body: `{"path_with_namespace":"group/other"}`, wantError: true},
 	}
 	for _, tc := range cases {
-		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api/v4/projects/group%2Fsub%2Frepo" && r.URL.EscapedPath() != "/api/v4/projects/group%2Fsub%2Frepo" {
+				if r.URL.Path != "/api/v4/projects/group/sub/repo" && r.URL.EscapedPath() != "/api/v4/projects/group%2Fsub%2Frepo" {
 					t.Errorf("path = %q", r.URL.Path)
 				}
 				if r.Header.Get("PRIVATE-TOKEN") != "tok" {
 					t.Errorf("PRIVATE-TOKEN missing")
 				}
 				w.WriteHeader(tc.status)
-				if tc.status == http.StatusOK {
-					_, _ = w.Write([]byte(`{"path_with_namespace":"group/sub/repo"}`))
+				if tc.body != "" {
+					_, _ = w.Write([]byte(tc.body))
 				}
 			}))
 			defer srv.Close()
 			got, err := (&gitlabProvider{}).RepositoryReadable(context.Background(), srv.URL, "group/sub", "repo", "tok")
-			if err != nil || got != tc.want {
-				t.Fatalf("got=%v err=%v want=%v", got, err, tc.want)
+			if got != tc.want || (err != nil) != tc.wantError {
+				t.Fatalf("got=%v err=%v want=%v error=%v", got, err, tc.want, tc.wantError)
 			}
 		})
 	}
@@ -547,5 +559,190 @@ func TestValidateTokenUnauthorized(t *testing.T) {
 	_, err := p.ValidateToken(context.Background(), srv.URL, "bad")
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestGitLabProviderRequestsUseConfiguredProxy(t *testing.T) {
+	var paths []string
+	var pathsMu sync.Mutex
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Scheme != "http" || r.URL.Host != "gitlab.invalid" {
+			t.Errorf("proxy request URL = %q, want an absolute request to gitlab.invalid", r.URL)
+		}
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != "token" {
+			t.Errorf("PRIVATE-TOKEN = %q, want token", got)
+		}
+		path := r.URL.EscapedPath()
+		pathsMu.Lock()
+		paths = append(paths, path)
+		pathsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch path {
+		case "/gitlab/api/v4/user":
+			_, _ = w.Write([]byte(`{"username":"alice"}`))
+		case "/gitlab/api/v4/projects/group%2Frepo":
+			_, _ = w.Write([]byte(`{"id":42,"path_with_namespace":"group/repo"}`))
+		case "/gitlab/api/v4/projects/42/merge_requests/7":
+			_, _ = w.Write([]byte(`{"iid":7,"state":"opened","sha":"head","source_branch":"feature","source_project_id":42,"source_project":{"id":42,"path_with_namespace":"group/repo"},"updated_at":"2026-11-23T12:00:00Z"}`))
+		case "/gitlab/api/v4/projects/42/merge_requests/7/pipelines", "/gitlab/api/v4/projects/42/pipelines":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected proxied GitLab path %q", path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer proxy.Close()
+	t.Setenv("GITLAB_PROXY_URL", proxy.URL)
+
+	const instanceURL = "http://gitlab.invalid/gitlab"
+	provider := gitlabProvider{}
+	account, err := provider.ValidateToken(context.Background(), instanceURL, "token")
+	if err != nil || account.Login != "alice" {
+		t.Fatalf("ValidateToken = %+v, %v", account, err)
+	}
+	readable, err := provider.RepositoryReadable(context.Background(), instanceURL, "group", "repo", "token")
+	if err != nil || !readable {
+		t.Fatalf("RepositoryReadable = %v, %v", readable, err)
+	}
+	mr, err := provider.ReadGitLabWakeupMergeRequest(context.Background(), instanceURL, "group/repo", "token", 7)
+	if err != nil {
+		t.Fatalf("ReadGitLabWakeupMergeRequest: %v", err)
+	}
+	pipelines := provider.ReadGitLabWakeupPipelines(context.Background(), instanceURL, "token", 7, mr)
+	if pipelines.PipelineError != nil {
+		t.Fatalf("ReadGitLabWakeupPipelines: %v", pipelines.PipelineError)
+	}
+
+	wantPaths := []string{
+		"/gitlab/api/v4/user",
+		"/gitlab/api/v4/projects/group%2Frepo",
+		"/gitlab/api/v4/projects/group%2Frepo",
+		"/gitlab/api/v4/projects/42/merge_requests/7",
+		"/gitlab/api/v4/projects/42/merge_requests/7/pipelines",
+		"/gitlab/api/v4/projects/42/pipelines",
+	}
+	pathsMu.Lock()
+	observedPaths := append([]string(nil), paths...)
+	pathsMu.Unlock()
+	if len(observedPaths) != len(wantPaths) {
+		t.Fatalf("proxied paths = %q, want %q", observedPaths, wantPaths)
+	}
+	for i, want := range wantPaths {
+		if observedPaths[i] != want {
+			t.Errorf("proxied path[%d] = %q, want %q", i, observedPaths[i], want)
+		}
+	}
+}
+
+func TestForgejoRequestsIgnoreGitLabProxy(t *testing.T) {
+	var proxyRequests, directRequests int
+	var requestsMu sync.Mutex
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsMu.Lock()
+		proxyRequests++
+		requestsMu.Unlock()
+		http.Error(w, "GitLab proxy must not receive Forgejo traffic", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	t.Setenv("GITLAB_PROXY_URL", proxy.URL)
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("NO_PROXY", "*")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsMu.Lock()
+		directRequests++
+		requestsMu.Unlock()
+		_, _ = w.Write([]byte(`{"login":"octo"}`))
+	}))
+	defer server.Close()
+
+	provider, _ := For("forgejo")
+	account, err := provider.ValidateToken(context.Background(), server.URL, "token")
+	if err != nil || account.Login != "octo" {
+		t.Fatalf("Forgejo ValidateToken = %+v, %v", account, err)
+	}
+	requestsMu.Lock()
+	gotDirectRequests, gotProxyRequests := directRequests, proxyRequests
+	requestsMu.Unlock()
+	if gotDirectRequests != 1 || gotProxyRequests != 0 {
+		t.Fatalf("direct requests = %d, GitLab proxy requests = %d; want 1 and 0", gotDirectRequests, gotProxyRequests)
+	}
+}
+
+func TestGitLabProviderHTTPClientSupportsConfiguredProxySchemes(t *testing.T) {
+	for _, scheme := range []string{"http", "https", "socks5", "socks5h"} {
+		t.Run(scheme, func(t *testing.T) {
+			client, err := newGitLabProviderHTTPClient(scheme + "://proxy.example:1234")
+			if err != nil {
+				t.Fatalf("newGitLabProviderHTTPClient: %v", err)
+			}
+			transport, ok := client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("transport = %T", client.Transport)
+			}
+			if client.Timeout != 15*time.Second {
+				t.Errorf("timeout = %s, want 15s", client.Timeout)
+			}
+			if transport.TLSClientConfig != nil {
+				t.Errorf("TLSClientConfig = %+v, want Go's verified default TLS configuration", transport.TLSClientConfig)
+			}
+			switch scheme {
+			case "http", "https":
+				if transport.Proxy == nil || transport.DialContext != nil {
+					t.Fatalf("HTTP(S) proxy transport = %+v, want ProxyURL and default dialing", transport)
+				}
+				req, _ := http.NewRequest(http.MethodGet, "https://gitlab.example/api/v4/user", nil)
+				got, err := transport.Proxy(req)
+				if err != nil {
+					t.Fatalf("Proxy: %v", err)
+				}
+				if got == nil || got.Scheme != scheme || got.Host != "proxy.example:1234" {
+					t.Errorf("proxy target = %v; want %s://proxy.example:1234", got, scheme)
+				}
+			case "socks5", "socks5h":
+				if transport.Proxy != nil || transport.DialContext == nil {
+					t.Errorf("SOCKS transport = %+v, want direct proxy dialing", transport)
+				}
+			}
+		})
+	}
+}
+
+func TestGitLabProviderRequestHonorsContextCancellation(t *testing.T) {
+	started := make(chan struct{})
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer proxy.Close()
+	t.Setenv("GITLAB_PROXY_URL", proxy.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := (gitlabProvider{}).ValidateToken(ctx, "http://gitlab.invalid", "token")
+		result <- err
+	}()
+	select {
+	case <-started:
+		cancel()
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not reach configured proxy")
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("ValidateToken succeeded after its request context was canceled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ValidateToken did not return after request context cancellation")
+	}
+}
+
+func TestGitLabProviderHTTPClientRejectsUnsupportedProxyScheme(t *testing.T) {
+	if _, err := newGitLabProviderHTTPClient("ftp://proxy.example:1234"); err == nil {
+		t.Fatal("unsupported proxy scheme was accepted")
 	}
 }

@@ -387,29 +387,8 @@ func listChatWakeupGitLabConnections(ctx context.Context, client *cli.APIClient)
 	if strings.TrimSpace(client.WorkspaceID) == "" {
 		return nil, fmt.Errorf("select a workspace before listing GitLab connections")
 	}
-	path := "/api/workspaces/" + url.PathEscape(client.WorkspaceID)
-	var legacy struct {
-		Connections []struct {
-			ID          string `json:"id"`
-			WorkspaceID string `json:"workspace_id"`
-			BaseURL     string `json:"base_url"`
-			Host        string `json:"host"`
-		} `json:"connections"`
-	}
-	if err := client.GetJSON(ctx, path+"/gitlab/config", &legacy); err != nil {
-		return nil, fmt.Errorf("list legacy GitLab connections: %w", err)
-	}
-	rows := make([]map[string]any, 0, len(legacy.Connections))
-	for _, connection := range legacy.Connections {
-		if connection.ID == "" || connection.WorkspaceID != client.WorkspaceID {
-			continue
-		}
-		rows = append(rows, map[string]any{
-			"id": connection.ID, "provider": "gitlab", "source": "gitlab_connection",
-			"instance_url": connection.BaseURL, "host": connection.Host,
-		})
-	}
-	var vcs struct {
+	path := "/api/workspaces/" + url.PathEscape(client.WorkspaceID) + "/vcs/connections"
+	var response struct {
 		Connections []struct {
 			ID          string `json:"id"`
 			WorkspaceID string `json:"workspace_id"`
@@ -417,10 +396,11 @@ func listChatWakeupGitLabConnections(ctx context.Context, client *cli.APIClient)
 			InstanceURL string `json:"instance_url"`
 		} `json:"connections"`
 	}
-	if err := client.GetJSON(ctx, path+"/vcs/connections", &vcs); err != nil {
+	if err := client.GetJSON(ctx, path, &response); err != nil {
 		return nil, fmt.Errorf("list VCS connections: %w", err)
 	}
-	for _, connection := range vcs.Connections {
+	rows := make([]map[string]any, 0, len(response.Connections))
+	for _, connection := range response.Connections {
 		if connection.Provider != "gitlab" || connection.ID == "" || connection.WorkspaceID != client.WorkspaceID {
 			continue
 		}
@@ -430,9 +410,6 @@ func listChatWakeupGitLabConnections(ctx context.Context, client *cli.APIClient)
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		if sourceI, sourceJ := strVal(rows[i], "source"), strVal(rows[j], "source"); sourceI != sourceJ {
-			return sourceI < sourceJ
-		}
 		return strVal(rows[i], "id") < strVal(rows[j], "id")
 	})
 	return rows, nil

@@ -554,6 +554,13 @@ func (s *ChatWakeupService) EndForArchivedSession(ctx context.Context, sessionID
 // Tick evaluates every due wakeup once. A failure on one wakeup is recorded
 // on it and does not stop the others.
 func (s *ChatWakeupService) Tick(ctx context.Context) error {
+	ready, err := vcsMigrationAllowsBusinessWrites(ctx, s.Tasks.Queries)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return nil
+	}
 	ids, err := s.Tasks.Queries.ListDueChatWakeupIDs(ctx, chatWakeupTickLimit)
 	if err != nil {
 		return err

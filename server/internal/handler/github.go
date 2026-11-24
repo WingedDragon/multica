@@ -293,10 +293,9 @@ func currentGitHubSnapshotAvailable(
 	return enabled && fetchedAt.Valid && snapshotHeadSHA != "" && snapshotHeadSHA == headSHA
 }
 
-// aggregateChecksConclusion collapses per-PR commit-status counts into a
-// single coarse status. Still used by the self-hosted VCS provider path
-// (Forgejo / Gitea / GitLab), which mirrors commit statuses via webhook rather
-// than fetching a GitHub-style API snapshot:
+// aggregateChecksConclusion collapses the current-head check counts returned by
+// the shared VCS pull-request query. GitLab combines pipeline state with
+// commit-status state; Forgejo and Gitea continue to expose webhook statuses:
 //   - any failed status wins ("failed");
 //   - any not-yet-completed status makes the PR "pending";
 //   - all completed and passed is "passed";
@@ -1864,11 +1863,12 @@ func (h *Handler) mirrorPullRequestForWorkspace(ctx context.Context, wsID pgtype
 				idents:    idents,
 				permits:   func(id string) bool { return linkPolicy.permits(id, workspaceID) },
 				ambiguous: func(id string) bool { return linkPolicy.ambiguous[id] },
-				link: func(issueID pgtype.UUID) (int64, error) {
+				link: func(issueID pgtype.UUID, _ bool) (int64, error) {
 					return h.Queries.LinkIssueToPullRequest(ctx, db.LinkIssueToPullRequestParams{IssueID: issueID, PullRequestID: pr.ID})
 				},
-				unlink: func(issueID pgtype.UUID) (int64, error) {
-					return h.Queries.UnlinkIssueFromPullRequest(ctx, db.UnlinkIssueFromPullRequestParams{IssueID: issueID, PullRequestID: pr.ID})
+				unlink: func(issueID pgtype.UUID) (bool, error) {
+					unlinked, err := h.Queries.UnlinkIssueFromPullRequest(ctx, db.UnlinkIssueFromPullRequestParams{IssueID: issueID, PullRequestID: pr.ID})
+					return unlinked > 0, err
 				},
 				listAuto: func() ([]pgtype.UUID, error) {
 					return h.Queries.ListAutoLinkedIssueIDsForPullRequest(ctx, pr.ID)
@@ -1904,12 +1904,13 @@ func (h *Handler) mirrorPullRequestForWorkspace(ctx context.Context, wsID pgtype
 
 // prAutoLinkInput is what reconcileAutoLinks needs from one provider.
 type prAutoLinkInput struct {
-	idents    []string                         // identifiers the PR claims (see prClaimedIdentifiers)
-	permits   func(identifier string) bool     // cross-workspace verdict (always true for VCS)
-	ambiguous func(identifier string) bool     // resolved in several workspaces
-	link      func(pgtype.UUID) (int64, error) // automatic link; 1 when new
-	unlink    func(pgtype.UUID) (int64, error) // drop a link; 1 when removed
-	listAuto  func() ([]pgtype.UUID, error)    // issues currently auto-linked to the PR
+	idents      []string                               // identifiers the PR claims (see prClaimedIdentifiers)
+	permits     func(identifier string) bool           // cross-workspace verdict (always true for VCS)
+	ambiguous   func(identifier string) bool           // resolved in several workspaces
+	closeIntent func(identifier string) bool           // provider-specific closing keyword for this identifier
+	link        func(pgtype.UUID, bool) (int64, error) // automatic link; 1 when new
+	unlink      func(pgtype.UUID) (bool, error)        // whether an automatic link was removed
+	listAuto    func() ([]pgtype.UUID, error)          // issues currently auto-linked to the PR
 }
 
 // reconcileAutoLinks makes the PR's automatic links match its claims. It
@@ -1951,7 +1952,8 @@ func (h *Handler) reconcileAutoLinks(ctx context.Context, ws db.Workspace, prID 
 			continue
 		}
 		claimed[issue.ID] = struct{}{}
-		rows, err := in.link(issue.ID)
+		closeIntent := in.closeIntent != nil && in.closeIntent(id)
+		rows, err := in.link(issue.ID, closeIntent)
 		if err != nil {
 			slog.Warn("pr link: link failed", "err", err)
 			continue
@@ -1976,13 +1978,12 @@ func (h *Handler) reconcileAutoLinks(ctx context.Context, ws db.Workspace, prID 
 		if terminal && !ambiguous {
 			continue
 		}
-		rows, err := in.unlink(issueID)
+		removed, err := in.unlink(issueID)
 		if err != nil {
 			slog.Warn("pr link: unlink failed", "err", err)
 			continue
 		}
-		if rows > 0 {
-			// Dropping an unmerged PR can leave only merged ones behind.
+		if removed {
 			touched[issueID] = struct{}{}
 		}
 	}

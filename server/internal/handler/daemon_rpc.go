@@ -43,6 +43,10 @@ func (w *rpcResponseCapture) Write(b []byte) (int, error) {
 // set at connect, so the reused handler's per-runtime daemon/workspace checks
 // see the same scope as the HTTP path.
 func (h *Handler) DaemonRPCHandler(ctx context.Context, identity daemonws.ClientIdentity, method string, body json.RawMessage) (int, json.RawMessage, error) {
+	ready, err := h.gitLabMigrationReadyContext(ctx)
+	if err != nil || !ready {
+		return http.StatusServiceUnavailable, nil, errVCSMigrationMaintenance
+	}
 	switch method {
 	case "tasks.claim":
 		return h.rpcClaimTasks(ctx, identity, body)

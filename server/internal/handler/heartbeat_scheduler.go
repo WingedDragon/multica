@@ -112,9 +112,13 @@ type BatchedHeartbeatScheduler struct {
 	mu      sync.Mutex
 	pending map[pgtype.UUID]struct{}
 
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	lifecycleMu   sync.Mutex
+	runStarted    bool
+	stopRequested bool
+	doneOnce      sync.Once
+	stopFlushOnce sync.Once
+	stopCh        chan struct{}
+	doneCh        chan struct{}
 }
 
 // DefaultHeartbeatBatchInterval is the production tick cadence for the
@@ -156,7 +160,15 @@ func (b *BatchedHeartbeatScheduler) Schedule(_ context.Context, runtimeID, _ pgt
 // final drain has completed. Intended to be invoked once in its own
 // goroutine from main.go.
 func (b *BatchedHeartbeatScheduler) Run(ctx context.Context) {
-	defer close(b.doneCh)
+	b.lifecycleMu.Lock()
+	if b.runStarted || b.stopRequested {
+		b.lifecycleMu.Unlock()
+		return
+	}
+	b.runStarted = true
+	b.lifecycleMu.Unlock()
+
+	defer b.doneOnce.Do(func() { close(b.doneCh) })
 	t := time.NewTicker(b.tickInterval)
 	defer t.Stop()
 	for {
@@ -180,20 +192,25 @@ func (b *BatchedHeartbeatScheduler) Run(ctx context.Context) {
 }
 
 // Stop signals the Run goroutine to drain and exit. Blocks until the final
-// flush completes so callers can sequence shutdown deterministically.
-//
-// As a defense-in-depth, Stop also performs one more flush after Run has
-// exited. This catches the rare case where Run already returned via its
-// ctx.Done() branch (e.g. parent ctx was cancelled before Stop was called)
-// and a late Schedule call has since added entries to the pending map.
+// drain has completed so callers can sequence shutdown deterministically.
 func (b *BatchedHeartbeatScheduler) Stop() {
-	b.stopOnce.Do(func() {
+	b.lifecycleMu.Lock()
+	if !b.stopRequested {
+		b.stopRequested = true
 		close(b.stopCh)
+	}
+	started := b.runStarted
+	b.lifecycleMu.Unlock()
+	if started {
+		<-b.doneCh
+	} else {
+		b.doneOnce.Do(func() { close(b.doneCh) })
+	}
+	b.stopFlushOnce.Do(func() {
+		finalCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		b.flushOnce(finalCtx)
+		cancel()
 	})
-	<-b.doneCh
-	finalCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	b.flushOnce(finalCtx)
-	cancel()
 }
 
 // FlushNow is exposed for tests that want to assert post-flush DB state
@@ -211,6 +228,10 @@ func (b *BatchedHeartbeatScheduler) PendingCount() int {
 }
 
 func (b *BatchedHeartbeatScheduler) flushOnce(ctx context.Context) {
+	state, err := b.queries.GetVCSGitLabMigrationState(ctx)
+	if err != nil || state.Phase != "complete" || state.MaintenanceMode {
+		return
+	}
 	b.mu.Lock()
 	if len(b.pending) == 0 {
 		b.mu.Unlock()

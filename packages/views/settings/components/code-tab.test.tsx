@@ -76,7 +76,6 @@ vi.mock("./use-connect-github", () => ({
 }));
 vi.mock("./repositories-section", () => ({ RepositoriesSection: () => null }));
 vi.mock("./code-vcs", () => ({ VCSConnectionRows: () => <div>VCS rows</div> }));
-vi.mock("./code-gitlab", () => ({ GitLabProjectRows: () => <div>GitLab projects</div> }));
 // The merge rule editor has its own test on the statuses it offers.
 vi.mock("./pr-merge-status-row", () => ({
   PRMergeStatusRow: ({ canManage }: { canManage: boolean }) => (
@@ -328,10 +327,10 @@ describe("CodeTab — pull requests", () => {
     expect(screen.getByText("merge rule read-only")).toBeInTheDocument();
   });
 
-  it("lists self-hosted Git only where the deployment supports it", () => {
+  it("shows self-hosted Git projects only inside the unified VCS settings", () => {
     const { unmount } = render(<CodeTab />, { wrapper: Wrapper });
-    expect(screen.getByText("GitLab projects")).toBeInTheDocument();
     expect(screen.queryByText("VCS rows")).toBeNull();
+    expect(screen.queryByText("GitLab projects")).toBeNull();
     unmount();
 
     configStore
@@ -339,5 +338,6 @@ describe("CodeTab — pull requests", () => {
       .setAuthConfig({ allowSignup: true, vcsIntegrationAvailable: true });
     render(<CodeTab />, { wrapper: Wrapper });
     expect(screen.getByText("VCS rows")).toBeInTheDocument();
+    expect(screen.queryByText("GitLab projects")).toBeNull();
   });
 });

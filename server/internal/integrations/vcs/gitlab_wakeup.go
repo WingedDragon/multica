@@ -347,7 +347,11 @@ func getGitLabWakeupJSON(ctx context.Context, baseURL, token, path string, query
 	}
 	req.Header.Set("PRIVATE-TOKEN", token)
 	req.Header.Set("Accept", "application/json")
-	resp, err := httpClient.Do(req)
+	client, err := gitLabProviderHTTPClient()
+	if err != nil {
+		return fmt.Errorf("gitlab: configure HTTP client: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("gitlab: request: %w", err)
 	}
@@ -381,7 +385,11 @@ func listGitLabWakeupPipelines(ctx context.Context, baseURL, token, path string,
 		}
 		req.Header.Set("PRIVATE-TOKEN", token)
 		req.Header.Set("Accept", "application/json")
-		resp, err := httpClient.Do(req)
+		client, err := gitLabProviderHTTPClient()
+		if err != nil {
+			return fmt.Errorf("gitlab: configure HTTP client: %w", err)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("gitlab: pipeline request: %w", err)
 		}

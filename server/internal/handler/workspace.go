@@ -1302,6 +1302,70 @@ func lockWorkspaceTaskOwners(ctx context.Context, qtx *db.Queries, workspaceID p
 	return nil
 }
 
+// deleteWorkspaceGitLabData removes rows owned by one workspace across both
+// sides of the GitLab cutover. The migration state is intentionally global and
+// must survive workspace deletion; every other migration ledger here carries a
+// workspace_id. Legacy core tables are absent after Finalize, so probe those
+// relations before issuing their DELETEs.
+func deleteWorkspaceGitLabData(ctx context.Context, tx pgx.Tx, workspaceID pgtype.UUID) error {
+	steps := []struct {
+		name  string
+		query string
+	}{
+		{"migration deliveries", `DELETE FROM vcs_gitlab_migration_delivery WHERE workspace_id=$1`},
+		{"migration Hooks", `DELETE FROM vcs_gitlab_migration_hook WHERE workspace_id=$1`},
+		{"migration ID map", `DELETE FROM vcs_gitlab_migration_id_map WHERE workspace_id=$1`},
+		{"migration snapshots", `DELETE FROM vcs_gitlab_migration_snapshot WHERE workspace_id=$1`},
+		{"canonical projects", `DELETE FROM vcs_gitlab_project WHERE workspace_id=$1`},
+		{"canonical MR details", `
+			DELETE FROM vcs_gitlab_mr_detail detail
+			USING vcs_pull_request pr
+			WHERE detail.vcs_pull_request_id=pr.id AND pr.workspace_id=$1
+		`},
+		{"canonical MR notes", `DELETE FROM gitlab_mr_note WHERE workspace_id=$1`},
+		{"canonical MR discussions", `DELETE FROM gitlab_mr_discussion WHERE workspace_id=$1`},
+		{"canonical MR approval state", `DELETE FROM gitlab_mr_approval_state WHERE workspace_id=$1`},
+		{"canonical pipeline jobs", `DELETE FROM gitlab_pipeline_job WHERE workspace_id=$1`},
+	}
+	for _, step := range steps {
+		if _, err := tx.Exec(ctx, step.query, workspaceID); err != nil {
+			return fmt.Errorf("delete workspace GitLab %s: %w", step.name, err)
+		}
+	}
+
+	legacySteps := []struct {
+		table string
+		name  string
+		query string
+	}{
+		{"issue_gitlab_merge_request", "legacy issue links", `DELETE FROM issue_gitlab_merge_request WHERE workspace_id=$1`},
+		{"gitlab_mr_pipeline", "legacy MR pipelines", `
+			DELETE FROM gitlab_mr_pipeline
+			WHERE merge_request_id IN (
+				SELECT id FROM gitlab_merge_request WHERE workspace_id=$1
+			)
+		`},
+		{"gitlab_merge_request", "legacy merge requests", `DELETE FROM gitlab_merge_request WHERE workspace_id=$1`},
+		{"gitlab_project_binding", "legacy project bindings", `DELETE FROM gitlab_project_binding WHERE workspace_id=$1`},
+		{"gitlab_connection", "legacy connections", `DELETE FROM gitlab_connection WHERE workspace_id=$1`},
+	}
+	for _, step := range legacySteps {
+		var exists bool
+		if err := tx.QueryRow(ctx, `
+			SELECT to_regclass(format('%I.%I', current_schema(), $1::text)) IS NOT NULL
+		`, step.table).Scan(&exists); err != nil {
+			return fmt.Errorf("check legacy GitLab table %s: %w", step.table, err)
+		}
+		if !exists {
+			continue
+		}
+		if _, err := tx.Exec(ctx, step.query, workspaceID); err != nil {
+			return fmt.Errorf("delete workspace GitLab %s: %w", step.name, err)
+		}
+	}
+	return nil
+}
+
 // DeleteWorkspace refuses machine credentials: a task token or cloud node PAT
 // authenticates as its owner, and deleting a workspace takes every issue, doc
 // and agent in it, so only a human may do it.
@@ -1525,6 +1589,10 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 		{
 			name: "delete comments",
 			run:  func() error { return qtx.DeleteWorkspaceComments(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete GitLab integration data",
+			run:  func() error { return deleteWorkspaceGitLabData(ctx, tx, requester.WorkspaceID) },
 		},
 		{
 			// Teardown mode keeps the triggers from logging the deletes above

@@ -41,7 +41,6 @@ import {
 } from "./settings-layout";
 import { GitHubMark } from "./github-mark";
 import { VCSConnectionRows } from "./code-vcs";
-import { GitLabProjectRows } from "./code-gitlab";
 import { HostMark, HostStatus } from "./code-host";
 import { RepositoriesSection } from "./repositories-section";
 import { useConnectGitHub } from "./use-connect-github";
@@ -256,7 +255,6 @@ export function CodeTab() {
               ) : null}
             </SettingsRow>
           ))}
-          <GitLabProjectRows />
           {vcsAvailable ? <VCSConnectionRows /> : null}
         </SettingsCard>
       </SettingsSection>

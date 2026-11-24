@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -80,81 +83,225 @@ type GitLabPipelineJobResponse struct {
 	TraceFetchedAt        *string  `json:"trace_fetched_at"`
 }
 
+func (h *Handler) GetVCSGitLabMergeRequestDetails(w http.ResponseWriter, r *http.Request) {
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	prID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "prId"), "pull request id")
+	if !ok {
+		return
+	}
+	pr, project, detail, ok := h.loadVCSGitLabMergeRequestForIssue(w, r, issue, prID)
+	if !ok {
+		return
+	}
+	h.writeVCSGitLabMergeRequestDetails(w, r, issue, pr, project, detail)
+}
+
 func (h *Handler) GetGitLabMergeRequestDetails(w http.ResponseWriter, r *http.Request) {
 	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
 	if !ok {
 		return
 	}
-	mrID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "mrId"), "merge request id")
+	legacyID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "mrId"), "merge request id")
 	if !ok {
 		return
 	}
-	mr, err := h.Queries.GetGitLabMergeRequestForIssue(r.Context(), db.GetGitLabMergeRequestForIssueParams{
-		IssueID:     issue.ID,
-		ID:          mrID,
-		WorkspaceID: issue.WorkspaceID,
+	prID, err := h.resolveLegacyGitLabPullRequestID(r.Context(), issue.WorkspaceID, legacyID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve gitlab merge request")
+		return
+	}
+	pr, project, detail, ok := h.loadVCSGitLabMergeRequestForIssue(w, r, issue, prID)
+	if !ok {
+		return
+	}
+	h.writeVCSGitLabMergeRequestDetails(w, r, issue, pr, project, detail)
+}
+
+func (h *Handler) resolveLegacyGitLabPullRequestID(ctx context.Context, workspaceID, legacyID pgtype.UUID) (pgtype.UUID, error) {
+	unifiedID, err := h.Queries.ResolveGitLabVCSMigrationPullRequestID(ctx, db.ResolveGitLabVCSMigrationPullRequestIDParams{
+		WorkspaceID: workspaceID,
+		LegacyID:    legacyID,
+	})
+	if err == nil {
+		return unifiedID, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Some migrations preserve the UUID. The canonical issue-link query
+		// below still applies the same workspace and provider checks.
+		return legacyID, nil
+	}
+	return pgtype.UUID{}, err
+}
+
+func (h *Handler) loadVCSGitLabMergeRequestForIssue(w http.ResponseWriter, r *http.Request, issue db.Issue, prID pgtype.UUID) (db.VcsPullRequest, db.VcsGitlabProject, db.VcsGitlabMrDetail, bool) {
+	pr, err := h.Queries.GetVCSGitLabPullRequestForIssue(r.Context(), db.GetVCSGitLabPullRequestForIssueParams{
+		IssueID:       issue.ID,
+		WorkspaceID:   issue.WorkspaceID,
+		PullRequestID: prID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "gitlab merge request not found")
-			return
+			return db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabMrDetail{}, false
 		}
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab merge request")
-		return
+		return db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabMrDetail{}, false
 	}
-
-	binding, err := h.Queries.GetGitLabProjectBinding(r.Context(), db.GetGitLabProjectBindingParams{
-		ID:          mr.ProjectBindingID,
-		WorkspaceID: issue.WorkspaceID,
-	})
+	project, status, err := h.resolveVCSGitLabProjectForPullRequest(r.Context(), pr)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load gitlab project")
-		return
+		writeGitLabProjectResolutionError(w, status)
+		return db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabMrDetail{}, false
 	}
-
-	approval, err := h.Queries.GetGitLabMRApprovalState(r.Context(), db.GetGitLabMRApprovalStateParams{
-		WorkspaceID:    issue.WorkspaceID,
-		MergeRequestID: mr.ID,
+	detail, err := h.Queries.GetVCSGitLabMRDetail(r.Context(), db.GetVCSGitLabMRDetailParams{
+		WorkspaceID:   issue.WorkspaceID,
+		PullRequestID: pr.ID,
 	})
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to load gitlab merge request details")
+		return db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabMrDetail{}, false
+	}
+	return pr, project, detail, true
+}
+
+func (h *Handler) resolveVCSGitLabProjectForPullRequest(ctx context.Context, pr db.VcsPullRequest) (db.VcsGitlabProject, int, error) {
+	project, err := h.Queries.GetVCSGitLabProjectForPullRequest(ctx, db.GetVCSGitLabProjectForPullRequestParams{
+		WorkspaceID: pr.WorkspaceID, ConnectionID: pr.ConnectionID,
+		RepoOwner: pr.RepoOwner, RepoName: pr.RepoName,
+	})
+	if err == nil {
+		return project, 0, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return db.VcsGitlabProject{}, http.StatusInternalServerError, err
+	}
+
+	connection, err := h.Queries.GetVCSGitLabConnectionByIDAndWorkspace(ctx, db.GetVCSGitLabConnectionByIDAndWorkspaceParams{
+		ID: pr.ConnectionID, WorkspaceID: pr.WorkspaceID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.VcsGitlabProject{}, http.StatusNotFound, err
+		}
+		return db.VcsGitlabProject{}, http.StatusInternalServerError, err
+	}
+	if connection.Provider != "gitlab" || connection.WorkspaceID != pr.WorkspaceID {
+		return db.VcsGitlabProject{}, http.StatusNotFound, errors.New("GitLab connection is outside the pull request workspace")
+	}
+	path := pr.RepoOwner + "/" + pr.RepoName
+	owner, name, ok := splitGitLabProjectPath(path)
+	if !ok {
+		return db.VcsGitlabProject{}, http.StatusNotFound, errors.New("GitLab pull request has no valid repository path")
+	}
+	path = owner + "/" + name
+	config, err := h.gitLabConfigForVCSConnectionRow(connection)
+	if err != nil {
+		return db.VcsGitlabProject{}, http.StatusServiceUnavailable, err
+	}
+	client, err := newGitLabClient(config)
+	if err != nil {
+		return db.VcsGitlabProject{}, http.StatusBadGateway, err
+	}
+	api, err := detailGitLabAPI(client)
+	if err != nil {
+		return db.VcsGitlabProject{}, http.StatusBadGateway, err
+	}
+	remote, err := api.GetProject(ctx, path)
+	if err != nil {
+		return db.VcsGitlabProject{}, http.StatusBadGateway, err
+	}
+	remoteOwner, remoteName, validRemotePath := splitGitLabProjectPath(remote.PathWithNamespace)
+	if remote.ID <= 0 || !validRemotePath || !strings.EqualFold(remoteOwner+"/"+remoteName, path) {
+		return db.VcsGitlabProject{}, http.StatusBadGateway, errors.New("GitLab returned an inconsistent project identity")
+	}
+	return db.VcsGitlabProject{
+		WorkspaceID: pr.WorkspaceID, ConnectionID: pr.ConnectionID,
+		GitlabProjectID: remote.ID, PathWithNamespace: remote.PathWithNamespace, WebUrl: remote.WebURL,
+	}, 0, nil
+}
+
+func writeGitLabProjectResolutionError(w http.ResponseWriter, status int) {
+	switch status {
+	case http.StatusNotFound:
+		writeError(w, status, "gitlab project not found")
+	case http.StatusServiceUnavailable:
+		writeError(w, status, "gitlab connection credentials are unavailable")
+	case http.StatusBadGateway:
+		writeError(w, status, "failed to resolve gitlab project")
+	default:
+		writeError(w, http.StatusInternalServerError, "failed to load gitlab project")
+	}
+}
+
+func (h *Handler) writeVCSGitLabMergeRequestDetails(w http.ResponseWriter, r *http.Request, issue db.Issue, pr db.VcsPullRequest, project db.VcsGitlabProject, detail db.VcsGitlabMrDetail) {
+	approval, approvalErr := h.Queries.GetGitLabMRApprovalStateByPullRequest(r.Context(), db.GetGitLabMRApprovalStateByPullRequestParams{
+		WorkspaceID:   issue.WorkspaceID,
+		PullRequestID: pr.ID,
+	})
+	if approvalErr != nil && !errors.Is(approvalErr, pgx.ErrNoRows) {
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab approvals")
 		return
 	}
-	discussions, err := h.Queries.ListGitLabMRDiscussions(r.Context(), db.ListGitLabMRDiscussionsParams{
-		WorkspaceID:    issue.WorkspaceID,
-		MergeRequestID: mr.ID,
+	discussions, err := h.Queries.ListGitLabMRDiscussionsByPullRequest(r.Context(), db.ListGitLabMRDiscussionsByPullRequestParams{
+		WorkspaceID:   issue.WorkspaceID,
+		PullRequestID: pr.ID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab discussions")
 		return
 	}
-	notes, err := h.Queries.ListGitLabMRNotes(r.Context(), db.ListGitLabMRNotesParams{
-		WorkspaceID:    issue.WorkspaceID,
-		MergeRequestID: mr.ID,
+	notes, err := h.Queries.ListGitLabMRNotesByPullRequest(r.Context(), db.ListGitLabMRNotesByPullRequestParams{
+		WorkspaceID:   issue.WorkspaceID,
+		PullRequestID: pr.ID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab notes")
 		return
 	}
-	jobs, err := h.Queries.ListGitLabPipelineJobsByMR(r.Context(), db.ListGitLabPipelineJobsByMRParams{
-		WorkspaceID:    issue.WorkspaceID,
-		MergeRequestID: mr.ID,
+	jobs, err := h.Queries.ListGitLabPipelineJobsByPullRequest(r.Context(), db.ListGitLabPipelineJobsByPullRequestParams{
+		WorkspaceID:   issue.WorkspaceID,
+		PullRequestID: pr.ID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab jobs")
 		return
 	}
-
+	pipelines, err := h.Queries.ListVCSGitLabPipelinesByMR(r.Context(), db.ListVCSGitLabPipelinesByMRParams{
+		WorkspaceID:   issue.WorkspaceID,
+		PullRequestID: pr.ID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load gitlab pipelines")
+		return
+	}
 	var approvalResp *GitLabMRApprovalResponse
-	if err == nil && approval.MergeRequestID.Valid {
+	if approvalErr == nil {
 		approvalResp = gitLabApprovalToResponse(approval)
 	}
 	writeJSON(w, http.StatusOK, GitLabMergeRequestDetailsResponse{
-		MergeRequest: gitLabMergeRequestToResponse(mr, binding.PathWithNamespace),
+		MergeRequest: gitLabVCSMergeRequestToResponse(pr, project, detail, pipelines),
 		Approval:     approvalResp,
 		Discussions:  gitLabDiscussionsToResponse(discussions, notes),
 		Jobs:         gitLabJobsToResponse(jobs),
 	})
+}
+
+func (h *Handler) RefreshVCSGitLabMergeRequestForIssue(w http.ResponseWriter, r *http.Request) {
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	prID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "prId"), "pull request id")
+	if !ok {
+		return
+	}
+	pr, project, _, ok := h.loadVCSGitLabMergeRequestForIssue(w, r, issue, prID)
+	if !ok {
+		return
+	}
+	h.refreshVCSGitLabMergeRequestForIssue(w, r, issue, pr, project)
 }
 
 func (h *Handler) RefreshGitLabMergeRequestForIssue(w http.ResponseWriter, r *http.Request) {
@@ -162,51 +309,72 @@ func (h *Handler) RefreshGitLabMergeRequestForIssue(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	mrID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "mrId"), "merge request id")
+	legacyID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "mrId"), "merge request id")
 	if !ok {
 		return
 	}
-	mr, err := h.Queries.GetGitLabMergeRequestForIssue(r.Context(), db.GetGitLabMergeRequestForIssueParams{
-		IssueID:     issue.ID,
-		ID:          mrID,
-		WorkspaceID: issue.WorkspaceID,
-	})
+	prID, err := h.resolveLegacyGitLabPullRequestID(r.Context(), issue.WorkspaceID, legacyID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "gitlab merge request not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to load gitlab merge request")
+		writeError(w, http.StatusInternalServerError, "failed to resolve gitlab merge request")
 		return
 	}
-	cfg, err := h.gitLabConfigForMergeRequest(r.Context(), mr)
+	pr, project, _, ok := h.loadVCSGitLabMergeRequestForIssue(w, r, issue, prID)
+	if !ok {
+		return
+	}
+	h.refreshVCSGitLabMergeRequestForIssue(w, r, issue, pr, project)
+}
+
+func (h *Handler) refreshVCSGitLabMergeRequestForIssue(w http.ResponseWriter, r *http.Request, issue db.Issue, pr db.VcsPullRequest, project db.VcsGitlabProject) {
+	cfg, err := h.gitLabConfigForVCSProject(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
-	api, err := newGitLabClient(cfg)
+	client, err := newGitLabClient(cfg)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	detailAPI, err := detailGitLabAPI(api)
+	api, err := detailGitLabAPI(client)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	refreshed, summary, err := h.refreshGitLabMergeRequest(r.Context(), detailAPI, mr)
+	refreshed, _, err := h.refreshVCSGitLabMergeRequest(r.Context(), api, project, pr)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		status := http.StatusBadGateway
+		if isGitLabRefreshPersistenceError(err) {
+			status = http.StatusInternalServerError
+		}
+		writeError(w, status, redact.Text(err.Error()))
 		return
-	}
-	if len(summary.Errors) > 0 {
-		h.markGitLabMergeRequestRefreshError(r.Context(), refreshed, errors.New(strings.Join(summary.Errors, "; ")))
 	}
 	h.publish(protocol.EventGitLabMergeRequestUpdated, uuidToString(issue.WorkspaceID), "system", "", map[string]any{
-		"merge_request_id": uuidToString(mr.ID),
+		"merge_request_id": uuidToString(refreshed.ID),
 		"linked_issue_ids": []string{uuidToString(issue.ID)},
 	})
-	h.GetGitLabMergeRequestDetails(w, r)
+	fresh, freshProject, detail, ok := h.loadVCSGitLabMergeRequestForIssue(w, r, issue, refreshed.ID)
+	if !ok {
+		return
+	}
+	h.writeVCSGitLabMergeRequestDetails(w, r, issue, fresh, freshProject, detail)
+}
+
+func (h *Handler) MergeVCSGitLabMergeRequestForIssue(w http.ResponseWriter, r *http.Request) {
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	prID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "prId"), "pull request id")
+	if !ok {
+		return
+	}
+	pr, project, _, ok := h.loadVCSGitLabMergeRequestForIssue(w, r, issue, prID)
+	if !ok {
+		return
+	}
+	h.mergeVCSGitLabMergeRequestForIssue(w, r, issue, pr, project)
 }
 
 func (h *Handler) MergeGitLabMergeRequestForIssue(w http.ResponseWriter, r *http.Request) {
@@ -214,71 +382,84 @@ func (h *Handler) MergeGitLabMergeRequestForIssue(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	mrID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "mrId"), "merge request id")
+	legacyID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "mrId"), "merge request id")
 	if !ok {
 		return
 	}
-	mr, err := h.Queries.GetGitLabMergeRequestForIssue(r.Context(), db.GetGitLabMergeRequestForIssueParams{
-		IssueID:     issue.ID,
-		ID:          mrID,
-		WorkspaceID: issue.WorkspaceID,
-	})
+	prID, err := h.resolveLegacyGitLabPullRequestID(r.Context(), issue.WorkspaceID, legacyID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "gitlab merge request not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to load gitlab merge request")
+		writeError(w, http.StatusInternalServerError, "failed to resolve gitlab merge request")
 		return
 	}
-	cfg, err := h.gitLabConfigForMergeRequest(r.Context(), mr)
+	pr, project, _, ok := h.loadVCSGitLabMergeRequestForIssue(w, r, issue, prID)
+	if !ok {
+		return
+	}
+	h.mergeVCSGitLabMergeRequestForIssue(w, r, issue, pr, project)
+}
+
+func (h *Handler) mergeVCSGitLabMergeRequestForIssue(w http.ResponseWriter, r *http.Request, issue db.Issue, pr db.VcsPullRequest, project db.VcsGitlabProject) {
+	cfg, err := h.gitLabConfigForVCSProject(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
-	api, err := newGitLabClient(cfg)
+	client, err := newGitLabClient(cfg)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	detailAPI, err := detailGitLabAPI(api)
+	api, err := detailGitLabAPI(client)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	if _, err := detailAPI.MergeMergeRequest(r.Context(), mr.GitlabProjectID, mr.MrIid, gitlab.MergeRequestMergeOptions{
+	if _, err := api.MergeMergeRequest(r.Context(), project.GitlabProjectID, pr.PrNumber, gitlab.MergeRequestMergeOptions{
 		ShouldRemoveSourceBranch: true,
 	}); err != nil {
-		h.markGitLabMergeRequestRefreshError(r.Context(), mr, err)
-		writeError(w, http.StatusBadGateway, err.Error())
+		_ = h.markVCSGitLabMergeRequestRefreshErrorForGeneration(r.Context(), pr, pr.WakeupSyncGeneration, err)
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	refreshed, summary, err := h.refreshGitLabMergeRequest(r.Context(), detailAPI, mr)
+	refreshed, _, err := h.refreshVCSGitLabMergeRequest(r.Context(), api, project, pr)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		status := http.StatusBadGateway
+		if isGitLabRefreshPersistenceError(err) {
+			status = http.StatusInternalServerError
+		}
+		writeError(w, status, redact.Text(err.Error()))
 		return
-	}
-	if len(summary.Errors) > 0 {
-		h.markGitLabMergeRequestRefreshError(r.Context(), refreshed, errors.New(strings.Join(summary.Errors, "; ")))
 	}
 	h.publish(protocol.EventGitLabMergeRequestUpdated, uuidToString(issue.WorkspaceID), "system", "", map[string]any{
 		"merge_request_id": uuidToString(refreshed.ID),
 		"linked_issue_ids": []string{uuidToString(issue.ID)},
 	})
-	h.GetGitLabMergeRequestDetails(w, r)
+	fresh, freshProject, detail, ok := h.loadVCSGitLabMergeRequestForIssue(w, r, issue, refreshed.ID)
+	if !ok {
+		return
+	}
+	h.writeVCSGitLabMergeRequestDetails(w, r, issue, fresh, freshProject, detail)
 }
 
 func (h *Handler) RefreshGitLabProjectBinding(w http.ResponseWriter, r *http.Request) {
+	h.refreshVCSGitLabProjectRoute(w, r, "bindingId")
+}
+
+func (h *Handler) RefreshVCSGitLabProject(w http.ResponseWriter, r *http.Request) {
+	h.refreshVCSGitLabProjectRoute(w, r, "projectId")
+}
+
+func (h *Handler) refreshVCSGitLabProjectRoute(w http.ResponseWriter, r *http.Request, idParam string) {
 	workspaceID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "workspace id")
 	if !ok {
 		return
 	}
-	bindingID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "bindingId"), "binding id")
+	projectID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, idParam), "project id")
 	if !ok {
 		return
 	}
-	binding, err := h.Queries.GetGitLabProjectBinding(r.Context(), db.GetGitLabProjectBindingParams{
-		ID:          bindingID,
+	project, err := h.Queries.GetVCSGitLabProjectByIDAndWorkspace(r.Context(), db.GetVCSGitLabProjectByIDAndWorkspaceParams{
+		ID:          projectID,
 		WorkspaceID: workspaceID,
 	})
 	if err != nil {
@@ -289,97 +470,152 @@ func (h *Handler) RefreshGitLabProjectBinding(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab project")
 		return
 	}
-	cfg, err := h.gitLabConfigForConnection(r.Context(), binding.WorkspaceID, binding.ConnectionID)
+	cfg, err := h.gitLabConfigForVCSProject(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
-	api, err := newGitLabClient(cfg)
+	client, err := newGitLabClient(cfg)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	detailAPI, err := detailGitLabAPI(api)
+	api, err := detailGitLabAPI(client)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	_ = h.Queries.MarkGitLabProjectRefreshStarted(r.Context(), db.MarkGitLabProjectRefreshStartedParams{
-		ID:          binding.ID,
-		WorkspaceID: binding.WorkspaceID,
-	})
-	rows, err := h.Queries.ListGitLabMergeRequestsByProjectBinding(r.Context(), db.ListGitLabMergeRequestsByProjectBindingParams{
-		WorkspaceID:      binding.WorkspaceID,
-		ProjectBindingID: binding.ID,
-		Limit:            100,
+	if err := h.Queries.MarkVCSGitLabProjectRefreshStarted(r.Context(), db.MarkVCSGitLabProjectRefreshStartedParams{
+		ID: project.ID, WorkspaceID: project.WorkspaceID, ConnectionID: project.ConnectionID,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start gitlab project refresh")
+		return
+	}
+	owner, name, validPath := splitGitLabProjectPath(project.PathWithNamespace)
+	if !validPath {
+		refreshErr := errors.New("invalid GitLab project path")
+		slog.Warn("invalid GitLab project path in stored project binding",
+			"error", refreshErr, "workspace_id", workspaceID, "project_id", projectID)
+		_ = h.Queries.MarkVCSGitLabProjectRefreshFinished(r.Context(), db.MarkVCSGitLabProjectRefreshFinishedParams{
+			ID: project.ID, WorkspaceID: project.WorkspaceID, ConnectionID: project.ConnectionID,
+			LastRefreshError: strToText(refreshErr.Error()),
+		})
+		writeError(w, http.StatusInternalServerError, "failed to refresh gitlab project")
+		return
+	}
+	pullRequests, err := h.Queries.ListVCSGitLabPullRequestsByProject(r.Context(), db.ListVCSGitLabPullRequestsByProjectParams{
+		WorkspaceID:  project.WorkspaceID,
+		ConnectionID: project.ConnectionID,
+		RepoOwner:    owner,
+		RepoName:     name,
 	})
 	if err != nil {
-		_ = h.Queries.MarkGitLabProjectRefreshFinished(r.Context(), db.MarkGitLabProjectRefreshFinishedParams{
-			ID:               binding.ID,
-			WorkspaceID:      binding.WorkspaceID,
-			LastRefreshError: strToText(redact.Text(err.Error())),
+		refreshErr := redact.Text(err.Error())
+		_ = h.Queries.MarkVCSGitLabProjectRefreshFinished(r.Context(), db.MarkVCSGitLabProjectRefreshFinishedParams{
+			ID: project.ID, WorkspaceID: project.WorkspaceID, ConnectionID: project.ConnectionID,
+			LastRefreshError: strToText(refreshErr),
 		})
 		writeError(w, http.StatusInternalServerError, "failed to list gitlab merge requests")
 		return
 	}
 	var summary gitLabRefreshSummary
-	for _, mr := range rows {
-		_, mrSummary, err := h.refreshGitLabMergeRequest(r.Context(), detailAPI, mr)
-		summary.UpdatedMRs += mrSummary.UpdatedMRs
-		summary.UpdatedJobs += mrSummary.UpdatedJobs
-		summary.UpdatedDiscussions += mrSummary.UpdatedDiscussions
-		summary.Errors = append(summary.Errors, mrSummary.Errors...)
-		if err != nil {
-			summary.addError(err)
+	for _, pr := range pullRequests {
+		_, itemSummary, refreshErr := h.refreshVCSGitLabMergeRequest(r.Context(), api, project, pr)
+		summary.UpdatedMRs += itemSummary.UpdatedMRs
+		summary.UpdatedJobs += itemSummary.UpdatedJobs
+		summary.UpdatedDiscussions += itemSummary.UpdatedDiscussions
+		summary.Errors = append(summary.Errors, itemSummary.Errors...)
+		if refreshErr != nil {
+			summary.addError(refreshErr)
+			if isGitLabRefreshPersistenceError(refreshErr) {
+				break
+			}
 		}
 	}
-	var refreshErr pgtype.Text
+	var lastRefreshError pgtype.Text
 	if len(summary.Errors) > 0 {
-		refreshErr = strToText(strings.Join(summary.Errors, "; "))
+		lastRefreshError = strToText(strings.Join(summary.Errors, "; "))
 	}
-	_ = h.Queries.MarkGitLabProjectRefreshFinished(r.Context(), db.MarkGitLabProjectRefreshFinishedParams{
-		ID:               binding.ID,
-		WorkspaceID:      binding.WorkspaceID,
-		LastRefreshError: refreshErr,
+	finishErr := h.Queries.MarkVCSGitLabProjectRefreshFinished(r.Context(), db.MarkVCSGitLabProjectRefreshFinishedParams{
+		ID: project.ID, WorkspaceID: project.WorkspaceID, ConnectionID: project.ConnectionID,
+		LastRefreshError: lastRefreshError,
 	})
-	h.publish(protocol.EventGitLabProjectCreated, uuidToString(binding.WorkspaceID), "system", "", map[string]any{
-		"project": gitLabProjectBindingToResponse(binding),
+	if finishErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish gitlab project refresh")
+		return
+	}
+	refreshedProject, err := h.Queries.GetVCSGitLabProjectByIDAndWorkspace(r.Context(), db.GetVCSGitLabProjectByIDAndWorkspaceParams{
+		ID: project.ID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "gitlab project not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to reload gitlab project")
+		}
+		return
+	}
+	project = refreshedProject
+	h.publish(protocol.EventGitLabProjectCreated, uuidToString(project.WorkspaceID), "system", "", map[string]any{
+		"project": map[string]any{
+			"id": uuidToString(project.ID), "workspace_id": uuidToString(project.WorkspaceID),
+			"connection_id": uuidToString(project.ConnectionID), "gitlab_project_id": project.GitlabProjectID,
+			"path_with_namespace": project.PathWithNamespace, "web_url": project.WebUrl,
+			"hook_id": int64PtrFromPg(project.HookID), "hook_enabled": project.HookEnabled,
+			"last_refresh_at":    timestampToPtr(project.LastRefreshAt),
+			"last_refresh_error": redactedTextPtr(project.LastRefreshError),
+		},
 	})
 	writeJSON(w, http.StatusOK, summary)
 }
 
 func (h *Handler) GetGitLabJobTrace(w http.ResponseWriter, r *http.Request) {
-	issue, job, mr, ok := h.loadGitLabJobForIssue(w, r)
+	h.getVCSGitLabJobTrace(w, r, nil)
+}
+
+func (h *Handler) GetVCSGitLabJobTrace(w http.ResponseWriter, r *http.Request) {
+	prID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "prId"), "pull request id")
 	if !ok {
 		return
 	}
-	cfg, err := h.gitLabConfigForMergeRequest(r.Context(), mr)
+	h.getVCSGitLabJobTrace(w, r, &prID)
+}
+
+func (h *Handler) getVCSGitLabJobTrace(w http.ResponseWriter, r *http.Request, prID *pgtype.UUID) {
+	issue, job, pr, project, pipeline, ok := h.loadVCSGitLabJobForIssue(w, r, prID)
+	if !ok {
+		return
+	}
+	cfg, err := h.gitLabConfigForVCSProject(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
-	api, err := newGitLabClient(cfg)
+	client, err := newGitLabClient(cfg)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	detailAPI, err := detailGitLabAPI(api)
+	api, err := detailGitLabAPI(client)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	trace, err := detailAPI.GetJobTrace(r.Context(), mr.GitlabProjectID, job.JobID, gitLabFailedJobTraceLimit)
+	trace, err := api.GetJobTrace(r.Context(), pipeline.PipelineProjectID, job.JobID, gitLabFailedJobTraceLimit)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
 	summary := redact.Text(trace.Text)
-	_ = h.Queries.UpdateGitLabPipelineJobTraceSummary(r.Context(), db.UpdateGitLabPipelineJobTraceSummaryParams{
-		ID:             job.ID,
-		WorkspaceID:    issue.WorkspaceID,
-		TraceSummary:   strToText(summary),
-		TraceTruncated: trace.Truncated,
+	_, err = h.Queries.UpdateGitLabPipelineJobTraceSummaryByPullRequest(r.Context(), db.UpdateGitLabPipelineJobTraceSummaryByPullRequestParams{
+		JobID: job.ID, WorkspaceID: issue.WorkspaceID, PullRequestID: pr.ID,
+		WakeupSyncGeneration: pr.WakeupSyncGeneration,
+		TraceSummary:         strToText(summary), TraceTruncated: trace.Truncated,
 	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store gitlab job trace summary")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"trace_summary":   summary,
 		"trace_truncated": trace.Truncated,
@@ -387,7 +623,19 @@ func (h *Handler) GetGitLabJobTrace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) OpenGitLabJobArtifacts(w http.ResponseWriter, r *http.Request) {
-	_, job, mr, ok := h.loadGitLabJobForIssue(w, r)
+	h.openVCSGitLabJobArtifacts(w, r, nil)
+}
+
+func (h *Handler) OpenVCSGitLabJobArtifacts(w http.ResponseWriter, r *http.Request) {
+	prID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "prId"), "pull request id")
+	if !ok {
+		return
+	}
+	h.openVCSGitLabJobArtifacts(w, r, &prID)
+}
+
+func (h *Handler) openVCSGitLabJobArtifacts(w http.ResponseWriter, r *http.Request, prID *pgtype.UUID) {
+	_, job, _, project, pipeline, ok := h.loadVCSGitLabJobForIssue(w, r, prID)
 	if !ok {
 		return
 	}
@@ -395,24 +643,28 @@ func (h *Handler) OpenGitLabJobArtifacts(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "gitlab artifact not found")
 		return
 	}
-	cfg, err := h.gitLabConfigForMergeRequest(r.Context(), mr)
+	cfg, err := h.gitLabConfigForVCSProject(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "gitlab connection credentials are unavailable")
 		return
 	}
-	api, err := newGitLabClient(cfg)
+	client, err := newGitLabClient(cfg)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	detailAPI, err := detailGitLabAPI(api)
+	api, err := detailGitLabAPI(client)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
 		return
 	}
-	resp, err := detailAPI.DownloadJobArtifacts(r.Context(), mr.GitlabProjectID, job.JobID)
+	resp, err := api.DownloadJobArtifacts(r.Context(), pipeline.PipelineProjectID, job.JobID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, redact.Text(err.Error()))
+		return
+	}
+	if resp == nil || resp.Body == nil {
+		writeError(w, http.StatusBadGateway, "gitlab artifact response is empty")
 		return
 	}
 	defer resp.Body.Close()
@@ -429,69 +681,130 @@ func (h *Handler) OpenGitLabJobArtifacts(w http.ResponseWriter, r *http.Request)
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func (h *Handler) loadGitLabJobForIssue(w http.ResponseWriter, r *http.Request) (db.Issue, db.GitlabPipelineJob, db.GitlabMergeRequest, bool) {
+func (h *Handler) loadVCSGitLabJobForIssue(w http.ResponseWriter, r *http.Request, prID *pgtype.UUID) (db.Issue, db.GitlabPipelineJob, db.VcsPullRequest, db.VcsGitlabProject, db.VcsGitlabPipeline, bool) {
 	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
 	if !ok {
-		return db.Issue{}, db.GitlabPipelineJob{}, db.GitlabMergeRequest{}, false
+		return db.Issue{}, db.GitlabPipelineJob{}, db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabPipeline{}, false
 	}
 	jobID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "jobId"), "job id")
 	if !ok {
-		return db.Issue{}, db.GitlabPipelineJob{}, db.GitlabMergeRequest{}, false
+		return db.Issue{}, db.GitlabPipelineJob{}, db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabPipeline{}, false
 	}
-	job, err := h.Queries.GetGitLabPipelineJobForIssue(r.Context(), db.GetGitLabPipelineJobForIssueParams{
-		IssueID:     issue.ID,
-		ID:          jobID,
-		WorkspaceID: issue.WorkspaceID,
-	})
+	var job db.GitlabPipelineJob
+	var err error
+	if prID == nil {
+		job, err = h.Queries.GetGitLabVCSJobForIssue(r.Context(), db.GetGitLabVCSJobForIssueParams{
+			IssueID: issue.ID, WorkspaceID: issue.WorkspaceID, JobID: jobID,
+		})
+	} else {
+		job, err = h.Queries.GetGitLabVCSJobForIssueByPullRequest(r.Context(), db.GetGitLabVCSJobForIssueByPullRequestParams{
+			IssueID: issue.ID, WorkspaceID: issue.WorkspaceID, PullRequestID: *prID, JobID: jobID,
+		})
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "gitlab job not found")
-			return db.Issue{}, db.GitlabPipelineJob{}, db.GitlabMergeRequest{}, false
+			return db.Issue{}, db.GitlabPipelineJob{}, db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabPipeline{}, false
 		}
 		writeError(w, http.StatusInternalServerError, "failed to load gitlab job")
-		return db.Issue{}, db.GitlabPipelineJob{}, db.GitlabMergeRequest{}, false
+		return db.Issue{}, db.GitlabPipelineJob{}, db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabPipeline{}, false
 	}
-	mr, err := h.Queries.GetGitLabMergeRequestByID(r.Context(), db.GetGitLabMergeRequestByIDParams{
-		ID:          job.MergeRequestID,
-		WorkspaceID: issue.WorkspaceID,
+	canonicalPRID := job.VcsPullRequestID
+	pr, err := h.Queries.GetVCSGitLabPullRequestForIssue(r.Context(), db.GetVCSGitLabPullRequestForIssueParams{
+		IssueID: issue.ID, WorkspaceID: issue.WorkspaceID, PullRequestID: canonicalPRID,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load gitlab merge request")
-		return db.Issue{}, db.GitlabPipelineJob{}, db.GitlabMergeRequest{}, false
+		writeError(w, http.StatusNotFound, "gitlab merge request not found")
+		return db.Issue{}, db.GitlabPipelineJob{}, db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabPipeline{}, false
 	}
-	return issue, job, mr, true
+	project, status, err := h.resolveVCSGitLabProjectForPullRequest(r.Context(), pr)
+	if err != nil {
+		writeGitLabProjectResolutionError(w, status)
+		return db.Issue{}, db.GitlabPipelineJob{}, db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabPipeline{}, false
+	}
+	pipeline, err := h.Queries.GetVCSGitLabPipelineForJob(r.Context(), db.GetVCSGitLabPipelineForJobParams{
+		WorkspaceID: issue.WorkspaceID, PullRequestID: pr.ID, PipelineID: job.PipelineID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "gitlab pipeline not found")
+		return db.Issue{}, db.GitlabPipelineJob{}, db.VcsPullRequest{}, db.VcsGitlabProject{}, db.VcsGitlabPipeline{}, false
+	}
+	return issue, job, pr, project, pipeline, true
 }
 
-func gitLabMergeRequestToResponse(row db.GitlabMergeRequest, projectPath string) GitLabMergeRequestResponse {
-	return GitLabMergeRequestResponse{
-		ID:                  uuidToString(row.ID),
-		WorkspaceID:         uuidToString(row.WorkspaceID),
-		ProjectPath:         projectPath,
-		GitLabProjectID:     row.GitlabProjectID,
-		IID:                 row.MrIid,
-		Title:               row.Title,
-		State:               row.State,
-		WebURL:              row.WebUrl,
-		SourceBranch:        textToPtr(row.SourceBranch),
-		TargetBranch:        textToPtr(row.TargetBranch),
-		AuthorUsername:      textToPtr(row.AuthorUsername),
-		AuthorAvatarURL:     textToPtr(row.AuthorAvatarUrl),
-		SHA:                 row.Sha,
-		DetailedMergeStatus: textToPtr(row.DetailedMergeStatus),
-		HasConflicts:        boolPtrFromPg(row.HasConflicts),
-		Additions:           row.Additions,
-		Deletions:           row.Deletions,
-		ChangedFiles:        row.ChangedFiles,
-		Reviewers:           jsonArrayOrEmpty(row.Reviewers),
-		Assignees:           jsonArrayOrEmpty(row.Assignees),
-		Labels:              jsonArrayOrEmpty(row.Labels),
-		LastRefreshedAt:     timestampToPtr(row.LastRefreshedAt),
-		LastRefreshError:    redactedTextPtr(row.LastRefreshError),
-		MergedAt:            timestampToPtr(row.MergedAt),
-		ClosedAt:            timestampToPtr(row.ClosedAt),
-		MRCreatedAt:         timestampToString(row.MrCreatedAt),
-		MRUpdatedAt:         timestampToString(row.MrUpdatedAt),
+func (h *Handler) gitLabConfigForVCSProject(ctx context.Context, project db.VcsGitlabProject) (gitlab.Config, error) {
+	connection, err := h.Queries.GetVCSGitLabConnectionByIDAndWorkspace(ctx, db.GetVCSGitLabConnectionByIDAndWorkspaceParams{
+		ID: project.ConnectionID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil {
+		return gitlab.Config{}, err
 	}
+	if connection.Provider != "gitlab" || connection.WorkspaceID != project.WorkspaceID {
+		return gitlab.Config{}, errors.New("GitLab connection does not belong to this workspace")
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(connection.InstanceUrl), "/")
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return gitlab.Config{}, errors.New("GitLab connection URL is invalid")
+	}
+	token, err := h.openVCSSecret(connection.AccessTokenEncrypted)
+	if err != nil {
+		return gitlab.Config{}, errors.New("cannot decrypt GitLab connection credentials")
+	}
+	env := gitlab.LoadConfigFromEnv()
+	if token == "" && strings.TrimRight(env.BaseURL, "/") == baseURL {
+		token = env.Token
+	}
+	if token == "" {
+		return gitlab.Config{}, errors.New("GitLab connection credentials are unavailable")
+	}
+	return gitlab.Config{
+		BaseURL: baseURL, Host: parsed.Host, Token: token, ProxyURL: env.ProxyURL,
+	}, nil
+}
+
+func gitLabVCSMergeRequestToResponse(pr db.VcsPullRequest, project db.VcsGitlabProject, detail db.VcsGitlabMrDetail, pipelines []db.VcsGitlabPipeline) GitLabMergeRequestResponse {
+	response := GitLabMergeRequestResponse{
+		ID:                  uuidToString(pr.ID),
+		WorkspaceID:         uuidToString(pr.WorkspaceID),
+		ProjectPath:         project.PathWithNamespace,
+		GitLabProjectID:     project.GitlabProjectID,
+		IID:                 pr.PrNumber,
+		Title:               pr.Title,
+		State:               pr.State,
+		WebURL:              pr.HtmlUrl,
+		SourceBranch:        textToPtr(pr.Branch),
+		TargetBranch:        textToPtr(detail.TargetBranch),
+		AuthorUsername:      textToPtr(pr.AuthorLogin),
+		AuthorAvatarURL:     textToPtr(pr.AuthorAvatarUrl),
+		SHA:                 pr.HeadSha,
+		DetailedMergeStatus: textToPtr(detail.DetailedMergeStatus),
+		HasConflicts:        boolPtrFromPg(pr.HasConflicts),
+		Additions:           pr.Additions,
+		Deletions:           pr.Deletions,
+		ChangedFiles:        pr.ChangedFiles,
+		Reviewers:           jsonArrayOrEmpty(detail.Reviewers),
+		Assignees:           jsonArrayOrEmpty(detail.Assignees),
+		Labels:              jsonArrayOrEmpty(detail.Labels),
+		LastRefreshedAt:     timestampToPtr(detail.LastRefreshedAt),
+		LastRefreshError:    redactedTextPtr(detail.LastRefreshError),
+		MergedAt:            timestampToPtr(pr.MergedAt),
+		ClosedAt:            timestampToPtr(pr.ClosedAt),
+		MRCreatedAt:         timestampToString(pr.PrCreatedAt),
+		MRUpdatedAt:         timestampToString(pr.PrUpdatedAt),
+	}
+	if pr.HeadSha != "" {
+		for _, pipeline := range pipelines {
+			if pipeline.Sha != pr.HeadSha {
+				continue
+			}
+			status := pipeline.Status
+			response.PipelineStatus = &status
+			response.PipelineURL = textToPtr(pipeline.WebUrl)
+			break
+		}
+	}
+	return response
 }
 
 func gitLabApprovalToResponse(row db.GitlabMrApprovalState) *GitLabMRApprovalResponse {
@@ -514,6 +827,10 @@ func gitLabDiscussionsToResponse(discussions []db.GitlabMrDiscussion, notes []db
 	out := make([]GitLabMRDiscussionResponse, 0, len(discussions))
 	for _, discussion := range discussions {
 		key := uuidToString(discussion.ID)
+		discussionNotes := notesByDiscussion[key]
+		if discussionNotes == nil {
+			discussionNotes = make([]GitLabMRNoteResponse, 0)
+		}
 		out = append(out, GitLabMRDiscussionResponse{
 			ID:                 key,
 			GitLabDiscussionID: discussion.GitlabDiscussionID,
@@ -521,7 +838,7 @@ func gitLabDiscussionsToResponse(discussions []db.GitlabMrDiscussion, notes []db
 			Resolved:           boolPtrFromPg(discussion.Resolved),
 			CreatedAt:          timestampToPtr(discussion.DiscussionCreatedAt),
 			UpdatedAt:          timestampToPtr(discussion.DiscussionUpdatedAt),
-			Notes:              notesByDiscussion[key],
+			Notes:              discussionNotes,
 		})
 	}
 	return out

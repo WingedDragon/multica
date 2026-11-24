@@ -95,29 +95,64 @@ func (q *Queries) IsPullRequestExcludedFromIssue(ctx context.Context, arg IsPull
 }
 
 const listIssueLinkedPullRequestStates = `-- name: ListIssueLinkedPullRequestStates :many
-SELECT pr.id, 'github'::text AS provider, pr.pr_number, pr.state
+WITH legacy_gitlab_issues AS (
+    SELECT DISTINCT legacy_ipr.issue_id
+    FROM issue_vcs_pull_request legacy_ipr
+    JOIN issue legacy_issue ON legacy_issue.id = legacy_ipr.issue_id
+    JOIN vcs_pull_request legacy_pr
+      ON legacy_pr.id = legacy_ipr.pull_request_id
+     AND legacy_pr.workspace_id = legacy_issue.workspace_id
+    JOIN vcs_gitlab_project legacy_gp
+      ON legacy_gp.workspace_id = legacy_pr.workspace_id
+     AND legacy_gp.connection_id = legacy_pr.connection_id
+     AND legacy_gp.path_with_namespace = legacy_pr.repo_owner || '/' || legacy_pr.repo_name
+    WHERE legacy_pr.provider = 'gitlab'
+      AND legacy_gp.legacy_link_policy
+      AND legacy_ipr.gitlab_linked_at IS NOT NULL
+)
+SELECT pr.id, 'github'::text AS provider, pr.pr_number, pr.state,
+       NOT EXISTS (
+           SELECT 1 FROM legacy_gitlab_issues legacy
+           WHERE legacy.issue_id = ipr.issue_id
+       ) AS completion_source
 FROM github_pull_request pr
 JOIN issue_pull_request ipr ON ipr.pull_request_id = pr.id
-WHERE ipr.issue_id = $1
+JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
+WHERE i.id = $1
 UNION ALL
-SELECT pr.id, pr.provider AS provider, pr.pr_number, pr.state
+SELECT pr.id, pr.provider AS provider, pr.pr_number, pr.state,
+       ipr.vcs_linked
+       AND NOT EXISTS (
+           SELECT 1 FROM legacy_gitlab_issues legacy
+           WHERE legacy.issue_id = ipr.issue_id
+       ) AS completion_source
 FROM vcs_pull_request pr
 JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
-WHERE ipr.issue_id = $1
+JOIN issue i ON i.id = ipr.issue_id AND i.workspace_id = pr.workspace_id
+LEFT JOIN vcs_gitlab_project gp
+  ON gp.workspace_id = pr.workspace_id
+ AND gp.connection_id = pr.connection_id
+ AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+WHERE i.id = $1
+  AND (
+      ipr.vcs_linked
+      OR (pr.provider = 'gitlab' AND gp.legacy_link_policy AND ipr.gitlab_linked_at IS NOT NULL)
+  )
 ORDER BY pr_number
 `
 
 type ListIssueLinkedPullRequestStatesRow struct {
-	ID       pgtype.UUID `json:"id"`
-	Provider string      `json:"provider"`
-	PrNumber int32       `json:"pr_number"`
-	State    string      `json:"state"`
+	ID               pgtype.UUID `json:"id"`
+	Provider         string      `json:"provider"`
+	PrNumber         int32       `json:"pr_number"`
+	State            string      `json:"state"`
+	CompletionSource bool        `json:"completion_source"`
 }
 
 // Every PR linked to the issue across GitHub and self-hosted providers, for
 // the merge decision. Ordered by number so reasons read stably.
-func (q *Queries) ListIssueLinkedPullRequestStates(ctx context.Context, issueID pgtype.UUID) ([]ListIssueLinkedPullRequestStatesRow, error) {
-	rows, err := q.db.Query(ctx, listIssueLinkedPullRequestStates, issueID)
+func (q *Queries) ListIssueLinkedPullRequestStates(ctx context.Context, id pgtype.UUID) ([]ListIssueLinkedPullRequestStatesRow, error) {
+	rows, err := q.db.Query(ctx, listIssueLinkedPullRequestStates, id)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +165,7 @@ func (q *Queries) ListIssueLinkedPullRequestStates(ctx context.Context, issueID 
 			&i.Provider,
 			&i.PrNumber,
 			&i.State,
+			&i.CompletionSource,
 		); err != nil {
 			return nil, err
 		}
@@ -159,19 +195,74 @@ WHERE i.id = $1
   AND i.status = $4::text
   AND i.status <> $3::text
   AND EXISTS (
-      SELECT 1 FROM issue_pull_request ipr WHERE ipr.issue_id = i.id
+      SELECT 1
+      FROM issue_pull_request ipr
+      JOIN github_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+      WHERE ipr.issue_id = i.id
       UNION ALL
-      SELECT 1 FROM issue_vcs_pull_request ipr WHERE ipr.issue_id = i.id
+      SELECT 1
+      FROM issue_vcs_pull_request ipr
+      JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+      LEFT JOIN vcs_gitlab_project gp
+        ON gp.workspace_id = pr.workspace_id
+       AND gp.connection_id = pr.connection_id
+       AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+      WHERE ipr.issue_id = i.id
+        AND (ipr.vcs_linked OR (pr.provider = 'gitlab' AND gp.legacy_link_policy AND ipr.gitlab_linked_at IS NOT NULL))
+  )
+  AND EXISTS (
+      SELECT 1
+      FROM issue_pull_request ipr
+      JOIN github_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+      WHERE ipr.issue_id = i.id
+      UNION ALL
+      SELECT 1
+      FROM issue_vcs_pull_request ipr
+      JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+      LEFT JOIN vcs_gitlab_project gp
+        ON gp.workspace_id = pr.workspace_id
+       AND gp.connection_id = pr.connection_id
+       AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+      WHERE ipr.issue_id = i.id
+        AND ipr.vcs_linked
+        AND NOT (
+            pr.provider = 'gitlab'
+            AND COALESCE(gp.legacy_link_policy, FALSE)
+            AND ipr.gitlab_linked_at IS NOT NULL
+        )
   )
   AND NOT EXISTS (
-      SELECT 1 FROM issue_pull_request ipr
-      JOIN github_pull_request pr ON pr.id = ipr.pull_request_id
+      SELECT 1
+      FROM issue_vcs_pull_request legacy_ipr
+      JOIN vcs_pull_request legacy_pr
+        ON legacy_pr.id = legacy_ipr.pull_request_id
+       AND legacy_pr.workspace_id = i.workspace_id
+      JOIN vcs_gitlab_project legacy_gp
+        ON legacy_gp.workspace_id = legacy_pr.workspace_id
+       AND legacy_gp.connection_id = legacy_pr.connection_id
+       AND legacy_gp.path_with_namespace = legacy_pr.repo_owner || '/' || legacy_pr.repo_name
+      WHERE legacy_ipr.issue_id = i.id
+        AND legacy_pr.provider = 'gitlab'
+        AND legacy_gp.legacy_link_policy
+        AND legacy_ipr.gitlab_linked_at IS NOT NULL
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM issue_pull_request ipr
+      JOIN github_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
       WHERE ipr.issue_id = i.id AND pr.state <> 'merged'
   )
   AND NOT EXISTS (
-      SELECT 1 FROM issue_vcs_pull_request ipr
-      JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id
-      WHERE ipr.issue_id = i.id AND pr.state <> 'merged'
+      SELECT 1
+      FROM issue_vcs_pull_request ipr
+      JOIN vcs_pull_request pr ON pr.id = ipr.pull_request_id AND pr.workspace_id = i.workspace_id
+      LEFT JOIN vcs_gitlab_project gp
+        ON gp.workspace_id = pr.workspace_id
+       AND gp.connection_id = pr.connection_id
+       AND gp.path_with_namespace = pr.repo_owner || '/' || pr.repo_name
+      WHERE ipr.issue_id = i.id
+        AND (ipr.vcs_linked OR (pr.provider = 'gitlab' AND gp.legacy_link_policy AND ipr.gitlab_linked_at IS NOT NULL))
+        AND pr.state <> 'merged'
   )
 RETURNING i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata, i.stage, i.properties, i.revision, i.last_activity_at, i.triage_state, i.duplicate_of_issue_id, i.requester_user_id, i.description_revision
 `

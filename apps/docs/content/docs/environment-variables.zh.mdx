@@ -198,6 +198,10 @@ MULTICA_PUBLIC_URL=https://api.multica.example.com
 | Telegram | `MULTICA_TELEGRAM_TOOL_PROGRESS` | 流式回复中展示的工具步骤：`auto`（默认，私聊显示细节，群聊只显示工作类型）、`off`、`summary` 或 `detail` |
 | 自托管 Git | `MULTICA_VCS_INTEGRATION_ENABLED` | Forgejo/Gitea/GitLab 集成开关，compose 默认开启 |
 | 自托管 Git | `MULTICA_VCS_SECRET_KEY` | base64 编码的 32 字节加密密钥（`openssl rand -base64 32`）；未配置时该功能整体不可用 |
+| 自托管 Git | `GITLAB_PROXY_URL` | 可选的 GitLab 出站代理，统一用于令牌校验、项目与 Webhook 管理、MR 详情和唤醒状态读取。未设置时直连；不影响其他提供方。见[自托管 Git 代码托管](/vcs-integration)。 |
+| GitLab 迁移 | `GITLAB_BASE_URL` | 旧数据迁移的实例 URL 回退值；仅在匹配到完全相同的旧实例且其存储凭据未加密时使用。已加密的存储凭据优先。 |
+| GitLab 迁移 | `GITLAB_TOKEN` | 旧数据迁移的令牌回退值；仅在完全匹配的实例所存令牌未加密时使用。已加密的存储凭据优先；不要将此密钥写入日志。 |
+| GitLab 迁移 | `GITLAB_WEBHOOK_SECRET` | 旧数据迁移的 Webhook 密钥回退值；仅在完全匹配的实例所存密钥未加密时使用。已加密的存储凭据优先；不要将此密钥写入日志。 |
 | 主题商店 | `MULTICA_THEME_REGISTRY_URL` | 改用其他仓库的 `index.json`，比如官方仓库的 fork；见 [主题与外观](/themes#自托管) |
 
 不配置 `GITHUB_APP_ID` 和私钥时，PR 仍会正常关联、镜像，并在合并后改状态，但卡片上不显示 CI 与可合并状态，"从 GitHub 选择"仓库入口也会禁用。

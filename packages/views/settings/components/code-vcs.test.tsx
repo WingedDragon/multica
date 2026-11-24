@@ -18,9 +18,20 @@ const listing = vi.hoisted(() => ({
     can_manage: true,
   },
 }));
+const projectListing = vi.hoisted(() => ({
+  current: {
+    data: { projects: [] as unknown[] },
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  },
+}));
 
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({ data: listing.current }),
+  useQuery: (options: { queryKey?: unknown[] }) =>
+    JSON.stringify(options.queryKey ?? []).includes("projects")
+      ? projectListing.current
+      : { data: listing.current },
   useQueryClient: () => ({ invalidateQueries: vi.fn() }),
   queryOptions: <T,>(opts: T) => opts,
 }));
@@ -35,6 +46,7 @@ vi.mock("@multica/core/api", () => ({
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { VCSConnectionRows } from "./code-vcs";
+vi.mock("./code-gitlab", () => ({ GitLabProjectRows: () => null }));
 
 const CONNECTION = {
   id: "vcs-1",
@@ -46,6 +58,12 @@ const CONNECTION = {
 beforeEach(() => {
   vi.clearAllMocks();
   listing.current = { connections: [], configured: true, can_manage: true };
+  projectListing.current = {
+    data: { projects: [] },
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  };
 });
 
 describe("VCSConnectionRows", () => {
@@ -109,5 +127,31 @@ describe("VCSConnectionRows", () => {
 
     expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
     expect(screen.getByText(/Ask a workspace admin/)).toBeInTheDocument();
+  });
+  it("shows a retryable error when project bindings fail to load", async () => {
+    listing.current = {
+      connections: [
+        {
+          id: "gitlab-1",
+          provider: "gitlab",
+          instance_url: "https://gitlab.example.test",
+          account_login: "bot",
+        },
+      ],
+      configured: true,
+      can_manage: true,
+    };
+    projectListing.current = {
+      data: { projects: [] },
+      isLoading: false,
+      isError: true,
+      refetch: vi.fn(),
+    };
+    const user = userEvent.setup();
+    renderWithI18n(<VCSConnectionRows />);
+
+    expect(await screen.findByText("Could not load GitLab projects.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(projectListing.current.refetch).toHaveBeenCalled();
   });
 });

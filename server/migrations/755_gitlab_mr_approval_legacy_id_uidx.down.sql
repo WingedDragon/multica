@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS gitlab_mr_approval_legacy_id_uidx;

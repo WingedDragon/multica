@@ -107,6 +107,12 @@ export interface GitHubPullRequest {
   state: GitHubPullRequestState;
   html_url: string;
   branch: string | null;
+  /** GitLab source/target and pipeline summary fields from the shared list. */
+  target_branch?: string | null;
+  detailed_merge_status?: string | null;
+  has_conflicts?: boolean | null;
+  pipeline_status?: string | null;
+  pipeline_url?: string | null;
   author_login: string | null;
   author_avatar_url: string | null;
   merged_at: string | null;

@@ -57,7 +57,7 @@ import type {
   CreateWorkspaceSubscriptionPortalResponse,
   CronPreviewResponse,
   CreateGitLabProjectResponse,
-  GitLabConfigResponse,
+  ListGitLabProjectsResponse,
   GitLabJobTraceResponse,
   GitLabMergeRequest,
   GitLabMergeRequestDetailsResponse,
@@ -102,7 +102,6 @@ import type {
   ListGitHubInstallationsResponse,
   ListGitHubRepositoriesResponse,
   ListLabelsResponse,
-  ListGitLabMergeRequestsResponse,
   ListWebhookDeliveriesResponse,
   IssueStatusEntry,
   ListIssueStatusesResponse,
@@ -510,6 +509,11 @@ export const GitHubPullRequestSchema = z.object({
   state: z.string(),
   html_url: z.string(),
   branch: z.string().nullable(),
+  target_branch: z.string().nullable().optional(),
+  detailed_merge_status: z.string().nullable().optional(),
+  has_conflicts: z.boolean().nullable().optional(),
+  pipeline_status: z.string().nullable().optional(),
+  pipeline_url: z.string().nullable().optional(),
   author_login: z.string().nullable(),
   author_avatar_url: z.string().nullable(),
   merged_at: z.string().nullable(),
@@ -3665,24 +3669,13 @@ export const EMPTY_INBOX_UNREAD_SUMMARY: InboxWorkspaceUnread[] = [];
 // never survive parsing if a backend accidentally includes it.
 // ---------------------------------------------------------------------------
 
-export const GitLabConnectionSchema = z
-  .object({
-    id: z.string(),
-    workspace_id: z.string(),
-    base_url: z.string(),
-    host: z.string(),
-    server_configured: z.boolean().optional(),
-    webhook_url: z.string().nullable().optional(),
-    webhook_path: z.string().nullable().optional(),
-  })
-  .strip();
 
 
 export const GitLabProjectBindingSchema = z
   .object({
     id: z.string(),
     workspace_id: z.string(),
-    connection_id: z.string().nullable().optional(),
+    connection_id: z.string(),
     gitlab_project_id: z.number(),
     path_with_namespace: z.string(),
     web_url: z.string(),
@@ -3701,6 +3694,7 @@ export const GitLabProjectBindingSchema = z
 export const EMPTY_GITLAB_PROJECT_BINDING: GitLabProjectBinding = {
   id: "",
   workspace_id: "",
+  connection_id: "",
   gitlab_project_id: 0,
   path_with_namespace: "",
   web_url: "",
@@ -3713,34 +3707,15 @@ export const EMPTY_GITLAB_PROJECT_BINDING: GitLabProjectBinding = {
   refresh_in_progress_at: null,
   created_at: "",
 };
-
-export const GitLabConfigResponseSchema = z
+export const ListGitLabProjectsResponseSchema = z
   .object({
-    configured: z.boolean(),
-    can_manage: z.boolean().optional(),
-    base_url: z.string().optional(),
-    manual_webhook_url: z.string().optional(),
-    credential_storage_configured: z.boolean().default(false),
-    connections: z.array(GitLabConnectionSchema).default([]),
     projects: z.array(GitLabProjectBindingSchema).default([]),
   })
-  .strip();
+  .loose();
 
-export const EMPTY_GITLAB_CONFIG_RESPONSE: GitLabConfigResponse = {
-  configured: false,
-  credential_storage_configured: false,
-  connections: [],
+export const EMPTY_LIST_GITLAB_PROJECTS_RESPONSE: ListGitLabProjectsResponse = {
   projects: [],
 };
-
-export const CreateGitLabConnectionResponseSchema = z
-  .object({
-    connection: GitLabConnectionSchema,
-    webhook_secret: z.string().min(1).optional(),
-    webhook_url: z.string(),
-    webhook_path: z.string().min(1),
-  })
-  .strip();
 
 
 export const CreateGitLabProjectResponseSchema = z
@@ -3815,16 +3790,6 @@ export const GitLabMergeRequestSchema = z
   })
   .loose();
 
-export const ListGitLabMergeRequestsResponseSchema = z
-  .object({
-    merge_requests: z.array(GitLabMergeRequestSchema).default([]),
-  })
-  .loose();
-
-export const EMPTY_LIST_GITLAB_MERGE_REQUESTS_RESPONSE: ListGitLabMergeRequestsResponse =
-  {
-    merge_requests: [],
-  };
 
 export const EMPTY_GITLAB_MERGE_REQUEST: GitLabMergeRequest = {
   id: "",

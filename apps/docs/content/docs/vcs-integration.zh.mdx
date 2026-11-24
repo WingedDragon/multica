@@ -1,6 +1,6 @@
 ---
 title: 自托管 Git 代码托管
-description: 为每个工作区连接自托管的 Forgejo、Gitea 或 GitLab 实例，使分支名或标题中带有任务编号、或正文中在关闭关键字后带有任务编号的 Pull Request / Merge Request 自动关联到对应任务，在 PR 合并后将任务改为工作区选定的状态，并展示 CI 状态。
+description: 通过统一、按工作区隔离的自托管 VCS 入口连接 Forgejo、Gitea 和 GitLab。每个工作区可连接多个 GitLab 实例与项目，关联 MR、展示当前 head 的 CI，并管理项目 Webhook。
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -11,12 +11,14 @@ import { Tab, Tabs } from "fumadocs-ui/components/tabs";
 **仅适用于自部署的 Multica。** 此集成只在你自己部署 Multica 时可用，Multica 云端不提供；自部署通常是为了让 Multica 能访问你内网里的 Git 实例。服务端需要开启 `MULTICA_VCS_INTEGRATION_ENABLED=true` 并设置 `MULTICA_VCS_SECRET_KEY`，否则 **设置 → 代码** 里不会出现这一行。
 </Callout>
 
-Multica 按工作区连接自托管的 Git 代码托管：Forgejo、Gitea 或 GitLab。连接后，分支名或标题中包含任务编号（例如 `MUL-123`）、或正文中在关闭关键字后写出该编号（`Closes MUL-123`）的 Pull Request（GitLab 为 Merge Request）会自动关联到对应的[任务](/issues)，出现在任务侧栏的 **Pull requests** 中。任务的所有关联 PR 都合并后，任务改为工作区选定的状态（默认为"已完成"）。head commit 的 CI 以检查条的形式显示在卡片上。
+Multica 通过 **设置 → 代码 → Code hosting** 中按工作区隔离的 **自托管 Git** 入口连接 Forgejo、Gitea 和 GitLab。一个工作区可以连接多个 GitLab 实例，并在每个实例下添加多个项目。另一个工作区即使连接同一 GitLab 实例，也会使用独立的连接令牌和项目清单。
 
-这些代码托管与 GitHub 并行工作，一个工作区可以同时连接多个。
+分支名或标题中包含任务编号（例如 `MUL-123`），或正文中在关闭关键字后写出该编号（`Closes MUL-123`）的 Pull Request（GitLab 为 Merge Request）会自动关联到对应的[任务](/issues)，出现在任务侧栏的 **Pull requests** 中。所有关联 PR 都合并后，任务改为工作区选定的状态（默认为“已完成”）。卡片展示当前 head 的 CI 状态。
+
+工作区所有者和管理员负责管理连接与项目绑定。成员只能读取当前工作区允许访问的 GitLab 项目与 MR；凭据和项目访问权限不会跨工作区共享。
 
 <Callout type="info">
-与 GitHub 不同，这些代码托管没有 App 模型。每个工作区保存自己的实例地址和访问令牌，并在其仓库或组织上注册 Webhook。令牌和 Webhook 密钥均加密存储。
+GitLab 没有 App 模型。每个工作区独立保存实例地址和访问令牌，并在对应连接下添加 GitLab 项目。令牌和 Webhook 密钥均加密存储。
 </Callout>
 
 ## 前置条件（服务端）
@@ -47,24 +49,24 @@ MULTICA_VCS_SECRET_KEY=<base64 32 字节密钥>
 
 <Steps>
 <Step>
-在代码托管中创建具备仓库读取权限的访问令牌：
+在代码托管平台创建可读取目标仓库的访问令牌：
 
-- **Forgejo / Gitea**：设置 → 应用。
-- **GitLab**：具备 `read_api` 权限的个人（或群组/项目）访问令牌。
+- **Forgejo / Gitea**：在“设置 → 应用”中创建应用令牌。
+- **GitLab**：具备 `read_api` scope 的个人、群组或项目访问令牌可读取项目和 MR。要让 Multica 创建或更新项目 Webhook，令牌需具备 `api` scope，且令牌用户须有权管理该项目的 Webhook（通常是 Maintainer 或 Owner）。只有 `read_api` 的令牌不能管理 Hook。
 </Step>
 <Step>
-在 Multica 中打开 **设置 → 代码**，在 **自托管 Git** 一行点击 **连接**。
+在 Multica 打开 **设置 → 代码 → Code hosting**，通过 **自托管 Git** 入口连接代码托管平台。GitLab 连接属于当前工作区；即使另一工作区使用同一实例，也要单独创建连接。
 </Step>
 <Step>
-选择**提供方**，填写实例地址（例如 `https://forgejo.example.com`）和访问令牌，点击 **连接**。Multica 会先用该令牌访问实例进行校验，再保存。
+选择提供方，填写实例基础 URL（如有子路径也要保留）和访问令牌。Multica 会先验证令牌再保存。对于 GitLab，在连接下按完整的 group/subgroup/project 路径或项目 URL 添加项目。
 </Step>
 <Step>
-复制连接后显示的 **Webhook 地址** 与 **Webhook 密钥**。
+添加 GitLab 项目时，Multica 会尝试创建项目 Webhook。请检查项目 Hook 状态和失败原因；如果 Multica 无法管理 Hook，由有权限的 GitLab 管理员使用 Multica 显示的 URL 和密钥手动配置。Forgejo/Gitea 则按下方说明复制 Multica 显示的 Webhook URL 和密钥并注册。
 </Step>
 </Steps>
 
 <Callout type="warn">
-Webhook 密钥只显示一次，请在离开页面前复制。重新连接同一实例会轮换令牌与密钥。
+访问令牌和 Webhook 密钥都是凭据。Multica 显示 Webhook 密钥时请及时保存；普通 API 响应和日志不会包含密钥。
 </Callout>
 
 ### 实例使用私有 CA
@@ -90,33 +92,101 @@ Multica 不提供跳过证书校验的选项，因为连接请求会携带你的
 </Tab>
 <Tab value="GitLab" id="gitlab">
 
+通过 Multica 添加 GitLab 项目时，会尝试为该项目创建包含 **Merge request events**、**Pipeline events**、**Job events** 和 **Comments**（GitLab Note 事件）的 Webhook。创建或更新失败时，项目会显示 Hook 状态和原因。你可以用 Multica 显示的 URL 与密钥手动配置项目 Webhook：
+
 设置 → Webhooks：
 
-- **URL**：Webhook 地址。
-- **Secret token**：Webhook 密钥（作为 `X-Gitlab-Token` 发送并逐字比对）。
-- **触发器**：启用 **Merge request events**，并启用 **Pipeline events** 以镜像 CI。
+- **URL**：该 GitLab 连接对应的 Webhook URL。
+- **Secret token**：对应的 Webhook 密钥。
+- **触发器**：启用 **Merge request events**、**Pipeline events**、**Job events** 和 **Comments**。
+
+`read_api` 是只读权限，不能创建或修改项目 Webhook。自动管理项目 Hook 需要 `api` scope，以及有权管理该项目 Hook 的 GitLab 角色（Administrator、Maintainer 或 Owner）。群组 Hook 需要 GitLab 管理员或群组 Owner；System Hook 需要 GitLab 实例管理员。没有这些权限时，请由相应管理员手动配置并验证 Hook。
 
 </Tab>
 </Tabs>
 
-<Callout type="info">
-GitLab 管理员也可以配置实例级 **System Hook**：使用同一 Webhook 地址与密钥，启用 **Merge request events**。Multica 只处理当前工作区 **设置 → 代码 → 代码仓库** 中列出的、属于已连接 GitLab 实例且可被连接令牌读取的仓库；其他系统事件会被忽略。代码仓库可以使用 HTTPS 或 SSH 克隆地址。System Hook 只发送 MR 事件，不发送 Pipeline 事件；如果需要 CI 状态，仍需保留项目级或群组级 Pipeline Webhook，二者可以同时配置。这样不必逐项目注册，但需要 GitLab 管理员权限。返回 `202` 仅代表请求已被接收，不保证任务已关联或改状态；接入前已合并的 MR 不会自动补处理。
-</Callout>
-
-Multica 会用存储的密钥校验每次投递，因此没有匹配密钥的 Webhook 会被拒绝。
+GitLab 管理员也可以配置实例级 [System Hook](https://docs.gitlab.com/administration/system_hooks/)并启用 Merge request events。不要假设 System Hook 能提供 Pipeline、Job 或 Note 事件覆盖；请核对实际投递，并用项目/群组 Hook 补齐所需事件。Multica 只处理当前工作区 GitLab 项目绑定中明确列出、属于已连接实例且可被连接令牌读取的项目事件；System Hook 不会扩大其他项目或工作区的访问权限。核对每个项目通过适用 Hook 组合实现所需事件的整体覆盖，不要认为每种 Hook 都会投递全部四类事件。所有投递都会通过存储的密钥校验。
 
 ## 镜像的内容
 
-- **Pull / Merge Request** —— open、closed、merged、draft 状态，以及作者、分支和（在代码托管提供时）diff 统计。
-- **任务关联** —— 标题或分支中的编号会将 PR 关联到任务，正文中的编号只有紧跟关闭关键字时才会关联；正文中的普通提及不会建立任何关联。任务的所有关联 PR（包括 GitHub 与自托管平台上的）都合并后，任务会改为工作区选定的状态，遵循与 [GitHub](/github-integration) 相同的设置和规则。连接平台后，本页也会显示同一项 **PR 合并后，任务状态改为** 设置。
-- **CI** —— Forgejo/Gitea 的提交状态与 GitLab 的流水线会汇总为 head commit 的通过/失败/进行中检查条。
+- **Pull / Merge Request**：状态、作者、分支、diff 统计、审批与审批规则、讨论及未解决评论。
+- **任务关联**：标题或分支中的任务编号会建立关联，正文中的编号只有紧跟关闭关键字时才会关联；正文里的普通提及不会建立关联。GitHub 与自托管平台上的关联 PR 全部合并后，任务按与 [GitHub](/github-integration) 相同的设置和规则改为工作区选定的状态。
+- **CI**：GitLab MR 当前 head 对应的 Pipeline 和 Job 状态，与 Forgejo/Gitea 提交状态一同展示。未知、旧 head 或仍在运行的 Pipeline 不会显示为已完成。
+- **GitLab 详情**：展示 Pipeline、Job、有界的失败日志摘要，以及经过现有权限检查的制品入口；不会将完整日志或制品内容复制到数据库。
+- **唤醒**：关联的 GitLab MR 合并、当前 head 的 CI 结束或检测到冲突时可唤醒任务；聊天唤醒可等待指定 MR 合并、关闭或当前 head 的 CI 结束，详见[任务唤醒](/issue-wakeups)。
+
+可通过任务中的 **刷新** 操作刷新 MR，也可刷新 GitLab 项目以更新该项目中已镜像的 MR；项目刷新不保证发现所有历史 MR。合并 MR 会使用连接令牌在 GitLab 上的权限；失败会明确显示，不会伪装成成功。
 
 ## 智能体创建 Pull Request
 
 智能体创建 PR 不需要在 Multica 中做任何代码托管配置。智能体在运行时中检出仓库，用运行时主机自己的 Git 凭据推送分支和创建 PR。要让智能体在某个代码托管上工作，只要守护进程所在的主机能通过它的认证（例如 SSH 部署密钥，或主机 Git 凭据助手里的令牌），再像往常一样添加仓库地址。仓库检出支持任意 Git URL，不需要按提供方单独配置。
 
-## GitLab 项目连接
+## GitLab 连接与项目
 
-工作区所有者和管理员可以在**设置 → 代码**的 GitLab 区域连接多个 GitLab 实例，并分别添加项目。填写实例地址和有权访问这些项目的令牌。服务端使用 `MULTICA_VCS_SECRET_KEY` 加密保存令牌。
+工作区所有者和管理员可在 **设置 → 代码 → Code hosting → 自托管 Git** 中连接多个 GitLab 实例，并在每个连接下添加多个项目。实例基础 URL 必须保留完整路径（包括子路径），项目路径须包含所有层级的群组。其他工作区连接同一实例时仍使用自己的令牌和项目清单。
+可选的 `GITLAB_PROXY_URL` 会将 GitLab 令牌校验、项目与 Webhook 管理、MR 详情和唤醒状态请求经由出站代理发送；未设置时直连，不影响其他提供方。
 
-Webhook 密钥只在连接实例时显示一次；如果需要手动配置项目 Webhook，请先保存密钥。之前通过服务端 GitLab 设置添加的项目仍可使用。
+添加项目时，Multica 会验证连接令牌能否读取项目，并尝试注册 MR、Pipeline、Job 和 Note Hook；Hook 状态与失败原因会保留并显示。`read_api` 令牌可读取 GitLab 数据，但不能创建或更改 Hook；应使用具有 `api` scope 且有权管理项目 Hook 的令牌，或请对应的 GitLab 管理员配置项目、群组或 System Hook。System Hook 事件仍受工作区项目清单和令牌可读性检查约束。
+
+移除项目后，Multica 不再使用该项目绑定。刷新项目只会更新本地已镜像的 MR，不保证发现所有历史 MR。
+
+## 升级现有 GitLab 集成
+
+GitLab 切换属于维护流程，不是普通数据库迁移。升级前备份数据库和当前应用版本，保留 `MULTICA_VCS_SECRET_KEY`，盘点连接、项目、受管与手动 Hook，并确认相关 GitLab 令牌能读取目标项目。不要将令牌或 Webhook 密钥写入日志。
+
+普通数据库结构迁移会创建统一 VCS 表和迁移台账表，但不会删除或改写旧 GitLab 表或数据。迁移前先停止旧应用和唤醒 worker。从 `server/` 目录设置 `DATABASE_URL`；若预计存在旧 GitLab 数据，还须在预检前设置 `MULTICA_VCS_INTEGRATION_ENABLED=true`、`MULTICA_VCS_SECRET_KEY`，以及通过 `MULTICA_PUBLIC_URL` 或 `--public-url URL` 提供绝对 HTTP(S) 公网地址。然后运行：
+
+```sh
+go run ./cmd/migrate up
+go run ./cmd/gitlab-vcs-migrate preflight
+```
+
+`preflight` 只读检查旧凭据、项目映射、冲突及 Hook 清单；JSON 会报告计数（包括 `legacy_pipelines`）和检查发现，且不会泄露密钥。若结果为 `no_op: true`，表示没有旧 GitLab 数据需要导入；跳过切换，包括旧凭据、密钥和 Hook 步骤。若要启用自托管 VCS，仍须设置正常使用的 `MULTICA_VCS_SECRET_KEY`。否则先解决所有检查发现的问题，并保留旧凭据及解密密钥直到迁移完成。已加密的旧凭据优先；只有对应存储凭据未加密时，才可用 `GITLAB_BASE_URL`、`GITLAB_TOKEN` 和 `GITLAB_WEBHOOK_SECRET` 为完全匹配的旧实例提供可选环境回退。每条 CLI 命令都需要 `DATABASE_URL`；也可用 `--public-url URL` 覆盖 `MULTICA_PUBLIC_URL`。
+如果在 schema migration 前运行，只有在所有切换专用表、列和索引标记都不存在时，`preflight` 才会继续并将 `state` 设为 `not_initialized`；只有部分标记时会按失败关闭处理。`status` 仍要求迁移状态表和 delivery 表存在。
+
+预检无阻塞项后，进入维护状态并在单个事务中导入旧数据：
+
+```sh
+go run ./cmd/gitlab-vcs-migrate begin
+go run ./cmd/gitlab-vcs-migrate migrate
+```
+
+`migrate` 会再次运行预检，并在单个事务中导入 VCS 数据而不删除旧表。已有 MR 关联、任务/聊天唤醒目标及其 CI 基线都会继续绑定到相同 MR；旧 Pipeline 结果不会被当作新的 CI 事件。以维护状态部署并启动新版本，再切换受管 Hook：
+
+```sh
+go run ./cmd/gitlab-vcs-migrate switch-hooks
+```
+
+CLI 使用 `MULTICA_PUBLIC_URL` 生成工作区专属 Hook URL，也可使用 `--public-url URL` 覆盖。若手动项目、群组或 System Hook 缺失或无法更新，该步骤会失败，服务必须维持维护状态。GitLab 管理员须按工具输出的准确工作区专属 URL 配置手动 Hook、发送受控验证事件后，再重试切换。只有 `read_api` 的令牌无法更新受管 Hook。核对每个项目通过 Hook 组合实现的整体事件覆盖；不能假设 System Hook 会投递 Pipeline、Job 或 Note，也不能假设任何一种 Hook 都会投递全部四类事件。
+
+对于单个 GitLab 实例明确批准的一次性例外，请提供 `MULTICA_GITLAB_SYSTEM_HOOKS_ATTESTED=https://gitlab.example.com`（CLI：`--attest-no-legacy-system-hooks-for=https://gitlab.example.com`）。只能提供不含路径、账号信息、query 或 fragment 的完整 HTTPS origin，并按包含端口的完整值精确匹配。仅当该实例的 `GET /hooks` 返回 `403` 时，才可跳过 System Hook 清单；确认会写入审计并保留在恢复状态供重试沿用。`403` 仍是权限问题，不代表不支持 System Hook。此操作不会修复权限，不适用于其他 origin 或错误，也不跳过项目/群组 Hook 清单、真实投递验证、可恢复 Hook、工作区隔离或维护门禁。该值仅作一次性输入，不应永久写入 `.env`。
+
+维护期间，只有通过签名和授权校验的 GitLab Webhook 才会持久化为回执，并故意返回 HTTP 503 让 GitLab 重试；回执不等于已确认投递。记录同一个维护窗口的 UTC 截止时间，并在重放和验证时复用。`--since` 只用于这两个命令，且值必须是以 `Z` 结尾的有效 RFC3339 UTC 时间：
+
+```sh
+CUTOVER_SINCE="2026-06-12T09:00:00Z" # 替换为本次切换记录的 UTC 截止时间。
+go run ./cmd/gitlab-vcs-migrate replay --since "$CUTOVER_SINCE"
+go run ./cmd/gitlab-vcs-migrate verify-hooks --since "$CUTOVER_SINCE"
+```
+
+`replay` 会通过 GitLab 权威状态同步流程处理已保存的维护回执；它不会向 GitLab 重投，也无法恢复从未保存的投递。`verify-hooks` 会检查 Hook URL、截止时间之后启用事件的真实且已核对投递，以及每个项目的 MR、Pipeline、Job 和 Note 整体覆盖。若重放、验证或事件覆盖失败，继续维持维护状态，修复 Hook 或投递问题后，使用相同发布版本和截止时间重跑。所有检查完成前不得最终切换。
+
+只有验证成功后才能最终完成，并检查迁移状态：
+
+```sh
+go run ./cmd/gitlab-vcs-migrate finalize
+go run ./cmd/gitlab-vcs-migrate status
+```
+
+只有 `status` 显示 `phase: "complete"` 且 `maintenance_mode: false` 时，才可恢复正常写入。最终完成会在迁移锁内确认所有已配置的 Hook 均已验证、所有回执均已对账，然后删除旧表与回滚快照并清除回执 payload；完成后 `restore` 无法恢复。
+
+最终完成前如决定放弃切换，只有在维护状态且所有写入服务已停止时才能还原：
+
+```sh
+go run ./cmd/gitlab-vcs-migrate restore
+go run ./cmd/gitlab-vcs-migrate status
+```
+
+`restore` 会先将每个 Hook 还原为记录的原始配置和密钥，再恢复迁移前记录的数据库快照。成功后，`status` 显示 `phase: "restored"`，但 `maintenance_mode` 仍为 `true`。它不会恢复应用程序二进制文件或整库备份；发布恢复流程会单独还原旧应用文件。若任一 Hook 或数据库恢复失败，状态会变为 `restore_blocked` 并保持维护；若该状态或恢复结果无法验证，保持服务停止，不要启动旧应用或任何写入端。不得使用整库旧备份覆盖新写入。
+
+最终完成或恢复旧服务后，检查 GitLab 完整投递记录中的所有维护期 HTTP 503。迁移工具保留的 `recovery_delivery_ids` 可帮助定位已保存的回执，但不是完整投递记录。重投失败事件，并明确确认无法恢复的事件，然后同步当前权威 MR/Pipeline 状态。数据库快照或 `replay` 都无法重建从未保存或 GitLab 已不能重投的事件；未确认的事件须明确报告，不得猜测状态或据此触发唤醒。

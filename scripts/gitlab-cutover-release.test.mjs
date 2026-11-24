@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:net";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +15,10 @@ const upstreamPin = "a".repeat(40);
 const databaseSecret = "database-password-must-never-be-printed";
 const redisSecret = "redis-password-must-never-be-printed";
 
-function fixture(scenario) {
+function shellQuote(value) {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+function fixture(scenario, databaseUrl = `postgres://release:${databaseSecret}@127.0.0.1:5432/multica?sslmode=require&application_name=release%20test&connect_timeout=3`) {
   const root = mkdtempSync(path.join(os.tmpdir(), "multica-gitlab-release-"));
   const bin = path.join(root, "bin");
   const repo = path.join(root, "repo");
@@ -30,16 +34,19 @@ function fixture(scenario) {
   mkdirSync(path.join(remote, "apps", "web", ".next"), { recursive: true });
   mkdirSync(path.join(home, ".multica"), { recursive: true });
   mkdirSync(path.join(state, "services"), { recursive: true });
+  mkdirSync(path.join(state, "tmp"), { recursive: true, mode: 0o700 });
+  chmodSync(path.join(state, "tmp"), 0o700);
   writeFileSync(path.join(home, ".multica", "desktop.json"), "{}\n");
   writeFileSync(path.join(repo, "apps", "web", "next-env.d.ts"), "// fixture\n");
   const workspaceEnv = [
-    `DATABASE_URL=postgres://release:${databaseSecret}@127.0.0.1/multica`,
+    `DATABASE_URL=${shellQuote(databaseUrl)}`,
     "MULTICA_VCS_INTEGRATION_ENABLED=true",
     "MULTICA_VCS_SECRET_KEY=test-encryption-key-not-for-output",
     "MULTICA_PUBLIC_URL=https://selfhost.example.test",
   ];
-  if (["redis_legacy", "redis_empty", "redis_partial"].includes(scenario)) workspaceEnv.push(`REDIS_URL=redis://relay:${redisSecret}@127.0.0.1/0`);
-  writeFileSync(path.join(remote, ".env"), `${workspaceEnv.join("\n")}\n`);
+  if (["redis_legacy", "redis_empty", "redis_partial", "real_pg_probe"].includes(scenario)) workspaceEnv.push(`REDIS_URL=redis://relay:${redisSecret}@127.0.0.1/0`);
+  writeFileSync(path.join(remote, ".env"), `${workspaceEnv.join("\n")}\n`, { mode: 0o600 });
+  chmodSync(path.join(remote, ".env"), 0o600);
   writeFileSync(path.join(remote, "apps", "web", ".next", "BUILD_ID"), "old-build\n");
   writeFileSync(path.join(remote, "apps", "web", ".next", "routes-manifest.json"), "{}\n");
   writeFileSync(path.join(remote, "apps", "web", ".next", "prerender-manifest.json"), "{}\n");
@@ -276,9 +283,39 @@ if [ -n "$destination" ]; then
 fi
 `);
 
+  put("assert-pg-connection", `#!/usr/bin/env node
+const fs = require("node:fs");
+const fail = () => process.exit(1);
+try {
+  const servicePath = process.env.PGSERVICEFILE;
+  if (!servicePath || process.env.PGSERVICE !== "multica_cutover" || process.env.DATABASE_URL) fail();
+  if ((fs.statSync(servicePath).mode & 0o777) !== 0o600) fail();
+  const service = fs.readFileSync(servicePath, "utf8");
+  const hasLine = (key, value) => service.split("\\n").includes(key + "=" + value);
+  if (!hasLine("host", process.env.MULTICA_TEST_DBHOST)) fail();
+  if (!hasLine("port", process.env.MULTICA_TEST_DBPORT)) fail();
+  if (!hasLine("user", process.env.MULTICA_TEST_DBUSER)) fail();
+  if (!hasLine("dbname", process.env.MULTICA_TEST_DBNAME)) fail();
+  if (!hasLine("sslmode", process.env.MULTICA_TEST_SSLMODE)) fail();
+  if (!hasLine("application_name", process.env.MULTICA_TEST_APPNAME)) fail();
+  if (!hasLine("connect_timeout", process.env.MULTICA_TEST_CONNECT_TIMEOUT)) fail();
+  if (service.includes(process.env.MULTICA_TEST_DB_PASSWORD)) fail();
+  const passfile = service.match(/^passfile=(.+)$/m)?.[1];
+  if (!passfile || (fs.statSync(passfile).mode & 0o777) !== 0o600) fail();
+  const escaped = process.env.MULTICA_TEST_DB_PASSWORD.replace(/\\\\/g, "\\\\\\\\").replace(/:/g, "\\\\:");
+  if (fs.readFileSync(passfile, "utf8") !== "*:*:*:*:" + escaped + "\\n") fail();
+} catch {
+  fail();
+}
+`);
+
   put("pg_dump", `#!/usr/bin/env bash
 set -euo pipefail
+[[ "$*" != *"://"* && "$*" != *"$MULTICA_TEST_DB_PASSWORD"* ]] || { echo "database credentials reached pg_dump argv" >&2; exit 9; }
 printf 'pg_dump %s\\n' "$*" >>"$MULTICA_TEST_LOG"
+assert-pg-connection
+printf 'pg_dump libpq configuration secure\\n' >>"$MULTICA_TEST_LOG"
+if [ "$MULTICA_REAL_PG" = "1" ]; then unset MULTICA_TEST_DB_PASSWORD; exec "$MULTICA_REAL_PG_DUMP" "$@"; fi
 file=""
 for arg in "$@"; do case "$arg" in --file=*) file="${'${arg#--file=}'}" ;; esac; done
 [ -n "$file" ] || { echo "missing backup file" >&2; exit 9; }
@@ -287,7 +324,11 @@ printf 'mock database backup\\n' >"$file"
 
   put("psql", `#!/usr/bin/env bash
 set -euo pipefail
+[[ "$*" != *"://"* && "$*" != *"$MULTICA_TEST_DB_PASSWORD"* ]] || { echo "database credentials reached psql argv" >&2; exit 9; }
 printf 'psql %s\\n' "$*" >>"$MULTICA_TEST_LOG"
+assert-pg-connection
+printf 'psql libpq configuration secure\\n' >>"$MULTICA_TEST_LOG"
+if [ "$MULTICA_REAL_PG" = "1" ]; then unset MULTICA_TEST_DB_PASSWORD; exec "$MULTICA_REAL_PSQL" "$@"; fi
 case "$MULTICA_TEST_SCENARIO" in
   redis_legacy) printf 't\\n' ;;
   redis_partial) printf 'partial\\n' ;;
@@ -440,6 +481,7 @@ esac
     MULTICA_REMOTE_NAME: "origin",
     MULTICA_UPSTREAM_SYNC_STRATEGY: "merge",
     MULTICA_UPSTREAM_PIN: "",
+    TMPDIR: path.join(state, "tmp"),
     MULTICA_SKIP_CLI_INSTALL: "1",
     MULTICA_SKIP_PACKAGE: "1",
     MULTICA_SKIP_INSTALL: "1",
@@ -452,12 +494,21 @@ esac
     MULTICA_TEST_COMMIT: scenario === "new_commit_restore_active" ? "feedface" : pinnedCommit,
     MULTICA_TEST_UPSTREAM_PIN: upstreamPin,
     MULTICA_TEST_SCENARIO: scenario,
+    MULTICA_TEST_DB_PASSWORD: databaseSecret,
+    MULTICA_TEST_DBHOST: "127.0.0.1",
+    MULTICA_TEST_DBPORT: "5432",
+    MULTICA_TEST_DBUSER: "release",
+    MULTICA_TEST_DBNAME: "multica",
+    MULTICA_TEST_SSLMODE: "require",
+    MULTICA_TEST_APPNAME: "release test",
+    MULTICA_TEST_CONNECT_TIMEOUT: "3",
+    MULTICA_REAL_PG: "0",
   };
   return { root, bin, repo, remote, home, state, log, env };
 }
 
-function withFixture(t, scenario) {
-  const fx = fixture(scenario);
+function withFixture(t, scenario, databaseUrl) {
+  const fx = fixture(scenario, databaseUrl);
   t.after(() => rmSync(fx.root, { recursive: true, force: true }));
   return fx;
 }
@@ -513,6 +564,7 @@ test("legacy cutover backs up, gates writes, verifies receipts, and finalizes", 
   assert.equal(readFileSync(path.join(fx.state, "services", "multica-frontend"), "utf8"), "active");
   assert.ok(`${result.stdout}\n${result.stderr}`.includes("delivery-1"));
   assert.ok(`${result.stdout}\n${result.stderr}`.includes("delivery-2"));
+  assert.ok(hasCommand(commands, "pg_dump libpq configuration secure"));
   assert.ok(!`${result.stdout}\n${result.stderr}\n${commands.join("\n")}`.includes(databaseSecret));
   const backups = [];
   function visit(dir) {
@@ -525,6 +577,7 @@ test("legacy cutover backs up, gates writes, verifies receipts, and finalizes", 
   visit(fx.remote);
   assert.equal(backups.length, 1, "one private database backup is retained");
   assert.equal(statSync(backups[0]).mode & 0o777, 0o600);
+  assert.deepEqual(readdirSync(path.join(fx.state, "tmp")), [], "temporary libpq credential files are removed");
 });
 test("failed schema migration leaves a pinned snapshot and same-HEAD retry resumes safely", (t) => {
   const fx = withFixture(t, "migration_up_fails");
@@ -651,8 +704,10 @@ test("Redis-backed legacy cutover fails closed before stopping services", (t) =>
   assert.ok(!hasCommand(commands, "migrate up"));
   assert.ok(!hasCommand(commands, "gitlab-vcs-migrate begin"));
   assert.match(`${result.stdout}\n${result.stderr}`, /REDIS_URL|drain|queue/i);
+  assert.ok(hasCommand(commands, "psql libpq configuration secure"));
   assert.ok(!`${result.stdout}\n${result.stderr}\n${commands.join("\n")}`.includes(databaseSecret));
   assert.ok(!`${result.stdout}\n${result.stderr}\n${commands.join("\n")}`.includes(redisSecret));
+  assert.deepEqual(readdirSync(path.join(fx.state, "tmp")), []);
 });
 
 test("Redis-backed release fails closed on a partial legacy schema", (t) => {
@@ -663,9 +718,11 @@ test("Redis-backed release fails closed on a partial legacy schema", (t) => {
   assert.ok(hasCommand(commands, "psql -XAtq -v ON_ERROR_STOP=1"));
   assert.ok(!hasCommand(commands, "systemctl stop"));
   assert.ok(!hasCommand(commands, "migrate up"));
+  assert.ok(hasCommand(commands, "psql libpq configuration secure"));
   assert.match(`${result.stdout}\n${result.stderr}`, /partially present/i);
   assert.ok(!`${result.stdout}\n${result.stderr}\n${commands.join("\n")}`.includes(databaseSecret));
   assert.ok(!`${result.stdout}\n${result.stderr}\n${commands.join("\n")}`.includes(redisSecret));
+  assert.deepEqual(readdirSync(path.join(fx.state, "tmp")), []);
 });
 
 test("Redis-backed releases continue when the legacy probe finds no rows", (t) => {
@@ -681,10 +738,11 @@ test("Redis-backed releases continue when the legacy probe finds no rows", (t) =
   assert.ok(hasCommand(commands, "systemctl start multica-backend multica-frontend"));
   assert.ok(!hasCommand(commands, "pg_dump"));
   assert.ok(!hasCommand(commands, "gitlab-vcs-migrate begin"));
+  assert.ok(hasCommand(commands, "psql libpq configuration secure"));
   assert.ok(!`${result.stdout}\n${result.stderr}\n${commands.join("\n")}`.includes(databaseSecret));
   assert.ok(!`${result.stdout}\n${result.stderr}\n${commands.join("\n")}`.includes(redisSecret));
+  assert.deepEqual(readdirSync(path.join(fx.state, "tmp")), []);
 });
-
 test("interrupted restore resumes with its pinned tool before any new release work", (t) => {
   const fx = withFixture(t, "restore_retry");
   const result = runRelease(fx);
@@ -828,4 +886,222 @@ test("an upstream pin still refuses to push when origin contains newer commits",
   assert.ok(!hasCommand(commands, "fetch upstream main --tags"));
   assert.ok(!hasCommand(commands, "push origin feature/gitlab-cutover"));
   assert.match(`${result.stdout}\n${result.stderr}`, /origin\/feature\/gitlab-cutover contains 1 commit.*not present locally/i);
+});
+const realPgBinDir = process.env.MULTICA_TEST_PG_BIN_DIR || "";
+const realPgTools = ["initdb", "pg_ctl", "psql", "pg_dump", "pg_restore"].map((name) => [name, path.join(realPgBinDir, name)]);
+const realPgEnabled = Boolean(
+  realPgBinDir
+  && process.getuid?.() !== 0
+  && realPgTools.every(([, executable]) => existsSync(executable)),
+);
+
+function runPgTool(executable, args, { input, env: extraEnv = {} } = {}) {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (name.startsWith("PG")) delete env[name];
+  }
+  Object.assign(env, extraEnv);
+  const result = spawnSync(executable, args, {
+    encoding: "utf8",
+    env,
+    input,
+    maxBuffer: 8 * 1024 * 1024,
+    timeout: 120_000,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`${path.basename(executable)} test helper failed`);
+  }
+  return result.stdout;
+}
+
+async function reservePort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return address.port;
+}
+
+function makeRestoreService(directory, { port, database, password }) {
+  const serviceFile = path.join(directory, "restore.pg_service.conf");
+  const passFile = path.join(directory, "restore.pgpass");
+  const escaped = password.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
+  writeFileSync(passFile, `127.0.0.1:${port}:${database}:release_user:${escaped}\n`, { mode: 0o600 });
+  chmodSync(passFile, 0o600);
+  writeFileSync(serviceFile, [
+    "[multica_restore]",
+    "host=127.0.0.1",
+    `port=${port}`,
+    `dbname=${database}`,
+    "user=release_user",
+    "sslmode=require",
+    "application_name=restore integration",
+    "connect_timeout=3",
+    `passfile=${passFile}`,
+    "",
+  ].join("\n"), { mode: 0o600 });
+  chmodSync(serviceFile, 0o600);
+  return { PGSERVICEFILE: serviceFile, PGSERVICE: "multica_restore" };
+}
+
+test("PostgreSQL URI backup and Redis probe use the workspace libpq connection", {
+  skip: !realPgEnabled && "set MULTICA_TEST_PG_BIN_DIR to a non-root local PostgreSQL installation",
+  timeout: 120_000,
+}, async (t) => {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "multica-pg-real-"));
+  const dataDir = path.join(tempRoot, "data");
+  const logFile = path.join(tempRoot, "postgres.log");
+  const pg = Object.fromEntries(realPgTools);
+  const openssl = process.env.MULTICA_TEST_OPENSSL_BIN || "openssl";
+  let serverStarted = false;
+  t.after(() => {
+    let stopFailed = false;
+    if (serverStarted) {
+      const stopped = spawnSync(pg.pg_ctl, ["-D", dataDir, "-m", "fast", "-w", "-t", "30", "stop"], {
+        encoding: "utf8",
+        timeout: 45_000,
+      });
+      stopFailed = Boolean(stopped.error || stopped.status !== 0);
+    }
+    rmSync(tempRoot, { recursive: true, force: true });
+    if (stopFailed) throw new Error("temporary PostgreSQL server did not stop");
+  });
+
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const initPasswordFile = path.join(tempRoot, "initdb-password");
+  writeFileSync(initPasswordFile, "temporary-superuser-password\n", { mode: 0o600 });
+  chmodSync(initPasswordFile, 0o600);
+  runPgTool(pg.initdb, ["-D", dataDir, "--auth-local=trust", "--auth-host=scram-sha-256", "--username=postgres", "--pwfile", initPasswordFile]);
+
+  const cert = path.join(dataDir, "server.crt");
+  const key = path.join(dataDir, "server.key");
+  runPgTool(openssl, [
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+    "-subj", "/CN=localhost", "-keyout", key, "-out", cert,
+  ]);
+  chmodSync(key, 0o600);
+  const configString = (value) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  writeFileSync(path.join(dataDir, "postgresql.auto.conf"), [
+    "ssl=on",
+    `ssl_cert_file=${configString("server.crt")}`,
+    `ssl_key_file=${configString("server.key")}`,
+    `unix_socket_directories=${configString(os.tmpdir())}`,
+    "",
+  ].join("\n"), { mode: 0o600 });
+
+  const port = await reservePort();
+  serverStarted = true;
+  runPgTool(pg.pg_ctl, [
+    "-D", dataDir,
+    "-l", logFile,
+    "-o", `-h 127.0.0.1 -p ${port}`,
+    "-w", "-t", "30", "start",
+  ]);
+
+  const password = "p@ss:/+%:colon\\slash";
+  const sqlLiteral = password.replace(/'/g, "''");
+  const setupSql = [
+    `CREATE ROLE release_user LOGIN PASSWORD '${sqlLiteral}';`,
+    "CREATE DATABASE release_backup OWNER release_user;",
+    "CREATE DATABASE release_probe OWNER release_user;",
+    "CREATE DATABASE release_restore OWNER release_user;",
+    "",
+  ].join("\n");
+  const localPsql = (user, database, input) => runPgTool(pg.psql, [
+    "-X", "-h", os.tmpdir(), "-p", String(port), "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1",
+  ], { input });
+  localPsql("postgres", "postgres", setupSql);
+  localPsql("release_user", "release_backup", "CREATE TABLE release_sample (id integer PRIMARY KEY, payload text NOT NULL);\nINSERT INTO release_sample VALUES (42, 'restored from the custom archive');\n");
+  localPsql("release_user", "release_probe", [
+    "CREATE TABLE gitlab_connection (id integer);",
+    "INSERT INTO gitlab_connection VALUES (1);",
+    "CREATE TABLE gitlab_project_binding (id integer);",
+    "CREATE TABLE gitlab_merge_request (id integer);",
+    "CREATE TABLE issue_gitlab_merge_request (id integer);",
+    "CREATE TABLE gitlab_mr_pipeline (id integer);",
+    "",
+  ].join("\n"));
+
+  const appName = "release integration";
+  const uriFor = (database) => `postgresql://release_user:${encodeURIComponent(password)}@127.0.0.1:${port}/${database}?sslmode=require&application_name=${encodeURIComponent(appName)}&connect_timeout=3`;
+  const configureRealFixture = (fx, database) => {
+    fx.env.MULTICA_REAL_PG = "1";
+    fx.env.MULTICA_REAL_PG_DUMP = pg.pg_dump;
+    fx.env.MULTICA_REAL_PSQL = pg.psql;
+    fx.env.MULTICA_TEST_DB_PASSWORD = password;
+    fx.env.MULTICA_TEST_DBHOST = "127.0.0.1";
+    fx.env.MULTICA_TEST_DBPORT = String(port);
+    fx.env.MULTICA_TEST_DBUSER = "release_user";
+    fx.env.MULTICA_TEST_DBNAME = database;
+    fx.env.MULTICA_TEST_SSLMODE = "require";
+    fx.env.MULTICA_TEST_APPNAME = appName;
+    fx.env.MULTICA_TEST_CONNECT_TIMEOUT = "3";
+  };
+
+  const backupUrl = uriFor("release_backup");
+  const backupFixture = withFixture(t, "real_pg_backup", backupUrl);
+  assert.equal(statSync(path.join(backupFixture.remote, ".env")).mode & 0o777, 0o600);
+  configureRealFixture(backupFixture, "release_backup");
+  const backupRelease = runRelease(backupFixture);
+  assert.equal(backupRelease.status, 0, "the release fixture should complete its mocked cutover without a real remote");
+  const backupCommands = log(backupFixture);
+  assert.ok(hasCommand(backupCommands, "pg_dump libpq configuration secure"));
+  assert.deepEqual(readdirSync(path.join(backupFixture.state, "tmp")), []);
+  const backupPaths = [];
+  const visitBackups = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) visitBackups(full);
+      else if (entry.name.endsWith(".dump")) backupPaths.push(full);
+    }
+  };
+  visitBackups(backupFixture.remote);
+  assert.equal(backupPaths.length, 1);
+  const backupPath = backupPaths[0];
+  assert.equal(statSync(backupPath).mode & 0o777, 0o600);
+  runPgTool(pg.pg_restore, ["--list", backupPath]);
+
+  const restoreEnv = makeRestoreService(path.join(backupFixture.state, "tmp"), {
+    port,
+    database: "release_restore",
+    password,
+  });
+  assert.equal(statSync(restoreEnv.PGSERVICEFILE).mode & 0o777, 0o600);
+  const restorePassfile = readFileSync(restoreEnv.PGSERVICEFILE, "utf8").match(/^passfile=(.+)$/m)?.[1];
+  assert.ok(restorePassfile);
+  assert.equal(statSync(restorePassfile).mode & 0o777, 0o600);
+  runPgTool(pg.pg_restore, [
+    "--clean", "--if-exists", "--no-owner", "--no-acl",
+    "--dbname", "service=multica_restore",
+    backupPath,
+  ], { env: restoreEnv });
+  const restored = runPgTool(pg.psql, [
+    "-XAtq", "-v", "ON_ERROR_STOP=1", "-c", "SELECT payload FROM release_sample WHERE id = 42",
+  ], { env: restoreEnv });
+  assert.equal(restored.trim(), "restored from the custom archive");
+
+  const probeUrl = uriFor("release_probe");
+  const probeFixture = withFixture(t, "real_pg_probe", probeUrl);
+  configureRealFixture(probeFixture, "release_probe");
+  const probeRelease = runRelease(probeFixture);
+  assert.notEqual(probeRelease.status, 0);
+  const probeCommands = log(probeFixture);
+  assert.ok(hasCommand(probeCommands, "psql libpq configuration secure"));
+  assert.ok(!hasCommand(probeCommands, "systemctl stop"));
+  assert.ok(!hasCommand(probeCommands, "migrate up"));
+  assert.ok(!hasCommand(probeCommands, "pg_dump"));
+  assert.match(`${probeRelease.stdout}\n${probeRelease.stderr}`, /bounded per-process queue|in-process queue/i);
+  assert.deepEqual(readdirSync(path.join(probeFixture.state, "tmp")), []);
+
+  for (const [release, commands, url] of [
+    [backupRelease, backupCommands, backupUrl],
+    [probeRelease, probeCommands, probeUrl],
+  ]) {
+    const observed = `${release.stdout}\n${release.stderr}\n${commands.join("\n")}`;
+    assert.ok(!observed.includes(password));
+    assert.ok(!observed.includes(url));
+  }
 });

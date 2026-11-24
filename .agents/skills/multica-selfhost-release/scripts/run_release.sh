@@ -314,6 +314,8 @@ cutover_had_multica=0
 cutover_had_migrate=0
 release_smoke_url="$PUBLIC_URL"
 cutover_state_file="$REMOTE_DIR/.gitlab-vcs-cutover.state"
+pg_service_file=""
+pg_password_file=""
 
 json_field() {
   node -e '
@@ -346,6 +348,151 @@ load_workspace_env() {
     return 1
   fi
 }
+
+cleanup_pg_connection() {
+  [ -z "$pg_password_file" ] || rm -f -- "$pg_password_file"
+  [ -z "$pg_service_file" ] || rm -f -- "$pg_service_file"
+  pg_password_file=""
+  pg_service_file=""
+}
+
+prepare_pg_connection() {
+  # libpq treats a service's dbname as a literal; split URI fields into the service and keep its password in a private passfile.
+  [ -n "$pg_service_file" ] && return 0
+  local previous_umask
+  previous_umask="$(umask)"
+  umask 077
+  pg_service_file="$(mktemp "${TMPDIR:-/tmp}/multica-pg-service.XXXXXX")"
+  pg_password_file="$(mktemp "${TMPDIR:-/tmp}/multica-pg-password.XXXXXX")"
+  chmod 0600 "$pg_service_file" "$pg_password_file"
+  umask "$previous_umask"
+
+  if ! node - "$pg_service_file" "$pg_password_file" <<'PGURL'
+const fs = require("node:fs");
+const servicePath = process.argv[2];
+const passwordPath = process.argv[3];
+const values = new Map();
+
+try {
+  const uri = process.env.DATABASE_URL || "";
+  const prefix = /^postgres(?:ql)?:\/\//i;
+  if (!prefix.test(uri)) throw new Error();
+  const rest = uri.replace(prefix, "");
+  const queryIndex = rest.indexOf("?");
+  const addressAndPath = queryIndex < 0 ? rest : rest.slice(0, queryIndex);
+  const rawQuery = queryIndex < 0 ? "" : rest.slice(queryIndex + 1);
+  const slashIndex = addressAndPath.indexOf("/");
+  let authority = slashIndex < 0 ? addressAndPath : addressAndPath.slice(0, slashIndex);
+  const rawDatabase = slashIndex < 0 ? "" : addressAndPath.slice(slashIndex + 1);
+  const decode = (value) => {
+    const decoded = decodeURIComponent(value);
+    if (decoded.includes("\0")) throw new Error();
+    return decoded;
+  };
+
+  const userInfoIndex = authority.indexOf("@");
+  if (userInfoIndex >= 0) {
+    const userInfo = authority.slice(0, userInfoIndex);
+    authority = authority.slice(userInfoIndex + 1);
+    const colonIndex = userInfo.indexOf(":");
+    const user = colonIndex < 0 ? userInfo : userInfo.slice(0, colonIndex);
+    const password = colonIndex < 0 ? null : userInfo.slice(colonIndex + 1);
+    if (user !== "") values.set("user", decode(user));
+    if (password !== null && password !== "") values.set("password", decode(password));
+  }
+
+  const hosts = [];
+  const ports = [];
+  let hasPort = false;
+  let position = 0;
+  while (position < authority.length) {
+    let rawHost;
+    let rawPort = null;
+    if (authority[position] === "[") {
+      const closingBracket = authority.indexOf("]", position + 1);
+      if (closingBracket < 0 || closingBracket === position + 1) throw new Error();
+      rawHost = authority.slice(position + 1, closingBracket);
+      position = closingBracket + 1;
+      if (position < authority.length && authority[position] === ":") {
+        const start = ++position;
+        while (position < authority.length && authority[position] !== ",") position++;
+        rawPort = authority.slice(start, position);
+      } else if (position < authority.length && authority[position] !== ",") {
+        throw new Error();
+      }
+    } else {
+      const start = position;
+      while (position < authority.length && authority[position] !== ":" && authority[position] !== ",") position++;
+      rawHost = authority.slice(start, position);
+      if (position < authority.length && authority[position] === ":") {
+        const portStart = ++position;
+        while (position < authority.length && authority[position] !== ",") position++;
+        rawPort = authority.slice(portStart, position);
+      }
+    }
+    hosts.push(decode(rawHost));
+    ports.push(rawPort === null ? "" : decode(rawPort));
+    if (rawPort !== null) hasPort = true;
+    if (position < authority.length) {
+      if (authority[position] !== "," || position + 1 === authority.length) throw new Error();
+      position++;
+    }
+  }
+  if (hosts.join(",") !== "") values.set("host", hosts.join(","));
+  if (hasPort) values.set("port", ports.join(","));
+  if (rawDatabase !== "") values.set("dbname", decode(rawDatabase));
+
+  if (rawQuery !== "") {
+    for (const parameter of rawQuery.split("&")) {
+      const equalsIndex = parameter.indexOf("=");
+      if (equalsIndex < 1) throw new Error();
+      let key = decode(parameter.slice(0, equalsIndex));
+      let value = decode(parameter.slice(equalsIndex + 1));
+      if (key === "ssl" && (value === "true" || value === "false")) {
+        key = "sslmode";
+        value = value === "true" ? "require" : "disable";
+      }
+      if (key === "service") throw new Error();
+      values.set(key, value);
+    }
+  }
+
+  const password = values.get("password");
+  values.delete("password");
+  if (password) {
+    if (/[\r\n]/.test(password)) throw new Error();
+    const escapedPassword = password.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
+    fs.writeFileSync(passwordPath, `*:*:*:*:${escapedPassword}\n`, { mode: 0o600 });
+    values.set("passfile", passwordPath);
+  }
+
+  const lines = [];
+  for (const [key, value] of values) {
+    if (!/^[a-z_][a-z0-9_]*$/.test(key) || /[\0\r\n]/.test(value) || /^\s|\s$/.test(value)) throw new Error();
+    const line = `${key}=${value}`;
+    if (Buffer.byteLength(`${line}\n`, "utf8") >= 1023) throw new Error();
+    lines.push(line);
+  }
+  fs.writeFileSync(servicePath, `[multica_cutover]\n${lines.join("\n")}\n`, { mode: 0o600 });
+} catch {
+  process.exitCode = 1;
+}
+PGURL
+  then
+    cleanup_pg_connection
+    echo "Workspace DATABASE_URL is not a supported PostgreSQL connection URI; refusing database access." >&2
+    return 1
+  fi
+  chmod 0600 "$pg_service_file" "$pg_password_file"
+}
+
+run_workspace_pg() (
+  unset DATABASE_URL REDIS_URL GITLAB_BASE_URL GITLAB_TOKEN GITLAB_WEBHOOK_SECRET \
+    GITLAB_PROXY_URL MULTICA_VCS_INTEGRATION_ENABLED MULTICA_VCS_SECRET_KEY MULTICA_PUBLIC_URL \
+    MULTICA_RELEASE_SYSTEM_HOOK_ATTESTATION
+  for variable in ${!PG@}; do unset "$variable"; done
+  PGSERVICEFILE="$pg_service_file" PGSERVICE=multica_cutover "$@"
+)
 
 read_cutover_record() {
   cutover_record_head=""
@@ -618,6 +765,7 @@ restore_release_on_exit() {
   local status="$?"
   local state_json state_status state_phase state_maintenance state_generation
   trap - EXIT
+  cleanup_pg_connection
   if [ "$status" -eq 0 ] || [ "$release_complete" = "1" ]; then exit "$status"; fi
   if [ "$cutover_finalized" = "1" ]; then
     echo "GitLab cutover is finalized and normal writes may be open. Do not restore the old database or binaries; keep the pinned new release and investigate forward." >&2
@@ -931,7 +1079,8 @@ SELECT CASE
 END;
 SQL
 )"
-  if ! legacy_data="$(PGDATABASE="$DATABASE_URL" psql -XAtq -v ON_ERROR_STOP=1 <<<"$legacy_data_sql" 2>/dev/null)"; then
+  prepare_pg_connection || exit 7
+  if ! legacy_data="$(run_workspace_pg psql -XAtq -v ON_ERROR_STOP=1 <<<"$legacy_data_sql" 2>/dev/null)"; then
     echo "GitLab cutover is blocked before stopping services: the read-only legacy-schema check could not determine whether old tables are absent, empty, partial, or contain data. Resolve the database/schema error and retry; no service, migration, or Hook changes were made." >&2
     exit 7
   fi
@@ -1016,6 +1165,9 @@ if [ "$no_op" = "false" ]; then
   echo "This cutover requires genuine MR, pipeline, job, and note deliveries for every affected project; the release does not synthesize events or use a Hook test trigger. GitLab before 16.11 lacks the project Hook test-trigger API and before 17.3 lacks delivery-history API. Prepare operators and safe real event actions before maintenance; after Hook switch, perform those genuine events while the new endpoint remains gated. Verification stays gated until required receipts are persisted and reconciled; missing evidence can extend downtime." >&2
 fi
 
+if [ "$no_op" = "false" ]; then
+  prepare_pg_connection
+fi
 services_stopped=1
 sudo systemctl stop multica-frontend multica-backend
 if [ "$no_op" = "true" ]; then
@@ -1050,7 +1202,7 @@ else
       if [ ! -s "$cutover_dir/database.dump" ]; then
         backup_tmp="$cutover_dir/database.dump.tmp.$$"
         rm -f "$backup_tmp"
-        if ! PGDATABASE="$DATABASE_URL" pg_dump --format=custom --no-owner --no-acl --no-password --file="$backup_tmp"; then
+        if ! run_workspace_pg pg_dump --format=custom --no-owner --no-acl --no-password --file="$backup_tmp" 2>/dev/null; then
           rm -f "$backup_tmp"
           echo "Pre-cutover database backup failed; no GitLab data migration or Hook update was started." >&2
           exit 7

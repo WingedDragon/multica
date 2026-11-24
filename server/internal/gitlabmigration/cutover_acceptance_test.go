@@ -535,7 +535,7 @@ func TestGitLabCutoverEndToEndAcceptance(t *testing.T) {
 		f.addInstance(source.instance, source.token, "gitlab-user-"+source.instance, map[int64]string{source.projectID: source.path})
 		f.addHook(source.instance, source.projectID, cutoverAcceptanceHook{
 			ID: source.hookID, URL: cutoverAcceptanceLegacyHookURL(source.legacyConnectionID), Token: source.legacySecret,
-			MergeRequestsEvents: true, PipelineEvents: true, JobEvents: true, NoteEvents: true, EnableSSLVerification: true,
+			MergeRequestsEvents: true, PipelineEvents: true, JobEvents: source != sources[0], NoteEvents: source != sources[0], EnableSSLVerification: true,
 		})
 		seedCutoverLegacySource(t, f, source)
 	}
@@ -617,6 +617,9 @@ func TestGitLabCutoverEndToEndAcceptance(t *testing.T) {
 		if hook.Token != source.unifiedSecret {
 			t.Fatalf("Hook %d token was not rotated to the workspace VCS secret", source.hookID)
 		}
+		if !hook.MergeRequestsEvents || !hook.PipelineEvents || !hook.JobEvents || !hook.NoteEvents {
+			t.Fatalf("Hook %d did not enable all GitLab event types", source.hookID)
+		}
 		parsed, parseErr := url.Parse(hook.URL)
 		if parseErr != nil || parsed.Path != "/api/webhooks/vcs/"+source.unifiedConnectionID ||
 			parsed.Query().Get("scope_type") != "project" || parsed.Query().Get("scope_id") != strconv.FormatInt(source.projectID, 10) ||
@@ -636,6 +639,9 @@ func TestGitLabCutoverEndToEndAcceptance(t *testing.T) {
 	assertCutoverReceiptCounts(t, f.pool, 0, 0, 0)
 
 	since := time.Now().UTC().Add(-time.Minute)
+	if err := f.runner.VerifyHooks(ctx, since); err == nil {
+		t.Fatal("verification without deliveries succeeded")
+	}
 	events := []string{"Merge Request Hook", "Pipeline Hook", "Job Hook", "Note Hook"}
 	for _, source := range sources {
 		hook, _ := f.remoteHook(source.instance, source.projectID, source.hookID)
@@ -1145,11 +1151,8 @@ func TestGitLabCutoverRestoreAfterRemoteHookFailure(t *testing.T) {
 	}
 	first, ok := f.remoteHook("restore-instance", 77, 811)
 	if !ok || first.URL == legacyHooks[0].URL || first.Token != newSecret ||
-		first.MergeRequestsEvents != legacyHooks[0].MergeRequestsEvents ||
-		first.PipelineEvents != legacyHooks[0].PipelineEvents ||
-		first.JobEvents != legacyHooks[0].JobEvents ||
-		first.NoteEvents != legacyHooks[0].NoteEvents {
-		t.Fatalf("first Hook update changed its configured events: found=%v hook=%+v original=%+v", ok, first, legacyHooks[0])
+		!first.MergeRequestsEvents || !first.PipelineEvents || !first.JobEvents || !first.NoteEvents {
+		t.Fatalf("first Hook did not enable required events: found=%v hook=%+v", ok, first)
 	}
 	second, ok := f.remoteHook("restore-instance", 78, 812)
 	if !ok || second.URL != legacyHooks[1].URL || second.Token != oldSecret {

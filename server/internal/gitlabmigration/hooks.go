@@ -149,6 +149,11 @@ func (r *Runner) SwitchHooks(ctx context.Context) error {
 					continue
 				}
 				body := hookUpdateBody(remote, target)
+				if hook.Managed {
+					for _, field := range hookEventFields {
+						body[field] = true
+					}
+				}
 				body["token"] = connection.WebhookSecret
 				updated, err := connection.API.updateHook(ctx, hook.ScopeType, scopeNumericID(hook), remoteID, body)
 				if err != nil || !hookURLMatches(hookURL(updated), target) {
@@ -190,6 +195,11 @@ func (r *Runner) SwitchHooks(ctx context.Context) error {
 			}
 		}
 		body := hookUpdateBody(remote, target)
+		if hook.Managed {
+			for _, field := range hookEventFields {
+				body[field] = true
+			}
+		}
 		if hook.LegacyID > 0 {
 			if hook.PreviousSecretEncrypted == "" {
 				err := fmt.Errorf("legacy GitLab Hook %d has no recoverable secret", remoteID)
@@ -571,7 +581,6 @@ func (r *Runner) VerifyHooks(ctx context.Context, since time.Time) error {
 		sort.Strings(missing)
 		if len(missing) != 0 {
 			failures = append(failures, fmt.Errorf("GitLab %s Hook %d has enabled event types without real reconciled deliveries since %s: %s", hook.ScopeType, hookID, since.UTC().Format(time.RFC3339), strings.Join(missing, ", ")))
-			_ = r.markHookFailure(ctx, hook, "enabled event types are missing real reconciled deliveries")
 			continue
 		}
 		if _, err := r.pool.Exec(ctx, `

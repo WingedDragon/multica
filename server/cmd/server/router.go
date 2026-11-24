@@ -2082,6 +2082,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/gitlab/projects/{bindingId}/refresh", h.RefreshGitLabProjectBinding)
 					r.Delete("/gitlab/projects/{bindingId}", h.DeleteGitLabProjectBinding)
 					r.Post("/vcs/gitlab/projects", h.CreateVCSGitLabProject)
+					r.Get("/vcs/gitlab/groups/projects", h.ListVCSGitLabGroupProjects)
 					r.Post("/vcs/gitlab/projects/{projectId}/refresh", h.RefreshVCSGitLabProject)
 					r.Delete("/vcs/gitlab/projects/{projectId}", h.DeleteVCSGitLabProject)
 					// VCS connect / disconnect / webhook regeneration (admin-only).

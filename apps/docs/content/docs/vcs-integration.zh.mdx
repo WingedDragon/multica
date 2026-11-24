@@ -129,6 +129,8 @@ GitLab 管理员也可以配置实例级 [System Hook](https://docs.gitlab.com/a
 添加项目时，Multica 会验证连接令牌能否读取项目，并尝试注册 MR、Pipeline、Job 和 Note Hook；Hook 状态与失败原因会保留并显示。`read_api` 令牌可读取 GitLab 数据，但不能创建或更改 Hook；应使用具有 `api` scope 且有权管理项目 Hook 的令牌，或请对应的 GitLab 管理员配置项目、群组或 System Hook。System Hook 事件仍受工作区项目清单和令牌可读性检查约束。
 
 移除项目后，Multica 不再使用该项目绑定。刷新项目只会更新本地已镜像的 MR，不保证发现所有历史 MR。
+重新生成某个 GitLab 连接的 Webhook 密钥时，Multica 会更新该连接下每个已登记、由 Multica 管理的项目 Hook（以数据库保存的 Hook ID 为准），同时保留各 Hook 原有的 URL 和事件设置。GitLab 拒绝更新或无法连接时，Multica 会列出受影响的项目，不会显示为全部更新成功。断开连接时，Multica 只删除该连接下已登记的受管项目 Hook；手工创建或未登记的 Hook 不会删除。删除因权限不足或网络故障失败时，会按项目列明失败，不会显示为清理完毕。
+要从 GitLab 群组添加项目，请输入群组路径或当前连接实例中的群组 URL。Multica 会弹出选择器，列出该连接令牌可见的项目（包括子群组中的项目），供你多选并导入。每个导入项目都会单独建立绑定，并分别尝试注册受管的项目 Hook。这不是创建 GitLab Group Webhook；该群组以后新增的项目也不会自动发现或导入。
 
 ## 升级现有 GitLab 集成
 

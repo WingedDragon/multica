@@ -129,6 +129,8 @@ AI 代理建立 PR 不需要在 Multica 中做任何程式碼託管配置。AI �
 新增專案時，Multica 會驗證連線令牌能否讀取專案，並嘗試註冊 MR、Pipeline、Job 和 Note Hook；Hook 狀態和失敗原因會保留並顯示。`read_api` 令牌可讀取 GitLab 資料，但不能建立或修改 Hook；受管理的專案 Hook 需要 `api` scope，且令牌持有人須是有權管理專案 Hook 的 GitLab Administrator、Maintainer 或 Owner。群組 Hook 需要 GitLab 管理員或群組 Owner，System Hook 需要 GitLab 執行個體管理員。System Hook 事件仍受工作區專案清單和令牌可讀性檢查限制。
 
 移除專案後，Multica 不再使用該專案綁定。刷新專案只會更新本地已映象的 MR，不保證發現所有歷史 MR。
+重新產生某個 GitLab 連線的 Webhook 金鑰時，Multica 會更新該連線下每個已登記、由 Multica 管理的專案 Hook（以資料庫儲存的 Hook ID 為準），同時保留各 Hook 原有的 URL 和事件設定。GitLab 拒絕更新或無法連線時，Multica 會列出受影響的專案，不會顯示為全部更新成功。中斷連線時，Multica 只刪除該連線下已登記的受管理專案 Hook；手動建立或未登記的 Hook 不會刪除。刪除因權限不足或網路故障而失敗時，會按專案列出失敗，不會顯示為清理完成。
+若要從 GitLab 群組新增專案，請輸入群組路徑或目前連線執行個體中的群組 URL。Multica 會開啟選擇器，列出該連線令牌可見的專案（包括子群組中的專案），供你多選並匯入。每個匯入專案都會個別建立綁定，並分別嘗試註冊受管理的專案 Hook。這不是建立 GitLab Group Webhook；該群組日後新增的專案也不會自動發現或匯入。
 
 ## 升級現有 GitLab 整合
 

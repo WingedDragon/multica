@@ -53,6 +53,15 @@ func (f *fakeGitLabAPI) CreateProjectHook(context.Context, int64, string, string
 	}
 	return gitlab.ProjectHook{ID: f.createHookID}, nil
 }
+func (f *fakeGitLabAPI) GetProjectHook(context.Context, int64, int64) (gitlab.ProjectHook, error) {
+	return gitlab.ProjectHook{}, nil
+}
+func (f *fakeGitLabAPI) GetCurrentUserName(context.Context) (string, error) {
+	return "GitLab user", nil
+}
+func (f *fakeGitLabAPI) UpdateProjectHookSecret(context.Context, int64, int64, string, string, string) error {
+	return nil
+}
 
 func (f *fakeGitLabAPI) DeleteProjectHook(context.Context, int64, int64) error {
 	f.deleteHookCalls++

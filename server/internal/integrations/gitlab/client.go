@@ -24,8 +24,13 @@ const (
 	gitLabMaxTraceReadSize = 1 << 20
 )
 
+const ProjectHookSuffix = " Multica Hook"
+
 // ErrUnauthorized indicates that GitLab rejected the supplied access token.
 var ErrUnauthorized = errors.New("gitlab token invalid")
+
+// ErrNotFound indicates that GitLab could not find the requested resource.
+var ErrNotFound = errors.New("gitlab resource not found")
 
 type Client struct {
 	cfg        Config
@@ -193,7 +198,12 @@ func (c *Client) DownloadJobArtifacts(ctx context.Context, projectID, jobID int6
 }
 
 func (c *Client) CreateProjectHook(ctx context.Context, projectID int64, webhookURL, secret string) (ProjectHook, error) {
+	userName, err := c.GetCurrentUserName(ctx)
+	if err != nil {
+		return ProjectHook{}, err
+	}
 	body := map[string]any{
+		"name":                  userName + ProjectHookSuffix,
 		"url":                   webhookURL,
 		"token":                 secret,
 		"merge_requests_events": true,
@@ -202,8 +212,31 @@ func (c *Client) CreateProjectHook(ctx context.Context, projectID int64, webhook
 		"note_events":           true,
 	}
 	var out ProjectHook
-	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/api/v4/projects/%d/hooks", projectID), body, &out)
+	err = c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/api/v4/projects/%d/hooks", projectID), body, &out)
 	return out, err
+}
+
+func (c *Client) GetCurrentUserName(ctx context.Context) (string, error) {
+	var user struct {
+		Name string `json:"name"`
+	}
+	err := c.doJSON(ctx, http.MethodGet, "/api/v4/user", nil, &user)
+	return user.Name, err
+}
+
+func (c *Client) GetProjectHook(ctx context.Context, projectID, hookID int64) (ProjectHook, error) {
+	var out ProjectHook
+	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/api/v4/projects/%d/hooks/%d", projectID, hookID), nil, &out)
+	return out, err
+}
+
+func (c *Client) UpdateProjectHookSecret(ctx context.Context, projectID, hookID int64, webhookURL, secret, name string) error {
+	body := struct {
+		URL   string `json:"url"`
+		Token string `json:"token"`
+		Name  string `json:"name"`
+	}{URL: webhookURL, Token: secret, Name: name}
+	return c.doJSON(ctx, http.MethodPut, fmt.Sprintf("/api/v4/projects/%d/hooks/%d", projectID, hookID), body, nil)
 }
 
 func (c *Client) DeleteProjectHook(ctx context.Context, projectID, hookID int64) error {
@@ -296,7 +329,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, in any) (*http.
 		case http.StatusForbidden:
 			return nil, errors.New("gitlab token lacks required project permission")
 		case http.StatusNotFound:
-			return nil, errors.New("gitlab resource not found")
+			return nil, ErrNotFound
 		case http.StatusTooManyRequests:
 			return nil, errors.New("gitlab rate limited")
 		default:

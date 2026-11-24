@@ -11,7 +11,9 @@ type Project struct {
 }
 
 type ProjectHook struct {
-	ID int64 `json:"id"`
+	ID   int64  `json:"id"`
+	URL  string `json:"url"`
+	Name string `json:"name"`
 }
 
 type MergeRequest struct {

@@ -283,6 +283,8 @@ export type {
   GitLabProjectBinding,
   GitLabUserRef,
   ListGitLabProjectsResponse,
+  GitLabGroupProject,
+  ListGitLabGroupProjectsResponse,
 } from "./gitlab";
 export type {
   DeclaredEnvironment,

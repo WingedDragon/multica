@@ -5,10 +5,11 @@ import userEvent from "@testing-library/user-event";
 import type { GitLabProjectBinding, VCSConnection } from "@multica/core/types";
 import { renderWithI18n } from "../../test/i18n";
 
-const { createProject, deleteProject, refreshProject } = vi.hoisted(() => ({
+const { createProject, deleteProject, refreshProject, listGroupProjects } = vi.hoisted(() => ({
   createProject: vi.fn(),
   deleteProject: vi.fn(),
   refreshProject: vi.fn(),
+  listGroupProjects: vi.fn(),
 }));
 
 vi.mock("@multica/core/hooks", () => ({ useWorkspaceId: () => "ws-1" }));
@@ -17,6 +18,7 @@ vi.mock("@multica/core/api", () => ({
     createGitLabProject: createProject,
     deleteGitLabProject: deleteProject,
     refreshGitLabProject: refreshProject,
+    listGitLabGroupProjects: listGroupProjects,
   },
 }));
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
@@ -83,6 +85,7 @@ beforeEach(() => {
   createProject.mockResolvedValue({});
   deleteProject.mockResolvedValue(undefined);
   refreshProject.mockResolvedValue({});
+  listGroupProjects.mockResolvedValue({ projects: [] });
 });
 
 describe("GitLab projects within VCS connections", () => {
@@ -184,5 +187,165 @@ describe("GitLab projects within VCS connections", () => {
     const gitlab = connection("connection-a", "https://gitlab.example.test");
     renderRows([gitlab], [], true, false);
     expect(screen.queryByText("No GitLab projects bound yet.")).toBeNull();
+  });
+  it("imports selected group projects, preserves partial failures, and reports manual hooks", async () => {
+    const gitlab = connection("connection-a", "https://gitlab.example.test");
+    listGroupProjects.mockResolvedValue({
+      projects: [
+        {
+          id: 1,
+          path_with_namespace: "team/already-bound",
+          web_url: "https://gitlab.example.test/team/already-bound",
+        },
+        {
+          id: 2,
+          path_with_namespace: "team/manual-hook",
+          web_url: "https://gitlab.example.test/team/manual-hook",
+        },
+        {
+          id: 3,
+          path_with_namespace: "team/retry-me",
+          web_url: "https://gitlab.example.test/team/retry-me",
+        },
+      ],
+    });
+    createProject
+      .mockResolvedValueOnce({ project: { hook_enabled: false } })
+      .mockRejectedValueOnce(new Error("Permission denied"))
+      .mockResolvedValue({ project: { hook_enabled: true } });
+    const user = userEvent.setup();
+    renderRows(
+      [gitlab],
+      [
+        project("project-bound", gitlab.id, {
+          gitlab_project_id: 1,
+          path_with_namespace: "team/already-bound",
+        }),
+      ],
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Choose projects from a group" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByPlaceholderText("Group path or URL"), "team");
+    await user.click(within(dialog).getByRole("button", { name: "Search" }));
+    expect(
+      await within(dialog).findByRole("link", { name: "team/already-bound" }),
+    ).toBeInTheDocument();
+
+    const boundProjectCheckbox = within(dialog).getByRole("checkbox", {
+      name: "team/already-bound",
+    });
+    expect(boundProjectCheckbox).toHaveAttribute("aria-disabled", "true");
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Select all available projects",
+      }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Import selected (2)" }),
+    );
+
+    expect(
+      await within(dialog).findByText(
+        "Added, but manual webhook setup is required for:",
+      ),
+    ).toBeInTheDocument();
+    const failures = within(dialog).getByRole("alert");
+    expect(within(failures).getByText("team/retry-me")).toBeInTheDocument();
+    expect(within(failures).getByText(/Permission denied/)).toBeInTheDocument();
+    expect(within(dialog).getAllByText("Already added")).toHaveLength(2);
+    expect(createProject).toHaveBeenNthCalledWith(1, "ws-1", {
+      connection_id: gitlab.id,
+      project: "team/manual-hook",
+    });
+    expect(createProject).toHaveBeenNthCalledWith(2, "ws-1", {
+      connection_id: gitlab.id,
+      project: "team/retry-me",
+    });
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Import selected (1)" }),
+    );
+    await waitFor(() =>
+      expect(within(dialog).getByRole("checkbox", { name: "team/retry-me" })).toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+    expect(
+      within(dialog).getByText(
+        "Added, but manual webhook setup is required for:",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not create projects when a group selection is canceled", async () => {
+    const gitlab = connection("connection-a", "https://gitlab.example.test");
+    listGroupProjects.mockResolvedValue({
+      projects: [
+        {
+          id: 42,
+          path_with_namespace: "team/new-project",
+          web_url: "https://gitlab.example.test/team/new-project",
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    renderRows([gitlab], []);
+
+    await user.click(
+      screen.getByRole("button", { name: "Choose projects from a group" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByPlaceholderText("Group path or URL"), "team");
+    await user.click(within(dialog).getByRole("button", { name: "Search" }));
+    await within(dialog).findByRole("checkbox", { name: "team/new-project" });
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "team/new-project" }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
+  it("can retry a failed group lookup", async () => {
+    const gitlab = connection("connection-a", "https://gitlab.example.test");
+    listGroupProjects
+      .mockRejectedValueOnce(new Error("Group unavailable"))
+      .mockResolvedValueOnce({ projects: [] });
+    const user = userEvent.setup();
+    renderRows([gitlab], []);
+
+    await user.click(
+      screen.getByRole("button", { name: "Choose projects from a group" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.type(
+      within(dialog).getByPlaceholderText("Group path or URL"),
+      "team/subgroup",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Search" }));
+    expect(
+      await within(dialog).findByText(
+        /Could not load projects from this group\./,
+      ),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Retry" }));
+    expect(
+      await within(dialog).findByText("No projects found in this group."),
+    ).toBeInTheDocument();
+    expect(listGroupProjects).toHaveBeenNthCalledWith(
+      1,
+      "ws-1",
+      gitlab.id,
+      "team/subgroup",
+    );
+    expect(listGroupProjects).toHaveBeenNthCalledWith(
+      2,
+      "ws-1",
+      gitlab.id,
+      "team/subgroup",
+    );
   });
 });

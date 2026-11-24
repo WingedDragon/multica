@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/integrations/gitlab"
 )
 
 type migrationConnection struct {
@@ -285,8 +287,14 @@ func (r *Runner) createManagedProjectHook(ctx context.Context, connection migrat
 		}
 	}
 	if created == nil {
+		var user struct {
+			Name string `json:"name"`
+		}
+		if _, err := connection.API.request(ctx, http.MethodGet, "/user", nil, &user); err != nil {
+			return fmt.Errorf("read GitLab Hook owner: %w", err)
+		}
 		body := map[string]any{
-			"url": placeholder, "token": connection.WebhookSecret, "enable_ssl_verification": true,
+			"url": placeholder, "token": connection.WebhookSecret, "enable_ssl_verification": true, "name": user.Name + gitlab.ProjectHookSuffix,
 			"merge_requests_events": true, "pipeline_events": true, "job_events": true, "note_events": true,
 		}
 		created, err = connection.API.createProjectHook(ctx, projectID, body)
@@ -655,7 +663,6 @@ func (r *Runner) verifyHooks(ctx context.Context, since time.Time, requireDelive
 	lockTx = nil
 	return nil
 }
-
 
 func (r *Runner) hookReceipts(ctx context.Context, hook migrationHook, hookID int64, since time.Time) (map[string]string, error) {
 	rows, err := r.pool.Query(ctx, `

@@ -24,6 +24,9 @@ type gitLabAPI interface {
 	GetProject(context.Context, string) (gitlab.Project, error)
 	ValidateCredentials(context.Context) error
 	CreateProjectHook(context.Context, int64, string, string) (gitlab.ProjectHook, error)
+	GetProjectHook(context.Context, int64, int64) (gitlab.ProjectHook, error)
+	GetCurrentUserName(context.Context) (string, error)
+	UpdateProjectHookSecret(context.Context, int64, int64, string, string, string) error
 	DeleteProjectHook(context.Context, int64, int64) error
 }
 

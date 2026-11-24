@@ -22,6 +22,15 @@ export interface GitLabProjectBinding {
 export interface ListGitLabProjectsResponse {
   projects: GitLabProjectBinding[];
 }
+export interface GitLabGroupProject {
+  id: number;
+  path_with_namespace: string;
+  web_url: string;
+}
+
+export interface ListGitLabGroupProjectsResponse {
+  projects: GitLabGroupProject[];
+}
 
 
 

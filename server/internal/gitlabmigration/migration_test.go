@@ -253,6 +253,8 @@ func TestManagedProjectHookCreationIntentClaimsRemoteHookAfterLedgerFailure(t *t
 	var intentObservedBeforeCreate bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/user":
+			_ = json.NewEncoder(w).Encode(map[string]any{"username": "dongzhenxing", "name": "董振兴"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/123/hooks":
 			_ = json.NewEncoder(w).Encode(remoteHooks)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/123/hooks":
@@ -271,7 +273,7 @@ func TestManagedProjectHookCreationIntentClaimsRemoteHookAfterLedgerFailure(t *t
 			`, connectionID).Scan(&target, &createdByTool, &noID)
 			intentObservedBeforeCreate = err == nil && target == placeholder && createdByTool && noID
 			hook := map[string]any{
-				"id": float64(77), "url": body["url"], "merge_requests_events": true,
+				"id": float64(77), "url": body["url"], "name": body["name"], "merge_requests_events": true,
 				"pipeline_events": true, "job_events": true, "note_events": true,
 			}
 			remoteHooks = append(remoteHooks, hook)
@@ -305,6 +307,9 @@ func TestManagedProjectHookCreationIntentClaimsRemoteHookAfterLedgerFailure(t *t
 	}
 	if !intentObservedBeforeCreate || createCalls != 1 || len(remoteHooks) != 1 {
 		t.Fatalf("creation intent/retry evidence = intent %v, POSTs %d, remote Hooks %d", intentObservedBeforeCreate, createCalls, len(remoteHooks))
+	}
+	if remoteHooks[0]["name"] != "董振兴 Multica Hook" {
+		t.Fatalf("created hook name = %v, want authenticated user's name", remoteHooks[0]["name"])
 	}
 	var createdByTool, noID bool
 	var savedTarget, savedState string

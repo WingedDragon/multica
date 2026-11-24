@@ -43,7 +43,7 @@ import {
 } from "@multica/ui/components/ui/dropdown-menu";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { vcsConnectionsOptions } from "@multica/core/vcs";
-import { gitlabProjectsOptions } from "@multica/core/gitlab";
+import { gitlabKeys, gitlabProjectsOptions } from "@multica/core/gitlab";
 import { api } from "@multica/core/api";
 import type { ConnectVCSResponse, VCSProvider } from "@multica/core/types";
 import { useT } from "../../i18n";
@@ -138,6 +138,7 @@ export function VCSConnectionRows() {
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t(($) => $.vcs.toast_disconnect_failed));
     } finally {
+      await qc.invalidateQueries({ queryKey: gitlabKeys.projects(wsId) });
       setDeleting(false);
     }
   }

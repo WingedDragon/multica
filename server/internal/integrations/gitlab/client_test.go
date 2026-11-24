@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -136,6 +137,154 @@ func TestGetProjectEncodesPathWithNamespace(t *testing.T) {
 	}
 	if project.HTTPURLToRepo != "https://code.mlamp.cn/group/repo.git" || project.SSHURLToRepo != "git@code.mlamp.cn:group/repo.git" {
 		t.Fatalf("project clone URLs = http %q ssh %q", project.HTTPURLToRepo, project.SSHURLToRepo)
+	}
+}
+
+func TestCreateProjectHookIdentifiesMultica(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v4/user" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"董振兴","username":"dongzhenxing"}`))
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v4/projects/42/hooks" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":123}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CreateProjectHook(context.Background(), 42, "https://multica.example/hook", "secret"); err != nil {
+		t.Fatalf("create project hook: %v", err)
+	}
+	if body["name"] != "董振兴 Multica Hook" {
+		t.Fatalf("webhook name = %v, want authenticated user's name", body["name"])
+	}
+}
+
+func TestGetProjectHook(t *testing.T) {
+	const webhookURL = "https://multica.example/hook?tenant=acme&mode=full"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v4/projects/42/hooks/123" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != "token" {
+			t.Errorf("PRIVATE-TOKEN = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":123,"url":"https://multica.example/hook?tenant=acme&mode=full"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := client.GetProjectHook(context.Background(), 42, 123)
+	if err != nil {
+		t.Fatalf("get project hook: %v", err)
+	}
+	if hook.ID != 123 || hook.URL != webhookURL {
+		t.Fatalf("project hook = %+v", hook)
+	}
+}
+
+func TestUpdateProjectHookSecret(t *testing.T) {
+	const webhookURL = "https://multica.example/hook?tenant=acme&mode=full"
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != "token" {
+			t.Errorf("PRIVATE-TOKEN = %q", got)
+		}
+		if r.Method == http.MethodGet {
+			if r.URL.Path != "/api/v4/projects/42/hooks/123" {
+				t.Errorf("GET path = %q", r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":123,"url":"https://multica.example/hook?tenant=acme&mode=full"}`))
+			return
+		}
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if gotMethod != http.MethodPut || gotPath != "/api/v4/projects/42/hooks/123" {
+			t.Errorf("unexpected request: %s %s", gotMethod, gotPath)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	hook, err := client.GetProjectHook(ctx, 42, 123)
+	if err != nil {
+		t.Fatalf("get project hook: %v", err)
+	}
+	if hook.URL != webhookURL {
+		t.Fatalf("hook URL = %q, want %q", hook.URL, webhookURL)
+	}
+	if err := client.UpdateProjectHookSecret(ctx, 42, hook.ID, hook.URL, "new-secret", "Alice Multica Hook"); err != nil {
+		t.Fatalf("update project hook secret: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("method = %q, want %q", gotMethod, http.MethodPut)
+	}
+	if gotPath != "/api/v4/projects/42/hooks/123" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotBody["url"] != webhookURL || gotBody["token"] != "new-secret" || gotBody["name"] != "Alice Multica Hook" {
+		t.Fatalf("request body = %+v", gotBody)
+	}
+	if len(gotBody) != 3 {
+		t.Fatalf("request body changed unrelated hook settings: %+v", gotBody)
+	}
+}
+
+func TestUpdateProjectHookSecretReturnsServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("hook update failed"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.UpdateProjectHookSecret(context.Background(), 42, 123, "https://multica.example/hook", "new-secret", "Alice Multica Hook")
+	if err == nil || !strings.Contains(err.Error(), "hook update failed") {
+		t.Fatalf("UpdateProjectHookSecret error = %v, want server error", err)
+	}
+}
+
+func TestDeleteProjectHookReturnsNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.DeleteProjectHook(context.Background(), 42, 123)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("DeleteProjectHook error = %v, want ErrNotFound", err)
 	}
 }
 

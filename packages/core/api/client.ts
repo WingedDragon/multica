@@ -238,6 +238,7 @@ import type {
   GitLabMergeRequestDetailsResponse,
   GitLabProjectRefreshResponse,
   ListGitLabProjectsResponse,
+  ListGitLabGroupProjectsResponse,
   ListVCSConnectionsResponse,
   ConnectVCSRequest,
   ConnectVCSResponse,
@@ -610,6 +611,8 @@ import {
   GitLabMergeRequestDetailsResponseSchema,
   GitLabProjectRefreshResponseSchema,
   ListGitLabProjectsResponseSchema,
+  EMPTY_LIST_GITLAB_GROUP_PROJECTS_RESPONSE,
+  ListGitLabGroupProjectsResponseSchema,
   GitHubConnectResponseSchema,
   ListGitHubInstallationsResponseSchema,
   ListGitHubRepositoriesResponseSchema,
@@ -6115,6 +6118,25 @@ export class ApiClient {
       ListGitLabProjectsResponseSchema,
       EMPTY_LIST_GITLAB_PROJECTS_RESPONSE,
       { endpoint: "GET /api/workspaces/:id/vcs/gitlab/projects" },
+    );
+  }
+
+  async listGitLabGroupProjects(
+    workspaceId: string,
+    connectionId: string,
+    group: string,
+  ): Promise<ListGitLabGroupProjectsResponse> {
+    const search = new URLSearchParams({
+      connection_id: connectionId,
+      group,
+    });
+    const endpoint = `/api/workspaces/${encodeURIComponent(workspaceId)}/vcs/gitlab/groups/projects?${search.toString()}`;
+    const raw = await this.fetch<unknown>(endpoint);
+    return parseWithFallback(
+      raw,
+      ListGitLabGroupProjectsResponseSchema,
+      EMPTY_LIST_GITLAB_GROUP_PROJECTS_RESPONSE,
+      { endpoint: "GET /api/workspaces/:id/vcs/gitlab/groups/projects" },
     );
   }
 

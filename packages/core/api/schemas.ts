@@ -59,6 +59,7 @@ import type {
   CronPreviewResponse,
   CreateGitLabProjectResponse,
   ListGitLabProjectsResponse,
+  ListGitLabGroupProjectsResponse,
   GitLabJobTraceResponse,
   GitLabMergeRequest,
   GitLabMergeRequestDetailsResponse,
@@ -3757,6 +3758,24 @@ export const ListGitLabProjectsResponseSchema = z
   .loose();
 
 export const EMPTY_LIST_GITLAB_PROJECTS_RESPONSE: ListGitLabProjectsResponse = {
+  projects: [],
+};
+
+export const GitLabGroupProjectSchema = z
+  .object({
+    id: z.number(),
+    path_with_namespace: z.string(),
+    web_url: z.string(),
+  })
+  .loose();
+
+export const ListGitLabGroupProjectsResponseSchema = z
+  .object({
+    projects: z.array(GitLabGroupProjectSchema).default([]),
+  })
+  .loose();
+
+export const EMPTY_LIST_GITLAB_GROUP_PROJECTS_RESPONSE: ListGitLabGroupProjectsResponse = {
   projects: [],
 };
 

@@ -232,6 +232,25 @@ func (h *Handler) ConnectVCS(w http.ResponseWriter, r *http.Request) {
 	if member, ok := middleware.MemberFromContext(r.Context()); ok {
 		connectedBy = member.UserID
 	}
+	var rollbackHooks func() error
+	if provider.Kind() == vcs.KindGitLab {
+		connections, err := h.Queries.ListVCSConnectionsByWorkspace(r.Context(), wsUUID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load vcs connections")
+			return
+		}
+		for _, existing := range connections {
+			if existing.Provider == "gitlab" && existing.InstanceUrl == instanceURL {
+				existing.AccessTokenEncrypted = tokenEnc
+				rollbackHooks, err = h.rotateManagedGitLabHooks(r.Context(), existing, webhookSecret)
+				if err != nil {
+					writeError(w, http.StatusBadGateway, gitLabHookFailureMessage("rotation", err))
+					return
+				}
+				break
+			}
+		}
+	}
 
 	conn, err := h.Queries.UpsertVCSConnection(r.Context(), db.UpsertVCSConnectionParams{
 		WorkspaceID:            wsUUID,
@@ -243,6 +262,12 @@ func (h *Handler) ConnectVCS(w http.ResponseWriter, r *http.Request) {
 		ConnectedByID:          connectedBy,
 	})
 	if err != nil {
+		if rollbackHooks != nil {
+			if rollbackErr := rollbackHooks(); rollbackErr != nil {
+				writeError(w, http.StatusBadGateway, gitLabHookFailureMessage("rollback", rollbackErr))
+				return
+			}
+		}
 		writeError(w, http.StatusInternalServerError, "failed to save connection")
 		return
 	}
@@ -291,6 +316,17 @@ func (h *Handler) DeleteVCSConnection(w http.ResponseWriter, r *http.Request) {
 	if h.TxStarter == nil {
 		writeError(w, http.StatusInternalServerError, "database transactions are unavailable")
 		return
+	}
+	conn, err := h.Queries.GetVCSConnectionByID(r.Context(), idUUID)
+	if err != nil || conn.WorkspaceID != wsUUID {
+		writeError(w, http.StatusNotFound, "vcs connection not found")
+		return
+	}
+	if conn.Provider == "gitlab" {
+		if err := h.deleteManagedGitLabHooks(r.Context(), conn); err != nil {
+			writeError(w, http.StatusBadGateway, gitLabHookFailureMessage("cleanup", err))
+			return
+		}
 	}
 	tx, err := h.TxStarter.Begin(r.Context())
 	if err != nil {
@@ -362,6 +398,14 @@ func (h *Handler) RotateVCSConnectionWebhook(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to encrypt webhook secret")
 		return
 	}
+	var rollback func() error
+	if conn.Provider == "gitlab" {
+		rollback, err = h.rotateManagedGitLabHooks(r.Context(), conn, webhookSecret)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, gitLabHookFailureMessage("rotation", err))
+			return
+		}
+	}
 
 	updated, err := h.Queries.RotateVCSConnectionWebhookSecret(r.Context(), db.RotateVCSConnectionWebhookSecretParams{
 		ID:                     connUUID,
@@ -369,6 +413,12 @@ func (h *Handler) RotateVCSConnectionWebhook(w http.ResponseWriter, r *http.Requ
 		WebhookSecretEncrypted: secretEnc,
 	})
 	if err != nil {
+		if rollback != nil {
+			if rollbackErr := rollback(); rollbackErr != nil {
+				writeError(w, http.StatusBadGateway, gitLabHookFailureMessage("rollback", rollbackErr))
+				return
+			}
+		}
 		writeError(w, http.StatusInternalServerError, "failed to rotate webhook secret")
 		return
 	}
